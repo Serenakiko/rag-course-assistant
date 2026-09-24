@@ -1,0 +1,160 @@
+"""统计路由：管理员仪表盘数据。"""
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+from fastapi import APIRouter, Depends
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from ..database import get_db
+from ..deps import get_current_user, require_role
+from ..models import Conversation, Document, KnowledgeBase, KnowledgePoint, Message, UnansweredQuestion, User
+from ..schemas import StatsOut
+
+router = APIRouter()
+
+
+@router.get("/me", summary="个人统计（当前用户，工作台）")
+def my_stats(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    conversations = (
+        db.scalar(select(func.count(Conversation.id)).where(Conversation.user_id == user.id)) or 0
+    )
+    messages = (
+        db.scalar(
+            select(func.count(Message.id))
+            .join(Conversation, Message.conversation_id == Conversation.id)
+            .where(Conversation.user_id == user.id)
+        )
+        or 0
+    )
+    knowledge_points = db.scalar(select(func.count(KnowledgePoint.id))) or 0
+    documents_ready = (
+        db.scalar(select(func.count(Document.id)).where(Document.status == "ready")) or 0
+    )
+
+    # 最近 5 个会话（含消息数）
+    recent_rows = db.execute(
+        select(Conversation, func.count(Message.id))
+        .outerjoin(Message, Message.conversation_id == Conversation.id)
+        .where(Conversation.user_id == user.id)
+        .group_by(Conversation.id)
+        .order_by(Conversation.id.desc())
+        .limit(5)
+    ).all()
+    recent = [
+        {
+            "id": c.id,
+            "title": c.title,
+            "created_at": c.created_at,
+            "message_count": count,
+        }
+        for c, count in recent_rows
+    ]
+
+    return {
+        "conversations": conversations,
+        "messages": messages,
+        "knowledge_points": knowledge_points,
+        "documents_ready": documents_ready,
+        "recent_conversations": recent,
+    }
+
+
+@router.get("/admin/stats", response_model=StatsOut, summary="系统统计（管理员）")
+def admin_stats(
+    admin: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+) -> StatsOut:
+    users = db.scalar(select(func.count(User.id))) or 0
+    students = db.scalar(select(func.count(User.id)).where(User.role == "student")) or 0
+    admins = db.scalar(select(func.count(User.id)).where(User.role == "admin")) or 0
+    knowledge_bases = db.scalar(select(func.count(KnowledgeBase.id))) or 0
+    documents = db.scalar(select(func.count(Document.id))) or 0
+    documents_ready = (
+        db.scalar(select(func.count(Document.id)).where(Document.status == "ready")) or 0
+    )
+    knowledge_points = db.scalar(select(func.count(KnowledgePoint.id))) or 0
+    conversations = db.scalar(select(func.count(Conversation.id))) or 0
+    messages = db.scalar(select(func.count(Message.id))) or 0
+
+    # 近 7 天每日会话数（按本地时区 UTC+8 折算）
+    today_local = datetime.now(timezone.utc) + timedelta(hours=8)
+    start_local = today_local.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=6)
+    start_utc = start_local - timedelta(hours=8)
+
+    rows = db.execute(
+        select(
+            func.strftime("%Y-%m-%d", Conversation.created_at, "+8 hours"),
+            func.count(Conversation.id),
+        )
+        .where(Conversation.created_at >= start_utc)
+        .group_by(func.strftime("%Y-%m-%d", Conversation.created_at, "+8 hours"))
+    ).all()
+    daily_map = {str(d): c for d, c in rows}
+
+    daily: list[dict] = []
+    for i in range(7):
+        day = start_local + timedelta(days=i)
+        key = day.strftime("%Y-%m-%d")
+        daily.append({"date": key, "count": daily_map.get(key, 0)})
+
+    # 今日提问数（今天的会话数）
+    today_key = today_local.strftime("%Y-%m-%d")
+    today_conversations = daily_map.get(today_key, 0)
+
+    # 各知识库文档数分布（用知识点数近似，因为文档表无 course 外键）
+    kb_rows = db.execute(
+        select(KnowledgeBase.name, func.count(KnowledgePoint.id))
+        .outerjoin(KnowledgePoint, KnowledgePoint.course == KnowledgeBase.name)
+        .group_by(KnowledgeBase.id)
+        .order_by(KnowledgeBase.id)
+    ).all()
+    kb_doc_distribution = [{"name": name, "count": count or 0} for name, count in kb_rows]
+
+    # 反馈：待处理 / 已解答 + 最近 5 条
+    unanswered_pending = (
+        db.scalar(
+            select(func.count(UnansweredQuestion.id)).where(UnansweredQuestion.status == "pending")
+        )
+        or 0
+    )
+    unanswered_resolved = (
+        db.scalar(
+            select(func.count(UnansweredQuestion.id)).where(UnansweredQuestion.status == "resolved")
+        )
+        or 0
+    )
+    recent_unanswered = [
+        {
+            "id": u.id,
+            "question": u.question,
+            "status": u.status,
+            "created_at": u.created_at,
+            "answered_at": u.answered_at,
+        }
+        for u in db.execute(
+            select(UnansweredQuestion).order_by(UnansweredQuestion.id.desc()).limit(5)
+        ).scalars()
+    ]
+
+    return StatsOut(
+        users=users,
+        students=students,
+        admins=admins,
+        knowledge_bases=knowledge_bases,
+        documents=documents,
+        documents_ready=documents_ready,
+        knowledge_points=knowledge_points,
+        conversations=conversations,
+        messages=messages,
+        today_conversations=today_conversations,
+        daily_conversations=daily,
+        kb_doc_distribution=kb_doc_distribution,
+        unanswered_pending=unanswered_pending,
+        unanswered_resolved=unanswered_resolved,
+        recent_unanswered=recent_unanswered,
+    )
