@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>智答系统</title>
+  <link rel="stylesheet" href="/static/css/common.css?v=12">
+  <link rel="stylesheet" href="/static/css/app.css?v=44">
+</head>
+<body>
+  <div class="app-shell">
+    <!-- 侧边栏 -->
+    <aside class="sidebar">
+      <div class="sidebar-logo">
+        <div class="logo-text">智答系统</div>
+      </div>
+      <nav class="sidebar-nav" id="sidebar-nav"></nav>
+      <div class="sidebar-user">
+        <div class="avatar" id="user-avatar"><span>?</span></div>
+        <div class="sidebar-user-info">
+          <div class="u-name" id="user-name">-</div>
+          <div class="u-role" id="user-role">学生</div>
+        </div>
+        <button class="logout-btn" id="logout-btn" title="退出登录">⋯</button>
+      </div>
+    </aside>
+
+    <!-- 主内容区 -->
+    <div class="main-area">
+      <header class="main-header">
+        <h1 id="page-title">智能问答</h1>
+        <div class="header-right">
+          <div class="llm-status checking" id="llm-status" title="大模型服务状态">
+            <span class="dot"></span><span id="llm-status-text">检测中…</span>
+          </div>
+        </div>
+      </header>
+      <main class="main-content" id="main-content"></main>
+    </div>
+  </div>
+
+  <!-- 弹窗容器 -->
+  <div class="modal-mask" id="modal-mask">
+    <div class="modal" id="modal-box"></div>
+  </div>
+
+  <div id="toast-root"></div>
+
+  <script src="/static/js/common.js?v=13"></script>
+  <script src="/static/js/api.js?v=12"></script>
+  <script src="/static/js/markdown.js?v=12"></script>
+  <script src="/static/js/views/chat.js?v=21"></script>
+  <script src="/static/js/views/knowledge.js?v=31"></script>
+  <script src="/static/js/views/workbench.js?v=28"></script>
+  <script src="/static/js/views/history.js?v=12"></script>
+  <script src="/static/js/views/documents.js?v=20"></script>
+  <script src="/static/js/views/admin.js?v=51"></script>
+  <script src="/static/js/views/feedback.js?v=8"></script>
+  <script src="/static/js/views/profile.js?v=28"></script>
+  <script src="/static/js/app.js?v=23"></script>
+</body>
+</html>
