@@ -77,6 +77,7 @@ const ProfileView = (() => {
       const username = uName.value.trim();
       const realName = rName.value.trim();
       if (!username) return Common.toast("账号不能为空", "error");
+      if (!/^\d{8}$/.test(username)) return Common.toast("账号必须是 8 位数字", "error");
       try {
         const u = await API.request("PUT", "/api/auth/profile", { username, real_name: realName });
         API.saveSession(API.getToken(), { ...API.getUser(), ...u });

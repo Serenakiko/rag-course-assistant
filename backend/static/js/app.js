@@ -59,7 +59,14 @@ const App = (() => {
     document.body.classList.add("role-" + (API.getUser().role === "admin" ? "admin" : "student"));
     refreshUserInfo();
     renderNav();
-    document.getElementById("logout-btn").addEventListener("click", () => {
+    document.getElementById("logout-btn").addEventListener("click", async () => {
+      const ok = await Common.confirmDialog({
+        title: "退出登录",
+        message: "确定要退出当前账号吗？退出后需要重新输入账号和密码。",
+        okText: "退出登录",
+        danger: false,
+      });
+      if (!ok) return;
       API.clearSession();
       window.location.replace("/static/index.html");
     });

@@ -42,7 +42,10 @@ const API = (() => {
     } catch {
       throw new Error("网络请求失败，请确认后端服务已启动");
     }
-    if (resp.status === 401) {
+    // 登录/注册接口的 401 是「账号密码错误」，不是会话过期，
+    // 顺手跳转会重载页面，把要提示的弹窗一起冲掉
+    const isAuthEntry = url.startsWith("/api/auth/login") || url.startsWith("/api/auth/register");
+    if (resp.status === 401 && !isAuthEntry) {
       goLogin();
       throw new Error("登录已过期，请重新登录");
     }
@@ -50,7 +53,15 @@ const API = (() => {
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch { data = text; }
     if (!resp.ok) {
-      const msg = (data && data.detail) ? (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail)) : `请求失败（${resp.status}）`;
+      // 422 是校验失败，detail 是 Pydantic 的数组，直接展示会变成一串 JSON
+      let msg;
+      if (resp.status === 422) {
+        msg = "提交的内容不符合要求，请检查后重试";
+      } else if (data && data.detail) {
+        msg = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail);
+      } else {
+        msg = `请求失败（${resp.status}）`;
+      }
       throw new Error(msg);
     }
     return data;
