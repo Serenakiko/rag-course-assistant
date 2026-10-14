@@ -15,11 +15,8 @@ env/
 data/
 !data/.gitkeep
 
-# 本地运维工具与日志（cloudflared、启动日志等）
+# 本地运行日志与运维产物（启动日志、历史备份等）
 .tools/
-
-# 隧道脚本写入的当前公网链接（每次启动都会变，不入库）
-current_link.txt
 
 # IDE
 .vscode/
