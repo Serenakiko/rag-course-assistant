@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # ---------- 认证 ----------
@@ -66,8 +67,20 @@ class MessageOut(BaseModel):
     conversation_id: int
     role: str
     content: str
-    sources: str
+    sources: list = Field(default_factory=list)
     created_at: datetime
+
+    @field_validator("sources", mode="before")
+    @classmethod
+    def _decode_sources(cls, v: object) -> list:
+        """库里存的是 JSON 字符串，出参统一成数组，前端可以直接当数组用。"""
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v or "[]")
+            except ValueError:
+                return []
+            return parsed if isinstance(parsed, list) else []
+        return v if isinstance(v, list) else []
 
 
 class AskRequest(BaseModel):
