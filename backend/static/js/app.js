@@ -59,16 +59,45 @@ const App = (() => {
     document.body.classList.add("role-" + (API.getUser().role === "admin" ? "admin" : "student"));
     refreshUserInfo();
     renderNav();
-    document.getElementById("logout-btn").addEventListener("click", async () => {
-      const ok = await Common.confirmDialog({
-        title: "退出登录",
-        message: "确定要退出当前账号吗？退出后需要重新输入账号和密码。",
-        okText: "退出登录",
-        danger: false,
-      });
-      if (!ok) return;
+    // 退出登录：点一下弹确认框；长按 0.65 秒直接退出，不弹任何提示
+    const logoutBtn = document.getElementById("logout-btn");
+    function doLogout() {
       API.clearSession();
       window.location.replace("/static/index.html");
+    }
+    let holdTimer = null;
+    let held = false;
+    const HOLD_MS = 650;
+
+    logoutBtn.addEventListener("pointerdown", () => {
+      held = false;
+      logoutBtn.classList.add("holding");
+      holdTimer = setTimeout(() => {
+        held = true;
+        logoutBtn.classList.remove("holding");
+        doLogout();
+      }, HOLD_MS);
+    });
+    const cancelHold = () => {
+      clearTimeout(holdTimer);
+      logoutBtn.classList.remove("holding");
+    };
+    logoutBtn.addEventListener("pointerup", cancelHold);
+    logoutBtn.addEventListener("pointerleave", cancelHold);
+    logoutBtn.addEventListener("pointercancel", cancelHold);
+    logoutBtn.addEventListener("blur", cancelHold);
+
+    logoutBtn.addEventListener("click", async () => {
+      if (held) { held = false; return; }  // 长按已经退出了，忽略随后的 click
+      const ok = await Common.confirmDialog({
+        title: "退出登录",
+        message: "确定要退出当前账号吗？",
+        okText: "退出登录",
+        icon: "logout",
+        danger: false,  // 退出不是破坏性操作，按钮跟随图标用主色
+      });
+      if (!ok) return;
+      doLogout();
     });
     // 点击头像直接弹“更换头像”
     const avatarEl = document.getElementById("user-avatar");

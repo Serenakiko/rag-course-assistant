@@ -4,8 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>智答系统</title>
-  <link rel="stylesheet" href="/static/css/common.css?v=17">
-  <link rel="stylesheet" href="/static/css/app.css?v=49">
+  <link rel="stylesheet" href="/static/css/common.css?v=19">
+  <link rel="stylesheet" href="/static/css/app.css?v=51">
 </head>
 <body>
   <div class="app-shell">
@@ -16,12 +16,17 @@
       </div>
       <nav class="sidebar-nav" id="sidebar-nav"></nav>
       <div class="sidebar-user">
-        <div class="avatar" id="user-avatar"><span>?</span></div>
-        <div class="sidebar-user-info">
-          <div class="u-name" id="user-name">-</div>
-          <div class="u-role" id="user-role">学生</div>
+        <div class="sidebar-user-row">
+          <div class="avatar" id="user-avatar"><span>?</span></div>
+          <div class="sidebar-user-info">
+            <div class="u-name" id="user-name">-</div>
+            <div class="u-role" id="user-role">学生</div>
+          </div>
         </div>
-        <button class="logout-btn" id="logout-btn" title="退出登录"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v9"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/></svg></button>
+        <button type="button" class="logout-btn" id="logout-btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>
+          <span>退出登录</span>
+        </button>
       </div>
     </aside>
 
@@ -46,17 +51,17 @@
 
   <div id="toast-root"></div>
 
-  <script src="/static/js/common.js?v=18"></script>
-  <script src="/static/js/api.js?v=17"></script>
-  <script src="/static/js/markdown.js?v=17"></script>
-  <script src="/static/js/views/chat.js?v=26"></script>
-  <script src="/static/js/views/knowledge.js?v=36"></script>
-  <script src="/static/js/views/workbench.js?v=33"></script>
-  <script src="/static/js/views/history.js?v=17"></script>
-  <script src="/static/js/views/documents.js?v=25"></script>
-  <script src="/static/js/views/admin.js?v=56"></script>
-  <script src="/static/js/views/feedback.js?v=13"></script>
-  <script src="/static/js/views/profile.js?v=33"></script>
-  <script src="/static/js/app.js?v=28"></script>
+  <script src="/static/js/common.js?v=20"></script>
+  <script src="/static/js/api.js?v=19"></script>
+  <script src="/static/js/markdown.js?v=19"></script>
+  <script src="/static/js/views/chat.js?v=28"></script>
+  <script src="/static/js/views/knowledge.js?v=38"></script>
+  <script src="/static/js/views/workbench.js?v=35"></script>
+  <script src="/static/js/views/history.js?v=19"></script>
+  <script src="/static/js/views/documents.js?v=27"></script>
+  <script src="/static/js/views/admin.js?v=58"></script>
+  <script src="/static/js/views/feedback.js?v=15"></script>
+  <script src="/static/js/views/profile.js?v=35"></script>
+  <script src="/static/js/app.js?v=30"></script>
 </body>
 </html>
