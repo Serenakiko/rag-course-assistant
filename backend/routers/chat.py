@@ -272,7 +272,7 @@ def admin_list_messages(
         if u is None:
             continue
         # 知识库取会话记录（提问时选择的知识库）；旧会话无记录则为空
-        # （前端显示"全部知识库"），不用检索命中来源的课程名冒充归属
+        # （前端显示“全部知识库”），不用检索命中来源的课程名冒充归属
         kb_name = _kb_from_conv(r.knowledge_bases)
         pairs.append({
             "id": u.id,
@@ -371,7 +371,7 @@ async def ask(
                 elif event["type"] == "error":
                     answer_parts.append(f"（回答失败：{event['message']}）")
                 yield _sse(event)
-            # 记录"未命中问题"：距离门控拦截（unmatched 事件）或模型判定知识库未收录（未收录特征短语）
+            # 记录“未命中问题”：距离门控拦截（unmatched 事件）或模型判定知识库未收录（未收录特征短语）
             full_answer = "".join(answer_parts) or ""
             if unmatched or is_unmatched_answer(full_answer):
                 session = SessionLocal()

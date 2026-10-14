@@ -127,7 +127,7 @@ class UnansweredQuestion(Base):
     answered_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    # 学生端"已读"标记：学生查看已解决答案后写入（NULL=未读），驱动未读角标
+    # 学生端“已读”标记：学生查看已解决答案后写入（NULL=未读），驱动未读角标
     read_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

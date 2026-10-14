@@ -73,7 +73,7 @@ class MessageOut(BaseModel):
 class AskRequest(BaseModel):
     conversation_id: int | None = None  # None 表示新建会话
     message: str = Field(min_length=1, max_length=8000)
-    # 重新生成模式：不重复保存提问，并删除会话中上一条助手回答（供前端"重新生成"刷新键使用）
+    # 重新生成模式：不重复保存提问，并删除会话中上一条助手回答（供前端“重新生成”刷新键使用）
     regenerate: bool = False
     # 回答范围：指定的知识库（课程名）列表；空列表表示全知识库回答
     knowledge_bases: list[str] = Field(default_factory=list, max_length=64)

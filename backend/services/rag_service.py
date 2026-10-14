@@ -20,7 +20,7 @@ from .vector_store import search as vector_search
 
 logger = logging.getLogger(__name__)
 
-# 模型判定"知识库未收录"时的特征短语（模型输出格式可能不完全受控，用模糊匹配兜底）
+# 模型判定“知识库未收录”时的特征短语（模型输出格式可能不完全受控，用模糊匹配兜底）
 UNMATCHED_MARKERS = (
     "【知识库未收录】",
     "知识库未收录",
@@ -36,31 +36,31 @@ def is_unmatched_answer(answer: str) -> bool:
     head = (answer or "").strip()[:40]
     return any(m in head for m in UNMATCHED_MARKERS)
 
-SYSTEM_PROMPT = """你是一位专业、耐心的「智答系统」课程智能助教，只解答与课程知识库相关的问题（课程知识点、作业习题、学习资料等）。
+SYSTEM_PROMPT = """你是这门课的助教，正在回答学生的提问。用平常说话的方式讲清楚，别端着。
 
 回答规则：
-1. 先判断问题是否在你的回答范围内：只回答与课程知识库相关的问题。对于明显无关的问题（如考公/择业建议、天气、时事新闻、个人生活决策、闲聊等），直接回复："这个问题不在我的回答范围内，我只解答课程知识库中的内容。" 不要展开讨论、不要给一般性建议、不要猜测，一句话拒绝即可。
-2. 范围之内的问题，先判断下方「参考资料」是否与问题相关、能否作答：
-   - 参考资料与问题相关且能回答：直接基于资料给出答案，能作答时不要在回答结尾追加"资料中没有找到相关内容"之类的说明。
-   - 参考资料只覆盖了问题的一部分：回答能确定的部分，并说明"知识库中关于该问题的资料不完整"。
-   - 参考资料与问题不相关，或没有覆盖问题所问的具体知识点（例如资料讲二叉树但问题问红黑树）：回答必须以"【知识库未收录】"开头，内容为"知识库中暂无相关内容"，再简要说明知识库现有资料与问题的差距；**绝不使用模型自身知识编造或补充答案，不要自行列举资料标题、不要承诺已反馈教师**（相近资料推荐和反馈提示由系统自动追加）。
-3. 回答结构清晰：先直接给出结论/答案，再展开要点；涉及步骤时用编号列表。
-4. 语言使用简体中文，专业术语可保留英文原名并给出中文解释。
-5. 直接基于参考资料作答；不要讨论"参考资料编号、数量、来源、异同"本身（例如不要输出"资料[1]和[2]一致""资料[4]未提供详细内容"之类的话）。
-6. 如果资料为空（知识库还没有内容），告知学生"知识库中暂无相关内容"，并引导其添加课程资料或提出课程相关的问题，不要按常识编造答案。
+1. 只聊课程知识库里的内容（知识点、作业习题、学习资料）。碰到明显无关的问题（考公择业、天气、时事、娱乐、个人生活决策、闲聊之类），只回一句：“这个问题不在我的回答范围内，我只解答课程知识库中的内容。” 不展开、不建议、不猜测。
+2. 在范围内的问题，先看下面「参考资料」能不能答：
+   - 能答：直接讲，用完整的句子把道理说清楚；需要分步骤时再用编号，不要为了显得“结构清晰”把本该连成一段的话拆成一堆要点。
+   - 只覆盖了一部分：把能确定的讲完，再说明“知识库中关于这部分的资料不完整”。
+   - 答不上来，或资料讲的根本不是这个知识点（比如资料讲二叉树、学生问红黑树）：必须以“【知识库未收录】”开头，正文写“知识库中暂无相关内容”，再一两句说明现有资料和问题的差距。绝不许用自己的知识补充或编造，也不要列举资料标题、不要承诺已经反馈老师（这些由系统追加）。
+3. 不要用这些腔调：“总的来说”“综上所述”“需要注意的是”“希望对你有帮助”；不要复述学生的问题，不要开场白和收尾客套。问题短就答短，不硬凑篇幅。
+4. 简体中文作答，专业术语保留英文原名，顺带给出中文说法。
+5. 只依据参考资料讲，不要评论资料本身（比如“资料[1]和[2]说法一致”“资料[4]没有详细内容”）。
+6. 资料为空时，直接说明知识库里还没有相关内容，引导学生补充课程资料或换个课程相关的问题问，不要凭常识编。
 
 参考资料：
 {context}"""
 
-# 课程概览专用提示：用户问"这门课/知识库有什么、可以干什么"时使用。
-# 资料里有什么就介绍什么，禁止输出"未收录/暂无相关内容"等拒答文案。
-OVERVIEW_PROMPT = """你是一位专业的「智答系统」课程智能助教。用户想了解知识库/课程里收录了什么内容、可以做什么。
+# 课程概览专用提示：用户问“这门课/知识库有什么、可以干什么”时使用。
+# 资料里有什么就介绍什么，禁止输出“未收录/暂无相关内容”等拒答文案。
+OVERVIEW_PROMPT = """你是这门课的助教。学生想了解知识库里收了什么、能帮他做什么。
 
-回答要求：
-1. 根据下方「参考资料」中列出的知识条目，介绍知识库收录的内容：涉及哪些课程（如数据结构、操作系统等），各有哪些知识点主题，能帮助解答哪类问题（概念解释、算法/原理讲解、对比辨析、习题答疑等）。
-2. 用简洁的列表/分条形式输出，先总述再分课程/分主题列举。
-3. 资料里有什么就介绍什么；**绝对不要回答"未收录""暂无相关内容""知识库中没有"之类的话**，也不要自行编造资料之外的知识点。
-4. 使用简体中文。
+怎么答：
+1. 照着下面「参考资料」里列出的知识条目说：涉及哪几门课，各有哪些知识点主题，能帮他解答哪几类问题（概念解释、算法/原理讲解、对比辨析、习题答疑等）。
+2. 内容多的时候可以分条列，但每条说人话，别堆名词。先总说一句，再按课程或主题展开。
+3. 资料里有什么就说什么；绝对不要说“未收录”“暂无相关内容”“知识库里没有”这类话，也不要编资料之外的知识点。
+4. 简体中文。
 
 参考资料：
 {context}"""
@@ -116,11 +116,11 @@ def feedback_lines(question: str, recommended: list[str]) -> list[str]:
     if recommended:
         titles = "、".join(f"《{t}》" for t in recommended)
         lines.append(
-            f"知识库中现有的相近资料：{titles}，可尝试围绕这些知识点换个问法提问。"
+            f"知识库里相近的还有：{titles}，可以换个问法再试试。"
         )
     else:
-        lines.append("建议换个知识库中已有的知识点提问，或请教师补充相关课程资料。")
-    lines.append("（该问题已自动反馈给教师，补充资料后会重新生成回答。）")
+        lines.append("换个知识库里已有的知识点问问，或者找老师补一下相关资料。")
+    lines.append("（这个问题已经记下来反馈给老师了，补上资料后会重新给你生成解答。）")
     return lines
 
 
@@ -224,14 +224,14 @@ async def generate_answer(question: str, courses: list[str] | None = None) -> di
     docs = vector_search(question, settings.TOP_K, courses)
     if not docs:
         return {
-            "answer": "知识库中暂无相关内容，请先补充课程资料后重试。",
+            "answer": "知识库里还没有相关内容，先补充课程资料再试。",
             "recommended": [],
             "matched": False,
         }
     top_score = docs[0][1]
     if top_score > settings.UNMATCHED_DISTANCE:
         recommended = recommend_titles(docs)
-        content = "【知识库未收录】知识库中暂无" + (
+        content = "【知识库未收录】知识库里暂时没有" + (
             f"「{question}」" if len(question) <= 40 else "该问题"
         ) + "的相关内容。\n" + "\n".join(feedback_lines(question, recommended))
         return {"answer": content, "recommended": recommended, "matched": False}
@@ -245,12 +245,12 @@ async def generate_answer(question: str, courses: list[str] | None = None) -> di
     answer_parts: list[str] = []
     async for chunk in chain.astream({"context": context, "question": question}):
         if time.monotonic() > deadline:
-            answer_parts.append("（回答生成超时，请稍后重试）")
+            answer_parts.append("（回答生成超时了，稍后再试）")
             break
         content = getattr(chunk, "content", "")
         if isinstance(content, str) and content:
             answer_parts.append(content)
-    answer = "".join(answer_parts).strip() or "抱歉，没有生成有效回答，请检查模型服务或稍后重试。"
+    answer = "".join(answer_parts).strip() or "这次没生成出有效回答，检查一下模型服务，或者稍后再试。"
 
     # 模型判定未收录时同样追加推荐与反馈提示
     if is_unmatched_answer(answer):
@@ -284,13 +284,13 @@ async def stream_answer(
         if not docs:
             yield {
                 "type": "token",
-                "content": "知识库中暂无相关内容，请先添加课程资料，或提出与课程相关的问题。",
+                "content": "知识库里还没有相关内容，先添加课程资料，或者问点跟课程有关的问题。",
             }
             return
         # 2. 无匹配门控：最相似资料的距离仍超过阈值 → 知识库未覆盖该问题，
         #    先判定是否与课程学习相关：无关问题直接拒绝且不记录；
-        #    学习相关但库无才进入"反馈"记录（避免天气/闲聊等污染反馈列表）。
-        #    课程概览类问题（"这门课讲了什么""知识库有什么"）不走门控，
+        #    学习相关但库无才进入“反馈”记录（避免天气/闲聊等污染反馈列表）。
+        #    课程概览类问题（“这门课讲了什么”“知识库有什么”）不走门控，
         #    直接基于检索到的资料总结。
         overview_mode = is_course_overview_question(question)
         top_score = docs[0][1]
@@ -303,7 +303,7 @@ async def stream_answer(
                 }
                 return
             recommended = recommend_titles(docs)
-            content = "【知识库未收录】知识库中暂无" + (
+            content = "【知识库未收录】知识库里暂时没有" + (
                 f"「{question}」" if len(question) <= 40 else "该问题"
             ) + "的相关内容。\n" + "\n".join(feedback_lines(question, recommended))
             yield {"type": "token", "content": content}
@@ -334,7 +334,7 @@ async def stream_answer(
                 logger.warning("RAG 回答生成超过 %.0f 秒，已强制停止", settings.LLM_TIMEOUT)
                 yield {
                     "type": "error",
-                    "message": f"回答生成超时（超过 {settings.LLM_TIMEOUT:.0f} 秒），请稍后重试或换个问法。",
+                    "message": f"回答生成超时（超过 {settings.LLM_TIMEOUT:.0f} 秒），稍后再试或者换个问法。",
                 }
                 return
             content = getattr(chunk, "content", "")
@@ -344,7 +344,7 @@ async def stream_answer(
 
         answer = "".join(answer_parts).strip()
         if not answer:
-            answer = "抱歉，我没有生成有效回答。请检查模型服务是否正常，或换个问法再试。"
+            answer = "这次没生成出有效回答。检查一下模型服务，或者换个问法再问。"
             yield {"type": "token", "content": answer}
 
         # 模型判定知识库未收录（未收录特征短语）：系统自动追加
