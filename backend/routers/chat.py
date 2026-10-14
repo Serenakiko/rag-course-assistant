@@ -22,6 +22,7 @@ from ..schemas import (
     RenameConversationRequest,
 )
 from ..services import rag_service
+from ..services.kb_scope import allowed_course_names
 from ..services.rag_service import is_unmatched_answer
 
 router = APIRouter()
@@ -351,6 +352,18 @@ async def ask(
         db.commit()
     history = _load_history(db, conversation_id, settings.HISTORY_LIMIT)
 
+    # 检索范围：学生只能在自己可见的知识库里检索。
+    # 不做这一步的话，"列表里看不到的知识库"照样能被提问捞出来。
+    allowed = allowed_course_names(user, db)
+    selected = [c for c in payload.knowledge_bases if c]
+    if allowed is None:
+        courses = selected or None          # 管理员：不选就是全部
+    else:
+        forbidden = [c for c in selected if c not in allowed]
+        if forbidden:
+            raise HTTPException(status_code=403, detail="没有权限检索该知识库")
+        courses = selected or allowed       # 学生：不选就限定在可见范围内
+
     # 3. SSE 流式生成（结束时把助手回答落库）
     async def event_gen() -> AsyncGenerator[str, None]:
         answer_parts: list[str] = []
@@ -360,7 +373,7 @@ async def ask(
             async for event in rag_service.stream_answer(
                 payload.message,
                 history,
-                courses=payload.knowledge_bases or None,
+                courses=courses,
             ):
                 if event["type"] == "token":
                     answer_parts.append(event["content"])

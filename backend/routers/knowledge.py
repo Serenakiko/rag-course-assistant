@@ -1,4 +1,8 @@
-"""知识点 / 知识库路由：浏览（所有登录用户）+ 维护（创建者本人或管理员）。
+"""知识点 / 知识库路由：浏览（按可见性过滤）+ 维护（创建者本人或管理员）。
+
+可见性规则：
+  - 管理员：能看到所有人的知识库
+  - 学生：只看到管理员发布的知识库 + 自己创建的
 
 权限规则：
   - 新增知识点、新增知识库：所有登录用户
@@ -24,6 +28,13 @@ from ..schemas import (
     KnowledgePointOut,
 )
 from ..services.document_parser import parse_file
+from ..services.kb_scope import (
+    admin_user_ids as _admin_user_ids,
+    all_base_names,
+    allowed_course_names,
+    hidden_base_names,
+    visible_base_names,
+)
 from ..services.vector_store import (
     add_knowledge_point,
     delete_document,
@@ -41,6 +52,12 @@ def can_manage(user: User, creator_id: int | None) -> bool:
     return creator_id is not None and creator_id == user.id
 
 
+# 可见性规则统一在 services/kb_scope.py，浏览和问答检索共用同一套
+_all_base_names = all_base_names
+_visible_base_names = visible_base_names
+_hidden_base_names = hidden_base_names
+
+
 # ==================== 知识库 ====================
 
 @router.get("/bases", response_model=list[KnowledgeBaseSummary], summary="知识库列表（含统计）")
@@ -50,6 +67,14 @@ def list_bases(
     db: Session = Depends(get_db),
 ) -> list[KnowledgeBaseSummary]:
     stmt = select(KnowledgeBase)
+    if user.role != "admin":
+        # 学生只收集：管理员发布的知识库 + 自己创建的
+        stmt = stmt.where(
+            or_(
+                KnowledgeBase.created_by == user.id,
+                KnowledgeBase.created_by.in_(_admin_user_ids()),
+            )
+        )
     if keyword.strip():
         like = f"%{keyword.strip()}%"
         stmt = stmt.where(
@@ -170,6 +195,10 @@ def list_points(
     db: Session = Depends(get_db),
 ) -> list[KnowledgePoint]:
     stmt = select(KnowledgePoint)
+    hidden = _hidden_base_names(user, db)
+    if hidden:
+        # 知识点跟随所属知识库的可见性；课程名不属于任何知识库的历史数据仍可见
+        stmt = stmt.where(KnowledgePoint.course.notin_(hidden))
     if keyword.strip():
         like = f"%{keyword.strip()}%"
         stmt = stmt.where(
@@ -190,13 +219,19 @@ def list_courses(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[str]:
-    base_names = list(db.scalars(select(KnowledgeBase.name).order_by(KnowledgeBase.name)))
-    # 兼容历史数据：旧知识点课程不在知识库表中时也返回
+    hidden = _hidden_base_names(user, db)
+    stmt = select(KnowledgeBase.name)
+    if hidden:
+        stmt = stmt.where(KnowledgeBase.name.notin_(hidden))
+    base_names = list(db.scalars(stmt.order_by(KnowledgeBase.name)))
+    # 兼容历史数据：旧知识点课程不属于任何知识库时也返回
+    # （注意对比的是"全部知识库名"，否则会把看不到的库名重新加回来）
+    all_names = _all_base_names(db)
     old_courses = db.execute(
         select(KnowledgePoint.course).distinct().order_by(KnowledgePoint.course)
     ).all()
     for (c,) in old_courses:
-        if c and c not in base_names:
+        if c and c not in all_names:
             base_names.append(c)
     return base_names
 
@@ -236,10 +271,12 @@ def update_point(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> KnowledgePoint:
-    # 所有登录用户都可编辑知识点，便于修正内容错误
+    # 所有登录用户都可编辑知识点（便于纠错），但只能是自己能访问的知识库下的
     point = db.get(KnowledgePoint, point_id)
     if point is None:
         raise HTTPException(status_code=404, detail="知识点不存在")
+    if point.course in _hidden_base_names(user, db):
+        raise HTTPException(status_code=403, detail="只能编辑自己能访问的知识库下的知识点")
     point.title = payload.title.strip()
     point.content = payload.content.strip()
     point.course = payload.course.strip()

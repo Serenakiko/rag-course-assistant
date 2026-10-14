@@ -119,6 +119,10 @@ def search(
     courses 非空时只检索指定课程（知识库）的资料，空/None 表示全库检索。
     """
     k = top_k or settings.TOP_K
+    # courses=None 表示不限制；courses=[] 表示"没有可检索的范围"，必须返回空。
+    # 否则空列表会被当成"不过滤"，反而把全部知识库都捞出来。
+    if courses is not None and not courses:
+        return []
     filter_ = None
     if courses:
         filter_ = {"course": {"$in": courses}}
