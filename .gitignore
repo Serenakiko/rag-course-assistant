@@ -15,6 +15,9 @@ env/
 data/
 !data/.gitkeep
 
+# 本地运维工具与日志（cloudflared、启动日志等）
+.tools/
+
 # IDE
 .vscode/
 .idea/
