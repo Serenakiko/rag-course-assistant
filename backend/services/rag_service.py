@@ -49,6 +49,15 @@ SYSTEM_PROMPT = """你是这门课的助教，正在回答学生的提问。用�
 5. 只依据参考资料讲，不要评论资料本身（比如“资料[1]和[2]说法一致”“资料[4]没有详细内容”）。
 6. 资料为空时，直接说明知识库里还没有相关内容，引导学生补充课程资料或换个课程相关的问题问，不要凭常识编。
 
+最容易出错的一种情况是"学生问的比资料多"，照着例子来：
+
+  资料里是「二叉查找树」，学生问「红黑树的性质」。
+  × 错的：把资料里二叉树的内容讲一遍，再凭印象把红黑树的性质补上。学生分不清哪些来自资料、哪些是你自己加的。
+  ○ 对的：把资料里讲到的二叉查找树说清楚，然后明确说明"知识库中没有红黑树的内容"。红黑树的性质一个字都不要写。
+  同理，问「B+ 树」而资料只有二叉树、问「协程」而资料只有进程线程，都按这个方式处理。
+
+判断标准只有一条：这句话在「参考资料」里找得到出处吗？找不到就不要写。
+
 参考资料：
 {context}"""
 
@@ -215,6 +224,42 @@ def is_course_overview_question(question: str) -> bool:
     return any(m in q for m in markers)
 
 
+ANSWERABILITY_PROMPT = """你是课程助教的知识库校对员。下面给你学生的问题，以及从知识库里检索到的资料。
+
+你的任务只有一个：判断这些资料里有没有**直接讲解**学生问的这个知识点。
+
+- 资料里有直接讲这个知识点的内容 → 回答「有」
+- 资料讲的是相近但不同的知识点（例如资料讲二叉树、学生问红黑树）→ 回答「没有」
+- 拿不准 → 回答「没有」
+
+只回答两个字：有 或 没有。不要解释，不要补充知识。"""
+
+
+async def can_answer(question: str, docs: list[tuple[Document, float]], timeout: float = 30.0) -> bool:
+    """独立判一次"检索到的资料能不能直接回答这个问题"。
+
+    距离门控只能拦"库里明显没有"；拦不住"库里看着像有、其实没讲"（资料讲二叉树、
+    学生问红黑树）。让生成模型自己克制没用 —— 实测 3B 模型会照着相近资料把答案编下去，
+    所以拆成一个只输出"有/没有"的窄任务，判定失败或超时一律按不能答处理（宁可拒答，不要编造）。
+    """
+    try:
+        llm = get_llm()
+        resp = await asyncio.wait_for(
+            llm.ainvoke(
+                [
+                    ("system", ANSWERABILITY_PROMPT),
+                    ("human", f"学生的问题：{question}\n\n检索到的资料：\n{_format_context(docs)}"),
+                ]
+            ),
+            timeout=timeout,
+        )
+        text = (getattr(resp, "content", "") or "").strip()
+        return text.startswith("有")
+    except Exception:  # noqa: BLE001
+        logger.warning("资料可答性判定失败（%s），按不可答处理", question[:30])
+        return False
+
+
 async def generate_answer(question: str, courses: list[str] | None = None) -> dict:
     """非流式生成一次完整回答（供管理员补充资料后"重新生成回答"使用）。
 
@@ -230,6 +275,13 @@ async def generate_answer(question: str, courses: list[str] | None = None) -> di
         }
     top_score = docs[0][1]
     if top_score > settings.UNMATCHED_DISTANCE:
+        recommended = recommend_titles(docs)
+        content = "【知识库未收录】知识库里暂时没有" + (
+            f"「{question}」" if len(question) <= 40 else "该问题"
+        ) + "的相关内容。\n" + "\n".join(feedback_lines(question, recommended))
+        return {"answer": content, "recommended": recommended, "matched": False}
+
+    if settings.ANSWERABILITY_CHECK and not await can_answer(question, docs):
         recommended = recommend_titles(docs)
         content = "【知识库未收录】知识库里暂时没有" + (
             f"「{question}」" if len(question) <= 40 else "该问题"
@@ -314,6 +366,23 @@ async def stream_answer(
                 "recommended": recommended,
             }
             return
+
+        # 距离门控拦不住、但资料其实没讲这个知识点的情况（资料讲二叉树、学生问红黑树），
+        # 再独立判一次，免得生成模型照着相近资料编出一套不存在的性质。
+        if settings.ANSWERABILITY_CHECK and not await can_answer(question, docs):
+            recommended = recommend_titles(docs)
+            content = "【知识库未收录】知识库里暂时没有" + (
+                f"「{question}」" if len(question) <= 40 else "该问题"
+            ) + "的相关内容。\n" + "\n".join(feedback_lines(question, recommended))
+            yield {"type": "token", "content": content}
+            yield {
+                "type": "unmatched",
+                "question": question,
+                "course": docs[0][0].metadata.get("course") or "",
+                "recommended": recommended,
+            }
+            return
+
         context = _format_context(docs)
 
         # 2. 组装消息（系统 + 历史 + 当前问题）；概览问题用专用提示引导

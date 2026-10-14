@@ -67,7 +67,10 @@ class Settings:
     LLM_TIMEOUT: float = float(_get("LLM_TIMEOUT", "180"))
     # 知识库无匹配判定阈值（L2 距离）：检索最相似资料的距离超过该值，判定知识库未覆盖该问题，
     # 直接拒绝回答并记录“未命中问题”。该值越小越严格（更多问题被判未覆盖）。
-    UNMATCHED_DISTANCE: float = float(_get("UNMATCHED_DISTANCE", "1.10"))
+    UNMATCHED_DISTANCE: float = float(_get("UNMATCHED_DISTANCE", "0.85"))
+    # 二次可答性判定：距离门控通过后，再让模型只回答"有/没有"，判断资料里是否直接讲了这个问题。
+    # 防的是"资料讲二叉树、学生问红黑树"这类相近但未覆盖的情况；代价是每次提问多一次模型调用。
+    ANSWERABILITY_CHECK: bool = _get("ANSWERABILITY_CHECK", "false").lower() in ("1", "true", "yes")
 
     # ---------- 系统角色 ----------
     ROLES: tuple = ("student", "admin")
