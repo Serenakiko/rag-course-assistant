@@ -9,7 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # ---------- 认证 ----------
 class RegisterRequest(BaseModel):
-    username: str = Field(min_length=1, max_length=8, pattern=r"^\d+$")
+    # 账号固定 8 位数字（前端同规则）
+    username: str = Field(min_length=8, max_length=8, pattern=r"^\d{8}$")
     password: str = Field(min_length=6, max_length=64)
     real_name: str = Field(default="", max_length=32)
     role: str = Field(default="student", pattern=r"^student$")
@@ -42,7 +43,7 @@ class ChangePasswordRequest(BaseModel):
 
 
 class UpdateProfileRequest(BaseModel):
-    username: str | None = Field(default=None, max_length=64)
+    username: str | None = Field(default=None, pattern=r"^\d{8}$")
     real_name: str | None = Field(default=None, max_length=32)
     avatar: str | None = Field(default=None, max_length=512)
 

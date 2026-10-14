@@ -16,7 +16,8 @@ router = APIRouter()
 
 
 class AdminUserCreate(BaseModel):
-    username: str = Field(min_length=1, max_length=64)
+    # 和注册同规则：账号固定 8 位数字
+    username: str = Field(min_length=8, max_length=8, pattern=r"^\d{8}$")
     password: str = Field(min_length=6, max_length=64)
     real_name: str = Field(default="", max_length=32)
     role: str = Field(default="student", pattern=r"^(student|admin)$")

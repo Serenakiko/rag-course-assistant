@@ -98,7 +98,8 @@ textarea.form-control { resize: vertical; min-height: 90px; }
 }
 .modal-mask.show { display: flex; }
 .modal {
-  background: #fff; border-radius: 10px; width: 100%; max-width: 560px;
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 10px; width: 100%; max-width: 560px;
   max-height: 86vh; overflow-y: auto; box-shadow: var(--shadow-lg);
   padding: 24px; animation: modalIn .18s ease;
 }
@@ -110,18 +111,38 @@ textarea.form-control { resize: vertical; min-height: 90px; }
 .modal-close:hover { color: var(--danger); }
 .modal-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 
+/* ---------- 统一提示 / 确认弹窗 ---------- */
+/* 和 toast 共用同一套底色（白卡 + 细边框），只用图标颜色区分类型 */
+.alert-body { display: flex; gap: 14px; align-items: flex-start; }
+.alert-icon {
+  width: 40px; height: 40px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+.alert-icon svg { width: 21px; height: 21px; }
+.alert-icon.error   { background: #f7ebe8; color: var(--danger); }
+.alert-icon.warning { background: #f6f0e5; color: var(--warning); }
+.alert-icon.success { background: #eaf3ed; color: var(--success); }
+.alert-icon.info    { background: var(--primary-light); color: var(--primary); }
+.alert-text { flex: 1; min-width: 0; }
+.alert-title { font-size: 15.5px; font-weight: 600; color: var(--text-1); margin-bottom: 6px; }
+.alert-msg { font-size: 14px; color: var(--text-2); line-height: 1.75; white-space: pre-line; }
+
 /* ---------- Toast ---------- */
+/* 统一成白底卡片 + 左侧色条（和弹窗同一套背景色），不再按类型换整块底色 */
 #toast-root {
   position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
   z-index: 2000; display: flex; flex-direction: column; gap: 8px; align-items: center;
 }
 .toast {
-  background: #1d1b18; color: #fff; padding: 10px 18px; border-radius: 6px;
-  font-size: 13.5px; box-shadow: var(--shadow-lg); animation: toastIn .2s ease;
-  max-width: 480px;
+  background: var(--card); color: var(--text-1);
+  border: 1px solid var(--border); border-left: 3px solid var(--primary);
+  padding: 10px 16px; border-radius: 6px;
+  font-size: 13.5px; line-height: 1.6; box-shadow: var(--shadow-lg);
+  animation: toastIn .2s ease; max-width: 480px;
 }
-.toast-error { background: #b91c1c; }
-.toast-success { background: #15803d; }
+.toast-error   { border-left-color: var(--danger);  color: var(--danger); }
+.toast-success { border-left-color: var(--success); color: var(--success); }
+.toast-warning { border-left-color: var(--warning); color: var(--warning); }
 @keyframes toastIn { from { transform: translateY(-8px); opacity: 0; } to { transform: none; opacity: 1; } }
 
 /* ---------- 空状态 ---------- */

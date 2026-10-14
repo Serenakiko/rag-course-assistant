@@ -60,22 +60,58 @@ const Common = (() => {
     document.getElementById("modal-box").innerHTML = "";
   }
 
-  function confirmDialog({ title = "确认操作", message = "", danger = true, okText = "确认" }) {
+  const ALERT_ICONS = {
+    error: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><path d="M12 16.5h.01"/></svg>',
+    warning: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>',
+    success: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg>',
+    info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 7.5h.01"/></svg>',
+  };
+
+  // 提示弹窗：登录/注册校验、接口报错统一走这里，只有一个「知道了」
+  function alertDialog({ title = "提示", message = "", type = "error", okText = "知道了" } = {}) {
     return new Promise((resolve) => {
       const box = openModal(`
-        <div class="modal-header">
-          <h3>${escapeHtml(title)}</h3>
-          <button class="modal-close" data-close>×</button>
+        <div class="alert-body">
+          <div class="alert-icon ${type}">${ALERT_ICONS[type] || ALERT_ICONS.info}</div>
+          <div class="alert-text">
+            <div class="alert-title">${escapeHtml(title)}</div>
+            <div class="alert-msg">${escapeHtml(message)}</div>
+          </div>
         </div>
-        <p style="color:var(--text-2);line-height:1.8">${message}</p>
+        <div class="modal-footer">
+          <button class="btn btn-primary" data-ok>${escapeHtml(okText)}</button>
+        </div>`);
+      const done = () => { closeModal(); resolve(true); };
+      box.querySelector("[data-ok]").onclick = done;
+      // 点遮罩也算关闭，避免 Promise 一直挂着
+      document.getElementById("modal-mask").onclick = (e) => {
+        if (e.target.id === "modal-mask") done();
+      };
+    });
+  }
+
+  function confirmDialog({ title = "确认操作", message = "", danger = true, okText = "确认" }) {
+    return new Promise((resolve) => {
+      const kind = danger ? "warning" : "info";
+      const box = openModal(`
+        <div class="alert-body">
+          <div class="alert-icon ${kind}">${ALERT_ICONS[kind]}</div>
+          <div class="alert-text">
+            <div class="alert-title">${escapeHtml(title)}</div>
+            <div class="alert-msg">${message}</div>
+          </div>
+        </div>
         <div class="modal-footer">
           <button class="btn" data-cancel>取消</button>
           <button class="btn ${danger ? "btn-danger" : "btn-primary"}" data-ok>${escapeHtml(okText)}</button>
         </div>
       `);
-      box.querySelector("[data-close]").onclick = () => { closeModal(); resolve(false); };
-      box.querySelector("[data-cancel]").onclick = () => { closeModal(); resolve(false); };
-      box.querySelector("[data-ok]").onclick = () => { closeModal(); resolve(true); };
+      const done = (v) => { closeModal(); resolve(v); };
+      box.querySelector("[data-cancel]").onclick = () => done(false);
+      box.querySelector("[data-ok]").onclick = () => done(true);
+      document.getElementById("modal-mask").onclick = (e) => {
+        if (e.target.id === "modal-mask") done(false);
+      };
     });
   }
 
@@ -97,5 +133,5 @@ const Common = (() => {
     return `<div class="avatar" style="width:${size}px;height:${size}px;font-size:${Math.max(13, Math.round(size * 0.42))}px;border-radius:${Math.round(size / 2)}px">${avatarContent(user)}</div>`;
   }
 
-  return { toast, escapeHtml, fmtTime, fmtSize, openModal, closeModal, confirmDialog, roleBadge, avatarContent, avatarHtml };
+  return { toast, escapeHtml, fmtTime, fmtSize, openModal, closeModal, alertDialog, confirmDialog, roleBadge, avatarContent, avatarHtml };
 })();
