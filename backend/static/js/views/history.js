@@ -55,6 +55,21 @@ const HistoryView = (() => {
     }
   }
 
+  // 兼容数组 / JSON 字符串两种来源格式
+  function srcTitles(m) {
+    if (m.role !== "assistant" || !m.sources) return [];
+    let arr = m.sources;
+    if (typeof arr === "string") {
+      try { arr = JSON.parse(arr); } catch { return []; }
+    }
+    return Array.isArray(arr) ? arr.map((s) => Common.escapeHtml((s && s.title) || "未知来源")) : [];
+  }
+
+  function srcLine(m) {
+    const titles = srcTitles(m);
+    return titles.length ? `<div class="msg-src-mini">参考：${titles.join("、")}</div>` : "";
+  }
+
   async function viewSession(id) {
     try {
       const msgs = await API.request("GET", `/api/chat/sessions/${id}/messages`);
@@ -69,6 +84,7 @@ const HistoryView = (() => {
             <div class="msg-row ${m.role === "user" ? "" : "msg-assistant"}">
               <div class="msg-role">${m.role === "user" ? "我" : "助教"}</div>
               <div class="msg-content">${Common.escapeHtml(m.content)}</div>
+              ${srcLine(m)}
               <div class="muted" style="font-size:12px;margin-top:6px">${Common.fmtTime(m.created_at)}</div>
             </div>`).join("") : `<div class="empty-state"><p>该会话暂无消息</p></div>`}
         </div>

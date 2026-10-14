@@ -156,7 +156,7 @@ const ChatView = (() => {
     try {
       const msgs = await API.request("GET", `/api/chat/sessions/${id}/messages`);
       messagesEl.innerHTML = "";
-      msgs.forEach((m) => renderMessage(m.role, m.content));
+      msgs.forEach((m) => renderMessage(m.role, m.content, m.sources));
       scrollBottom();
       // 返回“生成未完成”的会话：最后一条是提问但没有回答时，自动重新生成
       if (id === pendingConvId) {
@@ -220,7 +220,52 @@ const ChatView = (() => {
     }
   }
 
-  function renderMessage(role, content) {
+  // ---------- 引用来源 ----------
+  // 兼容两种后端返回：数组，或未解析的 JSON 字符串
+  function normalizeSources(sources) {
+    if (Array.isArray(sources)) return sources;
+    if (typeof sources === "string") {
+      try {
+        const arr = JSON.parse(sources);
+        return Array.isArray(arr) ? arr : [];
+      } catch { return []; }
+    }
+    return [];
+  }
+
+  const ICON_DOC = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+  const ICON_ARROW = '<svg class="src-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
+
+  // 在消息气泡下方挂一个「参考了 N 份资料」，默认收起
+  function renderSources(bodyEl, sources) {
+    sources = normalizeSources(sources);
+    if (!bodyEl || !sources.length) return;
+    if (bodyEl.querySelector(".msg-sources")) return;  // 补生成时不重复插入
+    const wrap = document.createElement("div");
+    wrap.className = "msg-sources";
+    const items = sources.map((s) => `
+      <div class="src-item">
+        <div class="src-item-head">
+          <span class="src-title">${Common.escapeHtml(s.title || "未知来源")}</span>
+          ${s.course ? `<span class="src-course">${Common.escapeHtml(s.course)}</span>` : ""}
+        </div>
+        <div class="src-snippet">${Common.escapeHtml(s.content || "")}</div>
+      </div>`).join("");
+    wrap.innerHTML = `
+      <button type="button" class="src-toggle">
+        ${ICON_DOC}<span>参考了 ${sources.length} 份资料</span>${ICON_ARROW}
+      </button>
+      <div class="src-list hidden">${items}</div>`;
+    const btn = wrap.querySelector(".src-toggle");
+    const list = wrap.querySelector(".src-list");
+    btn.addEventListener("click", () => {
+      const opened = !list.classList.toggle("hidden");
+      btn.classList.toggle("open", opened);
+    });
+    bodyEl.appendChild(wrap);
+  }
+
+  function renderMessage(role, content, sources) {
     const messagesEl = document.getElementById("chat-messages");
     if (!messagesEl) return;
     const div = document.createElement("div");
@@ -231,6 +276,9 @@ const ChatView = (() => {
         <div class="bubble md-body">${Markdown.render(content)}</div>
       </div>`;
     messagesEl.appendChild(div);
+    if (role === "assistant") {
+      renderSources(div.querySelector(".msg-body"), sources);
+    }
     return div;
   }
 
@@ -351,6 +399,11 @@ const ChatView = (() => {
           tip.className = "msg-note";
           tip.innerHTML = "该问题暂未在知识库中命中，已自动提交跟进；解决后可在侧边栏「我的反馈」中查看";
           body.appendChild(tip);
+          scrollBottom();
+        },
+        onSources: (sources) => {
+          if (seq !== streamSeq) return;
+          renderSources(assistantDiv.querySelector(".msg-body"), sources);
           scrollBottom();
         },
         onDone: () => {
