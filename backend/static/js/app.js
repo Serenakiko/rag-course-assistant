@@ -63,7 +63,7 @@ const App = (() => {
       API.clearSession();
       window.location.replace("/static/index.html");
     });
-    // 点击头像直接弹"更换头像"
+    // 点击头像直接弹“更换头像”
     const avatarEl = document.getElementById("user-avatar");
     avatarEl.title = "点击更换头像";
     avatarEl.addEventListener("click", (e) => {
@@ -119,7 +119,7 @@ const App = (() => {
       case "chat": ChatView.render(container); break;
       case "settings": ProfileView.render(container); break;
       case "kb":
-        // 管理员的"知识库管理"走表格视图；学生端"知识库"走卡片视图
+        // 管理员的“知识库管理”走表格视图；学生端“知识库”走卡片视图
         if (API.getUser().role === "admin") AdminView.render(container, "kb_table");
         else KnowledgeView.render(container);
         break;

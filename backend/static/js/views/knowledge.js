@@ -22,9 +22,9 @@ const KnowledgeView = (() => {
   function searchBoxHtml(id, placeholder) {
     return `
       <div class="search-box" id="${id}-box">
-        <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6b675f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
         <input class="form-control" id="${id}" placeholder="${placeholder}">
-        <button type="button" class="search-clear" id="${id}-clear" title="清空">✕</button>
+        <button type="button" class="search-clear" id="${id}-clear" title="清空"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
       </div>`;
   }
 
@@ -66,12 +66,12 @@ const KnowledgeView = (() => {
         <div class="filters">
           ${searchBoxHtml("kb-search", "搜索知识库名称 / 简介…")}
         </div>
-        <button class="btn btn-light-blue" id="kb-add">＋ 新建知识库</button>
+        <button class="btn btn-primary" id="kb-add"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>新建知识库</button>
       </div>
       <div class="kb-grid" id="kb-grid" style="margin-bottom:64px">
         <div style="grid-column:1/-1;text-align:center;padding:40px"><span class="loading-spinner"></span></div>
       </div>
-      <div class="pagination" id="kb-pagination" style="position:fixed;bottom:0;left:232px;right:0;justify-content:center;background:var(--bg,#f1f5f9);margin:0;padding:12px 26px;border-top:1px solid var(--border,#e2e8f0);z-index:20"></div>`;
+      <div class="pagination" id="kb-pagination" style="position:fixed;bottom:0;left:232px;right:0;justify-content:center;background:var(--bg,#f6f5f2);margin:0;padding:12px 26px;border-top:1px solid var(--border,#e3e0d9);z-index:20"></div>`;
 
     bindSearch("kb-search", loadBases);
     document.getElementById("kb-add").addEventListener("click", () => openBaseEditor(null));
@@ -104,7 +104,7 @@ const KnowledgeView = (() => {
 
     if (!pageRows.length) {
       grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1">
-        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#8b867d" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
         <p>${keyword ? "没搜到相关的知识库，换个关键词试试" : "还没有知识库"}</p>
         ${!keyword ? `<p class="mt-8">点击右上角「新建知识库」，创建第一个课程知识库</p>` : ""}
       </div>`;
@@ -263,7 +263,7 @@ const KnowledgeView = (() => {
         <h2 class="kb-detail-title">${Common.escapeHtml(base.name)}</h2>
       </div>
       <div class="page-toolbar justify-end">
-        <button class="btn btn-light-blue" id="kp-upload">↑ 上传文档</button>
+        <button class="btn btn-primary" id="kp-upload"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>上传文档</button>
       </div>
       <div class="kp-grid" id="kp-grid"><div style="grid-column:1/-1;text-align:center;padding:40px"><span class="loading-spinner"></span></div></div>`;
 
@@ -345,7 +345,7 @@ const KnowledgeView = (() => {
       const points = await API.request("GET", "/api/knowledge/points?" + params.toString());
       if (!points || points.length === 0) {
         grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1">
-          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#8b867d" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
           <p>这个知识库还没有知识点</p>
           <p class="mt-8">点击右上角「上传文档」添加课程资料</p>
         </div>`;

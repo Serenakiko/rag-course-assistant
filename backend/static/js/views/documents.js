@@ -14,7 +14,7 @@ const DocumentsView = (() => {
           </select>
         </div>
         <div class="toolbar-right">
-          <button class="btn btn-light-blue" id="doc-upload-btn">↑ 上传文档</button>
+          <button class="btn btn-primary" id="doc-upload-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>上传文档</button>
         </div>
       </div>
       <div class="card">
@@ -69,9 +69,9 @@ const DocumentsView = (() => {
         <label>选择知识库</label>
         <div style="display:flex;gap:8px;align-items:center">
           <select class="form-control" id="up-course" style="flex:1">${opts}</select>
-          <button type="button" class="btn" id="up-new-base" style="white-space:nowrap">＋ 新建知识库</button>
+          <button type="button" class="btn" id="up-new-base" style="white-space:nowrap"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>新建知识库</button>
         </div>
-        <div id="up-new-box" style="display:none;margin-top:10px;background:#f8fafc;border:1px solid #eef2f7;border-radius:10px;padding:12px 14px">
+        <div id="up-new-box" style="display:none;margin-top:10px;background:#faf9f7;border:1px solid #e6e3dc;border-radius:10px;padding:12px 14px">
           <label style="display:block;margin-bottom:6px;font-weight:500;color:var(--text-2);font-size:13px">新知识库名称</label>
           <div style="display:flex;gap:8px">
             <input class="form-control" id="up-new-name" placeholder="例如：计算机网络" style="flex:1">

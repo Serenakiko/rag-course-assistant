@@ -60,7 +60,7 @@ const API = (() => {
    * 流式问答：POST /api/chat/ask，按 SSE 事件回调。
    * handlers: { onToken, onSources, onError, onDone }
    * opts: { idleTimeout, totalTimeout }（毫秒）——长时间无内容 / 总时长超限时自动中止，
-   *       避免网络或模型异常导致页面一直卡在"生成中"；knowledgeBases——回答范围（课程名列表，空=全部）
+   *       避免网络或模型异常导致页面一直卡在“生成中”；knowledgeBases——回答范围（课程名列表，空=全部）
    * 返回 AbortController（可调用 .abort() 停止）
    */
   async function streamAsk(conversationId, message, handlers, opts = {}) {
@@ -105,11 +105,11 @@ const API = (() => {
 
     // 空闲超时：任何数据到达都会重置；总时长超时：只触发一次
     let idleTimer = setTimeout(() => {
-      fail("长时间未收到模型响应，已自动停止。可点击「重新生成」或稍后重试。");
+      fail("长时间没收到模型响应，已经停下来了。稍后重新发一次试试。");
       controller.abort();
     }, idleTimeout);
     const totalTimer = setTimeout(() => {
-      fail("回答生成时间过长，已自动停止。可点击「重新生成」重试。");
+      fail("回答生成时间太长，已经停下来了。稍后重新发一次试试。");
       controller.abort();
     }, totalTimeout);
 
@@ -119,7 +119,7 @@ const API = (() => {
         if (done) break;
         clearTimeout(idleTimer);
         idleTimer = setTimeout(() => {
-          fail("长时间未收到模型响应，已自动停止。可点击「重新生成」或稍后重试。");
+          fail("长时间没收到模型响应，已经停下来了。稍后重新发一次试试。");
           controller.abort();
         }, idleTimeout);
         buffer += decoder.decode(value, { stream: true });

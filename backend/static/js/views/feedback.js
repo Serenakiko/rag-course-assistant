@@ -35,7 +35,7 @@ const FeedbackView = (() => {
       allItems = await API.request("GET", "/api/chat/unanswered/mine");
       renderStats();
       renderList();
-      // 进入即视为已读：只标记"已解决且未读"的记录，随后刷新侧边栏角标
+      // 进入即视为已读：只标记“已解决且未读”的记录，随后刷新侧边栏角标
       const unreadIds = allItems
         .filter((it) => it.status === "resolved" && !it.read)
         .map((it) => it.id);

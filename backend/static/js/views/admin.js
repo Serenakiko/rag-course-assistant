@@ -108,8 +108,8 @@ const AdminView = (() => {
     for (let g = 0; g <= 4; g++) {
       const gy = padT + (innerH / 4) * g;
       const val = Math.round(max - (max / 4) * g);
-      grid += `<line x1="${padL}" y1="${gy}" x2="${w - padR}" y2="${gy}" stroke="#e2e8f0" stroke-width="1"/>`;
-      grid += `<text x="${padL - 8}" y="${gy + 4}" text-anchor="end" font-size="11" fill="#94a3b8">${val}</text>`;
+      grid += `<line x1="${padL}" y1="${gy}" x2="${w - padR}" y2="${gy}" stroke="#e3e0d9" stroke-width="1"/>`;
+      grid += `<text x="${padL - 8}" y="${gy + 4}" text-anchor="end" font-size="11" fill="#8b867d">${val}</text>`;
     }
 
     // 折线 path
@@ -121,20 +121,20 @@ const AdminView = (() => {
     let dots = "";
     let labels = "";
     points.forEach((p, i) => {
-      dots += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4" fill="#fff" stroke="#3b82f6" stroke-width="2"><title>${p.date}：${p.count} 次</title></circle>`;
-      labels += `<text x="${p.x.toFixed(1)}" y="${h - 10}" text-anchor="middle" font-size="11" fill="#94a3b8">${p.date.slice(5)}</text>`;
+      dots += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4" fill="#fff" stroke="#17505e" stroke-width="2"><title>${p.date}：${p.count} 次</title></circle>`;
+      labels += `<text x="${p.x.toFixed(1)}" y="${h - 10}" text-anchor="middle" font-size="11" fill="#8b867d">${p.date.slice(5)}</text>`;
     });
 
     el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto" role="img" aria-label="近7天提问趋势">
       <defs>
         <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.35"/>
-          <stop offset="100%" stop-color="#3b82f6" stop-opacity="0.02"/>
+          <stop offset="0%" stop-color="#17505e" stop-opacity="0.35"/>
+          <stop offset="100%" stop-color="#17505e" stop-opacity="0.02"/>
         </linearGradient>
       </defs>
       ${grid}
       <path d="${areaPath}" fill="url(#trendFill)"/>
-      <path d="${linePath}" fill="none" stroke="#3b82f6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="${linePath}" fill="none" stroke="#17505e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
       ${dots}
       ${labels}
     </svg>`;
@@ -148,7 +148,7 @@ const AdminView = (() => {
       el.innerHTML = `<div class="empty-state"><p>暂无数据</p></div>`;
       return;
     }
-    const colors = ["#3b82f6", "#a3e635", "#64748b", "#f59e0b", "#ef4444", "#06b6d4", "#8b5cf6"];
+    const colors = ["#17505e", "#b0762c", "#5d7a52", "#8a5a4a", "#4a6b8a", "#7a6a8a", "#6b675f"];
     const total = Math.max(1, dist.reduce((a, d) => a + d.count, 0));
     const cx = 90, cy = 90, r = 70, innerR = 44;
 
@@ -195,14 +195,14 @@ const AdminView = (() => {
       <div class="page-toolbar">
         <div class="toolbar-left">
           <div class="search-box" id="users-search-box">
-            <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8b867d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
             <input class="form-control" id="users-search" placeholder="搜索账号或用户名">
-            <button type="button" class="search-clear" id="users-search-clear" title="清空">✕</button>
+            <button type="button" class="search-clear" id="users-search-clear" title="清空"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
           </div>
           <span class="list-count" id="users-count" style="margin-left:10px"></span>
         </div>
         <div class="toolbar-right">
-          <button class="btn btn-light-blue" id="user-add">＋ 新增用户</button>
+          <button class="btn btn-primary" id="user-add"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>新增用户</button>
         </div>
       </div>
       <div class="card">
@@ -259,7 +259,7 @@ const AdminView = (() => {
       tbody.innerHTML = pageRows.map((u) => `
         <tr>
           <td>${u.id}</td>
-          <td>${Common.escapeHtml(u.username)}${u.id === me.id ? ' <span class="badge" style="background:#eff6ff;color:#2563eb">我</span>' : ""}</td>
+          <td>${Common.escapeHtml(u.username)}${u.id === me.id ? ' <span class="badge" style="background:#e7eff1;color:#17505e">我</span>' : ""}</td>
           <td>${Common.escapeHtml(u.real_name || "-")}</td>
           <td><span class="role-badge ${u.role}">${u.role === "admin" ? "管理员" : "学生"}</span></td>
           <td class="muted">${Common.fmtTime(u.created_at)}</td>
@@ -382,13 +382,13 @@ const AdminView = (() => {
       <div class="page-toolbar">
         <div class="toolbar-left">
           <div class="search-box" id="kb-search-box">
-            <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8b867d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
             <input class="form-control" id="kb-search" placeholder="搜索知识库名称">
-            <button type="button" class="search-clear" id="kb-search-clear" title="清空">✕</button>
+            <button type="button" class="search-clear" id="kb-search-clear" title="清空"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
           </div>
         </div>
         <div class="toolbar-right">
-          <button class="btn btn-light-blue" id="kb-add">＋ 新增知识库</button>
+          <button class="btn btn-primary" id="kb-add"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>新增知识库</button>
         </div>
       </div>
       <div class="card">
@@ -619,11 +619,11 @@ const AdminView = (() => {
       <div style="display:flex;flex-direction:column;gap:14px">
         <div>
           <div class="muted mb-8" style="font-weight:600">提问</div>
-          <div style="padding:12px 14px;background:#f8fafc;border-radius:10px;line-height:1.7">${Common.escapeHtml(m.question)}</div>
+          <div style="padding:12px 14px;background:#faf9f7;border-radius:10px;line-height:1.7">${Common.escapeHtml(m.question)}</div>
         </div>
         <div>
           <div class="muted mb-8" style="font-weight:600">回答</div>
-          <div class="md-body" style="padding:12px 14px;background:#eff6ff;border-radius:10px;line-height:1.7">${Markdown.render(m.answer || "-")}</div>
+          <div class="md-body" style="padding:12px 14px;background:#e7eff1;border-radius:10px;line-height:1.7">${Markdown.render(m.answer || "-")}</div>
         </div>
         <div>
           <div class="muted mb-8" style="font-weight:600">知识库</div>
@@ -775,7 +775,7 @@ const AdminView = (() => {
         <h3 style="font-size:17px;margin:0">生成回答</h3>
         <button class="modal-close" data-close>×</button>
       </div>
-      <div style="background:#f8fafc;border:1px solid #eef2f7;border-radius:10px;padding:14px 16px;font-size:15px;line-height:1.75;color:#0f172a">${Common.escapeHtml(q.question)}</div>
+      <div style="background:#faf9f7;border:1px solid #e6e3dc;border-radius:10px;padding:14px 16px;font-size:15px;line-height:1.75;color:#1d1b18">${Common.escapeHtml(q.question)}</div>
       <div class="modal-footer" style="margin-top:20px;justify-content:flex-end;gap:10px">
         <button class="btn" data-go-doc>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>

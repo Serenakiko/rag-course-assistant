@@ -11,12 +11,12 @@ const ProfileView = (() => {
           <div class="card p-card">
             <div class="row-between p-card-head">
               <div style="font-size:15px;font-weight:600;color:var(--text-1)">个人信息</div>
-              <button class="btn btn-sm btn-light-blue" id="p-edit">编辑资料</button>
+              <button class="btn btn-sm btn-primary" id="p-edit">编辑资料</button>
             </div>
             <div class="p-card-section">
               <div style="display:flex;flex-direction:column;align-items:center">
                 <div id="p-avatar-main">${Common.avatarHtml(user, 88)}</div>
-                <div class="mt-8"><button class="btn btn-sm btn-light-blue" id="p-avatar">更换头像</button></div>
+                <div class="mt-8"><button class="btn btn-sm btn-primary" id="p-avatar">更换头像</button></div>
               </div>
               <div style="margin-top:18px">
                 <div class="form-group"><label>账号</label><input class="form-control" id="p-username" value="${Common.escapeHtml(user.username)}" readonly></div>
@@ -53,7 +53,7 @@ const ProfileView = (() => {
                 </div>
               </div>
               <div style="display:flex;justify-content:flex-end">
-                <button class="btn btn-light-blue" id="p-pwd-save">修改密码</button>
+                <button class="btn btn-primary" id="p-pwd-save">修改密码</button>
               </div>
             </div>
           </div>
@@ -110,7 +110,7 @@ const ProfileView = (() => {
     });
   }
 
-  /* 点击头部/侧边栏头像时弹出"更换头像"弹窗（与设置页同一套逻辑） */
+  /* 点击头部/侧边栏头像时弹出“更换头像”弹窗（与设置页同一套逻辑） */
   function openAvatarModal() {
     const user = API.getUser();
     Common.openModal(`

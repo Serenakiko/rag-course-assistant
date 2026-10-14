@@ -6,8 +6,8 @@ const HistoryView = (() => {
         <div class="row-between mb-16">
           <b>我的问答会话</b>
           <div class="row" style="gap:10px">
-            <button class="btn btn-sm" id="history-new">＋ 发起新问答</button>
-            <button class="btn btn-sm" id="history-refresh">↻ 刷新</button>
+            <button class="btn btn-sm" id="history-new"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>发起新问答</button>
+            <button class="btn btn-sm" id="history-refresh"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 6"/><path d="M20 4v7h-7"/></svg>刷新</button>
           </div>
         </div>
         <div class="table-wrap">
@@ -67,7 +67,7 @@ const HistoryView = (() => {
         <div style="max-height:56vh;overflow-y:auto;display:flex;flex-direction:column;gap:10px">
           ${msgs.length ? msgs.map((m) => `
             <div class="msg-row ${m.role === "user" ? "" : "msg-assistant"}">
-              <div class="msg-role">${m.role === "user" ? "👤 我" : "🤖 助教"}</div>
+              <div class="msg-role">${m.role === "user" ? "我" : "助教"}</div>
               <div class="msg-content">${Common.escapeHtml(m.content)}</div>
               <div class="muted" style="font-size:12px;margin-top:6px">${Common.fmtTime(m.created_at)}</div>
             </div>`).join("") : `<div class="empty-state"><p>该会话暂无消息</p></div>`}

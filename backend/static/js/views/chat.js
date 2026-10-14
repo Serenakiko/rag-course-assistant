@@ -158,7 +158,7 @@ const ChatView = (() => {
       messagesEl.innerHTML = "";
       msgs.forEach((m) => renderMessage(m.role, m.content));
       scrollBottom();
-      // 返回"生成未完成"的会话：最后一条是提问但没有回答时，自动重新生成
+      // 返回“生成未完成”的会话：最后一条是提问但没有回答时，自动重新生成
       if (id === pendingConvId) {
         pendingConvId = null;
         const last = msgs[msgs.length - 1];
@@ -245,7 +245,7 @@ const ChatView = (() => {
     ];
     messagesEl.innerHTML = `
       <div class="chat-welcome">
-        <div class="w-icon">💬</div>
+        <div class="w-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></div>
         <h2>你好，${Common.escapeHtml(API.getUser()?.real_name || "同学")}</h2>
         <p>我是你的课程智能助教，会基于已有知识库回答你的问题，帮你梳理课程知识点、解析学习资料。</p>
         <div class="demo-questions">
@@ -318,9 +318,9 @@ const ChatView = (() => {
       }, 90);
     };
 
-    // 生成中：发送按钮变为可点击的"停止生成"
+    // 生成中：发送按钮变为可点击的“停止生成”
     sendBtn.title = "停止生成";
-    sendBtn.style.background = "#dc2626";
+    sendBtn.style.background = "var(--danger)";
     sendBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
 
     try {
@@ -337,7 +337,7 @@ const ChatView = (() => {
           if (seq !== streamSeq) return;
           hadError = true;
           errorMsg = msg;
-          const errHtml = `<span style="color:var(--danger)">⚠️ ${Common.escapeHtml(msg)}</span>`;
+          const errHtml = `<span style="color:var(--danger)">${Common.escapeHtml(msg)}</span>`;
           bubble.innerHTML = fullText
             ? `${Markdown.render(fullText)}<div style="margin-top:10px">${errHtml}</div>`
             : errHtml;
@@ -360,9 +360,9 @@ const ChatView = (() => {
             bubble.innerHTML = fullText ? Markdown.render(fullText)
               : `<span style="color:var(--text-3)">已停止生成。</span>`;
           } else if (!fullText) {
-            bubble.innerHTML = `<span style="color:var(--danger)">⚠️ ${Common.escapeHtml(errorMsg)}</span>`;
+            bubble.innerHTML = `<span style="color:var(--danger)">${Common.escapeHtml(errorMsg)}</span>`;
           }
-          // 出错且已有部分内容时，保留 onError 中"部分内容 + 错误提示"的渲染结果
+          // 出错且已有部分内容时，保留 onError 中“部分内容 + 错误提示”的渲染结果
           scrollBottom();
         },
       }, { knowledgeBases });
@@ -370,7 +370,7 @@ const ChatView = (() => {
       if (seq !== streamSeq) return;
       hadError = true;
       errorMsg = err.message;
-      bubble.innerHTML = `<span style="color:var(--danger)">⚠️ ${Common.escapeHtml(err.message)}</span>`;
+      bubble.innerHTML = `<span style="color:var(--danger)">${Common.escapeHtml(err.message)}</span>`;
     } finally {
       if (seq !== streamSeq) return;  // 已被新生成/切换会话取代，不恢复界面状态
       sendBtn.title = "发送";
