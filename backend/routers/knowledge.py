@@ -31,10 +31,15 @@ from ..services.document_parser import parse_file
 from ..services.kb_scope import (
     admin_user_ids as _admin_user_ids,
     all_base_names,
+    all_course_names,
     allowed_course_names,
     assert_writable_course,
+    can_view_point,
     hidden_base_names,
+    hidden_course_names,
+    point_scope_condition,
     visible_base_names,
+    visible_course_names,
 )
 from ..services.vector_store import (
     add_knowledge_point,
@@ -55,8 +60,11 @@ def can_manage(user: User, creator_id: int | None) -> bool:
 
 # 可见性规则统一在 services/kb_scope.py，浏览和问答检索共用同一套
 _all_base_names = all_base_names
+_all_course_names = all_course_names
 _visible_base_names = visible_base_names
+_visible_course_names = visible_course_names
 _hidden_base_names = hidden_base_names
+_hidden_course_names = hidden_course_names
 
 
 # ==================== 知识库 ====================
@@ -196,10 +204,10 @@ def list_points(
     db: Session = Depends(get_db),
 ) -> list[KnowledgePoint]:
     stmt = select(KnowledgePoint)
-    hidden = _hidden_base_names(user, db)
-    if hidden:
-        # 知识点跟随所属知识库的可见性；课程名不属于任何知识库的历史数据仍可见
-        stmt = stmt.where(KnowledgePoint.course.notin_(hidden))
+    # 知识点跟随所属知识库的可见性；历史课程和未分类只对创建者本人可见
+    conditions = point_scope_condition(user, db)
+    if conditions:
+        stmt = stmt.where(*conditions)
     if keyword.strip():
         like = f"%{keyword.strip()}%"
         stmt = stmt.where(
@@ -220,21 +228,12 @@ def list_courses(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[str]:
-    hidden = _hidden_base_names(user, db)
-    stmt = select(KnowledgeBase.name)
-    if hidden:
-        stmt = stmt.where(KnowledgeBase.name.notin_(hidden))
-    base_names = list(db.scalars(stmt.order_by(KnowledgeBase.name)))
-    # 兼容历史数据：旧知识点课程不属于任何知识库时也返回
-    # （注意对比的是"全部知识库名"，否则会把看不到的库名重新加回来）
-    all_names = _all_base_names(db)
-    old_courses = db.execute(
-        select(KnowledgePoint.course).distinct().order_by(KnowledgePoint.course)
-    ).all()
-    for (c,) in old_courses:
-        if c and c not in all_names:
-            base_names.append(c)
-    return base_names
+    visible = _visible_course_names(user, db)
+    if visible is None:
+        # 管理员：全部知识库 + 历史课程
+        return sorted(_all_course_names(db))
+    # 学生：可见知识库 + 自己（或管理员）留下的历史课程
+    return sorted(visible)
 
 
 @router.post("/points", response_model=KnowledgePointOut, summary="新增知识点")
@@ -278,7 +277,7 @@ def update_point(
     point = db.get(KnowledgePoint, point_id)
     if point is None:
         raise HTTPException(status_code=404, detail="知识点不存在")
-    if point.course in _hidden_base_names(user, db):
+    if not can_view_point(user, db, point):
         raise HTTPException(status_code=403, detail="只能编辑自己能访问的知识库下的知识点")
     # 编辑时允许改挂知识库，但要确认目标知识库同样可写，否则等于借编辑把自己挪进别人的库
     assert_writable_course(user, db, payload.course)

@@ -52,22 +52,87 @@ def hidden_base_names(user: User, db: Session) -> set[str]:
     return all_base_names(db) - visible
 
 
-def allowed_course_names(user: User, db: Session) -> list[str] | None:
-    """问答检索允许命中的课程名；None 表示不限制（管理员）。
+def all_course_names(db: Session) -> set[str]:
+    """所有出现过的课程名：知识库名 + 只存在于知识点上的历史课程名。"""
+    names = all_base_names(db)
+    names |= {c for c in db.scalars(select(KnowledgePoint.course).distinct()) if c}
+    return names
 
-    学生的范围 = 可见知识库 + 不属于任何知识库的历史课程（兼容旧数据）。
-    返回空列表表示「没有可检索的范围」，调用方要按「知识库为空」处理。
+
+def visible_course_names(user: User, db: Session) -> set[str] | None:
+    """当前用户可见的课程名（含历史课程）；管理员返回 None，表示不限制。
+
+    历史课程（课程名不对应任何知识库）也按创建者判断：管理员留下的对所有学生可见，
+    学生自己建的只有他自己能看到。只按知识库过滤的话，学生 A 以前留下的
+    "某某的私藏" 这种课程名会出现在学生 B 的课程列表里。
     """
     visible = visible_base_names(user, db)
     if visible is None:
         return None
     known = all_base_names(db)
-    legacy = {
-        c
-        for c in db.scalars(select(KnowledgePoint.course).distinct())
-        if c and c not in known
-    }
-    return sorted(visible | legacy)
+    legacy = set(
+        db.scalars(
+            select(KnowledgePoint.course)
+            .distinct()
+            .where(
+                KnowledgePoint.course != "",
+                KnowledgePoint.course.notin_(known),
+                or_(
+                    KnowledgePoint.created_by == user.id,
+                    KnowledgePoint.created_by.in_(admin_user_ids()),
+                ),
+            )
+        )
+    )
+    return visible | legacy
+
+
+def hidden_course_names(user: User, db: Session) -> set[str]:
+    """当前用户看不到的课程名（知识库 + 历史课程）；空集合表示无需过滤。"""
+    visible = visible_course_names(user, db)
+    if visible is None:
+        return set()
+    return all_course_names(db) - visible
+
+
+def point_scope_condition(user: User, db: Session):
+    """知识点行级可见性条件；管理员返回 None（不限制）。
+
+    课程名可见还不够：学生把课程留空（"未分类"）同样会把内容暴露给所有人，
+    所以未分类的知识点只对创建者本人和管理员留下的那部分可见。
+    """
+    if user.role == "admin":
+        return None
+    hidden = hidden_course_names(user, db)
+    conditions = [KnowledgePoint.course.notin_(hidden)] if hidden else []
+    conditions.append(
+        or_(
+            KnowledgePoint.course != "",
+            KnowledgePoint.created_by == user.id,
+            KnowledgePoint.created_by.in_(admin_user_ids()),
+        )
+    )
+    return conditions
+
+
+def can_view_point(user: User, db: Session, point) -> bool:
+    """单条知识点的可见性判断（与 point_scope_condition 同一套规则）。"""
+    if user.role == "admin":
+        return True
+    if point.course:
+        return point.course not in hidden_course_names(user, db)
+    if point.created_by == user.id:
+        return True
+    return point.created_by in set(db.scalars(admin_user_ids()))
+
+
+def allowed_course_names(user: User, db: Session) -> list[str] | None:
+    """问答检索允许命中的课程名；None 表示不限制（管理员）。
+
+    返回空列表表示「没有可检索的范围」，调用方要按「知识库为空」处理。
+    """
+    visible = visible_course_names(user, db)
+    return None if visible is None else sorted(visible)
 
 
 def assert_writable_course(user: User, db: Session, course: str) -> None:
@@ -80,5 +145,5 @@ def assert_writable_course(user: User, db: Session, course: str) -> None:
     name = (course or "").strip()
     if not name or user.role == "admin":
         return
-    if name not in (visible_base_names(user, db) or set()):
+    if name not in (visible_course_names(user, db) or set()):
         raise HTTPException(status_code=403, detail="没有权限向该知识库写入内容")
