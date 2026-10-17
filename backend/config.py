@@ -25,7 +25,9 @@ class Settings:
     APP_VERSION: str = "1.0.0"
     HOST: str = _get("HOST", "127.0.0.1")
     PORT: int = int(_get("PORT", "8000"))
-    JWT_SECRET: str = _get("JWT_SECRET", "dev-secret-change-me")
+    # 不提供默认值：缺失或仍是模板占位值时由 _check_secret 直接拒绝启动，
+    # 避免用公开的默认密钥签发令牌（否则任何人都能伪造管理员 token）。
+    JWT_SECRET: str = _get("JWT_SECRET", "")
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_HOURS: int = int(_get("JWT_EXPIRE_HOURS", "72"))
 
@@ -82,3 +84,18 @@ class Settings:
 
 
 settings = Settings()
+
+
+def _check_secret(secret: str) -> None:
+    """JWT 密钥必须是够长的随机串，占位值一律拒绝启动。"""
+    placeholder = secret.startswith("please-change-this-secret-key") or secret == "dev-secret-change-me"
+    if placeholder or len(secret) < 32:
+        raise RuntimeError(
+            "JWT_SECRET 缺失、过短或仍是模板占位值，服务拒绝启动。\n"
+            "生成随机密钥并写入 .env：\n"
+            '  python -c "import secrets;print(secrets.token_hex(32))"\n'
+            "然后填到 .env 的 JWT_SECRET= 后面，重启服务。"
+        )
+
+
+_check_secret(settings.JWT_SECRET)
