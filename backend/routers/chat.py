@@ -235,7 +235,7 @@ def _kb_from_conv(raw: str | None) -> str:
 
 
 @router.get("/admin/messages", summary="全部问答对（管理员，按时间倒序）")
-def admin_list_messages(
+def admin_qa_pairs(
     course: str = "",
     admin: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),

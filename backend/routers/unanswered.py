@@ -117,9 +117,13 @@ async def regenerate_answer(
         raise HTTPException(status_code=404, detail="记录不存在")
 
     from ..models import utcnow
+    from ..services.kb_scope import allowed_course_names
     from ..services.rag_service import generate_answer, is_unmatched_answer
 
-    result = await generate_answer(q.question)
+    # 按提问学生当时的可见范围重新检索。不限定范围的话，管理员一按「生成回答」，
+    # 检索会跨到别人的私有知识库，把那里的内容写进这个学生的反馈里。
+    scope = allowed_course_names(q.creator, db) if q.creator is not None else None
+    result = await generate_answer(q.question, courses=scope)
     if result["recommended"]:
         q.related_points = json.dumps(result["recommended"], ensure_ascii=False)
     if result["matched"]:
