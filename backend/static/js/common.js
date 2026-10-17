@@ -91,12 +91,11 @@ const Common = (() => {
     });
   }
 
-  function confirmDialog({ title = "确认操作", message = "", danger = true, okText = "确认", icon = "" }) {
+  // 确认类弹窗不放图标：退出登录、各种删除都走这里，越干净越好
+  function confirmDialog({ title = "确认操作", message = "", danger = true, okText = "确认" }) {
     return new Promise((resolve) => {
-      const kind = icon || (danger ? "warning" : "info");
       const box = openModal(`
         <div class="alert-body">
-          <div class="alert-icon ${kind}">${ALERT_ICONS[kind]}</div>
           <div class="alert-text">
             <div class="alert-title">${escapeHtml(title)}</div>
             <div class="alert-msg">${message}</div>

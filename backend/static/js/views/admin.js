@@ -224,7 +224,12 @@ const AdminView = (() => {
   function renderUsers(container) {
     container.innerHTML = `
       <div class="page-toolbar">
-        <div class="toolbar-left">
+        <div class="toolbar-left" style="gap:10px">
+          <select class="form-control" id="users-field" style="width:110px" aria-label="搜索范围">
+            <option value="account">账号</option>
+            <option value="name">用户名</option>
+            <option value="role">角色</option>
+          </select>
           <div class="search-box" id="users-search-box">
             <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8b867d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
             <input class="form-control" id="users-search" placeholder="搜索账号或用户名">
@@ -253,6 +258,12 @@ const AdminView = (() => {
     document.getElementById("users-search-clear").addEventListener("click", () => {
       input.value = ""; usersPage = 1; renderUsersTable(); syncClear(); input.focus();
     });
+    const userPlaceholders = { account: "搜索账号", name: "搜索用户名", role: "搜索角色（学生/管理员）" };
+    document.getElementById("users-field").addEventListener("change", (e) => {
+      usersPage = 1;
+      input.placeholder = userPlaceholders[e.target.value] || "搜索…";
+      renderUsersTable();
+    });
     loadUsers();
   }
 
@@ -271,11 +282,14 @@ const AdminView = (() => {
     const tbody = document.getElementById("users-tbody");
     if (!tbody) return;
     const keyword = (document.getElementById("users-search")?.value || "").trim().toLowerCase();
-    const filtered = usersCache.filter((u) =>
-      !keyword ||
-      u.username.toLowerCase().includes(keyword) ||
-      (u.real_name || "").toLowerCase().includes(keyword)
-    );
+    const field = document.getElementById("users-field")?.value || "account";
+    const roleText = (u) => (u.role === "admin" ? "管理员" : "学生");
+    const filtered = usersCache.filter((u) => {
+      if (!keyword) return true;
+      if (field === "name") return (u.real_name || "").toLowerCase().includes(keyword);
+      if (field === "role") return roleText(u).includes(keyword) || u.role.includes(keyword);
+      return u.username.toLowerCase().includes(keyword);
+    });
     const countEl = document.getElementById("users-count");
     if (countEl) countEl.textContent = keyword ? `匹配 ${filtered.length} 条` : "";
     const totalPages = Math.max(1, Math.ceil(filtered.length / usersPageSize));
@@ -411,7 +425,12 @@ const AdminView = (() => {
     stopKbTimer();
     container.innerHTML = `
       <div class="page-toolbar">
-        <div class="toolbar-left">
+        <div class="toolbar-left" style="gap:10px">
+          <select class="form-control" id="kb-field" style="width:120px" aria-label="搜索范围">
+            <option value="name">名称</option>
+            <option value="description">描述</option>
+            <option value="creator">创建者</option>
+          </select>
           <div class="search-box" id="kb-search-box">
             <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8b867d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
             <input class="form-control" id="kb-search" placeholder="搜索知识库名称">
@@ -438,6 +457,12 @@ const AdminView = (() => {
     document.getElementById("kb-search-clear").addEventListener("click", () => {
       input.value = ""; kbPage = 1; renderKbTableRows(); input.focus();
     });
+    const kbPlaceholders = { name: "搜索知识库名称", description: "搜索描述", creator: "搜索创建者" };
+    document.getElementById("kb-field").addEventListener("change", (e) => {
+      kbPage = 1;
+      input.placeholder = kbPlaceholders[e.target.value] || "搜索…";
+      renderKbTableRows();
+    });
     loadKbTable();
     // 启动 30s 静默同步（仅在停留在本页时运行）
     kbTimer = setInterval(silentRefreshKb, 30000);
@@ -460,9 +485,13 @@ const AdminView = (() => {
     const tbody = document.getElementById("kb-tbody");
     if (!tbody) return;
     const keyword = (document.getElementById("kb-search")?.value || "").trim().toLowerCase();
-    const filtered = kbCache.filter((b) =>
-      !keyword || b.name.toLowerCase().includes(keyword) || (b.description || "").toLowerCase().includes(keyword)
-    );
+    const field = document.getElementById("kb-field")?.value || "name";
+    const filtered = kbCache.filter((b) => {
+      if (!keyword) return true;
+      if (field === "description") return (b.description || "").toLowerCase().includes(keyword);
+      if (field === "creator") return (b.creator_name || "").toLowerCase().includes(keyword);
+      return b.name.toLowerCase().includes(keyword);
+    });
     const totalPages = Math.max(1, Math.ceil(filtered.length / kbPageSize));
     if (kbPage > totalPages) kbPage = totalPages;
     const start = (kbPage - 1) * kbPageSize;
@@ -480,12 +509,15 @@ const AdminView = (() => {
           <td>${Common.escapeHtml(b.creator_name || "-")}</td>
           <td class="muted">${Common.fmtTime(b.created_at)}</td>
           <td>
+            <button class="ops-link up" data-up="${b.id}">上传资料</button>
             <button class="ops-link edit" data-edit="${b.id}">编辑</button>
             <button class="ops-link del" data-del="${b.id}">删除</button>
           </td>
         </tr>`).join("");
     }
 
+    tbody.querySelectorAll("[data-up]").forEach((b) =>
+      b.addEventListener("click", () => openKbUpload(kbCache.find((x) => x.id === Number(b.dataset.up)))));
     tbody.querySelectorAll("[data-edit]").forEach((b) =>
       b.addEventListener("click", () => openKbEditor(kbCache.find((x) => x.id === Number(b.dataset.edit)))));
     tbody.querySelectorAll("[data-del]").forEach((b) =>
@@ -526,12 +558,82 @@ const AdminView = (() => {
         if (!name) return Common.toast("请输入知识库名称", "error");
         const description = box.querySelector("#kb-desc").value.trim();
         try {
-          if (isEdit) await API.request("PUT", `/api/knowledge/bases/${base.id}`, { name, description });
-          else await API.request("POST", "/api/knowledge/bases", { name, description });
-          Common.toast("已保存", "success");
+          if (isEdit) {
+            await API.request("PUT", `/api/knowledge/bases/${base.id}`, { name, description });
+            Common.toast("已保存", "success");
+            Common.closeModal();
+            loadKbTable();
+            return;
+          }
+          const created = await API.request("POST", "/api/knowledge/bases", { name, description });
+          Common.toast("已创建，接着上传资料", "success");
           Common.closeModal();
           loadKbTable();
+          // 新建完直接进入上传，不用再跑去文档管理页
+          setTimeout(() => openKbUpload(created), 120);
         } catch (err) { Common.toast(err.message, "error"); }
+      });
+    }});
+  }
+
+  /* 上传资料到指定知识库：管理员建完库就地传，不再跳文档管理 */
+  function openKbUpload(base) {
+    if (!base) return;
+    Common.openModal(`
+      <div class="modal-header">
+        <h3>上传资料到「${Common.escapeHtml(base.name)}」</h3>
+        <button class="modal-close" data-close>×</button>
+      </div>
+      <div class="form-group">
+        <label>选择文件</label>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <button type="button" class="btn" id="kb-up-pick">选择文件</button>
+          <span class="muted" id="kb-up-files" style="font-size:13px"></span>
+        </div>
+        <input type="file" id="kb-up-input" accept=".pdf,.txt,.md,.markdown,.csv" multiple style="display:none">
+        <div class="muted" style="margin-top:8px;font-size:12.5px">支持 pdf、txt、md、csv，单个 20MB 以内；解析完会自动生成知识点。</div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" data-close>关闭</button>
+        <button class="btn btn-primary" id="kb-up-submit" disabled>上传</button>
+      </div>
+    `, { onOpen: (box) => {
+      const input = box.querySelector("#kb-up-input");
+      const filesEl = box.querySelector("#kb-up-files");
+      const submit = box.querySelector("#kb-up-submit");
+      box.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", Common.closeModal));
+      box.querySelector("#kb-up-pick").addEventListener("click", () => input.click());
+      input.addEventListener("change", () => {
+        const files = Array.from(input.files || []);
+        filesEl.textContent = files.length
+          ? `已选 ${files.length} 个文件：${files.map((f) => f.name).join("、")}`
+          : "";
+        submit.disabled = files.length === 0;
+      });
+      submit.addEventListener("click", async () => {
+        const files = Array.from(input.files || []);
+        if (!files.length) return;
+        submit.disabled = true;
+        submit.textContent = "上传中…";
+        let okCount = 0;
+        for (const file of files) {
+          if (!/\.(pdf|txt|md|markdown|csv)$/i.test(file.name)) {
+            Common.toast(`跳过不支持的文件：${file.name}`, "error");
+            continue;
+          }
+          const form = new FormData();
+          form.append("file", file);
+          form.append("course", base.name);
+          try {
+            await API.request("POST", "/api/documents/upload", form, { form: true });
+            okCount += 1;
+          } catch (err) {
+            Common.toast(`${file.name}：${err.message}`, "error");
+          }
+        }
+        if (okCount) Common.toast(`已提交 ${okCount} 个文件，正在解析入库…`, "success");
+        Common.closeModal();
+        setTimeout(silentRefreshKb, 2000);
       });
     }});
   }
@@ -560,10 +662,17 @@ const AdminView = (() => {
   function renderMessages(container) {
     container.innerHTML = `
       <div class="page-toolbar">
-        <div class="toolbar-left">
-          <select class="form-control" id="msg-kb-filter" style="max-width:240px">
-            <option value="">按知识库筛选</option>
+        <div class="toolbar-left" style="gap:10px">
+          <select class="form-control" id="msg-field" style="width:110px" aria-label="搜索范围">
+            <option value="question">问题</option>
+            <option value="answer">回答</option>
+            <option value="user">提问人</option>
           </select>
+          <div class="search-box" id="msg-search-box">
+            <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6f6a61" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input class="form-control" id="msg-search" placeholder="搜索问答…">
+            <button type="button" class="search-clear" id="msg-search-clear" title="清空"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+          </div>
         </div>
       </div>
       <div class="card">
@@ -576,19 +685,23 @@ const AdminView = (() => {
         <div class="pagination pagination-fixed" id="msg-pagination"></div>
       </div>`;
 
-    // 加载知识库下拉（基于已有知识库/课程）
-    API.request("GET", "/api/knowledge/courses").then((courses) => {
-      const sel = document.getElementById("msg-kb-filter");
-      if (!sel) return;
-      (courses || []).forEach((c) => {
-        const opt = document.createElement("option");
-        opt.value = c; opt.textContent = c;
-        sel.appendChild(opt);
-      });
-    }).catch(() => {});
-
-    document.getElementById("msg-kb-filter").addEventListener("change", () => {
-      msgPage = 1; loadMessages();
+    const input = document.getElementById("msg-search");
+    const box = document.getElementById("msg-search-box");
+    const syncClear = () => box.classList.toggle("has-value", input.value.length > 0);
+    let timer = null;
+    const rerun = () => { msgPage = 1; loadMessages(); };
+    input.addEventListener("input", () => {
+      syncClear();
+      clearTimeout(timer);
+      timer = setTimeout(rerun, 250);
+    });
+    document.getElementById("msg-search-clear").addEventListener("click", () => {
+      input.value = ""; syncClear(); rerun(); input.focus();
+    });
+    const msgPlaceholders = { question: "搜索问题", answer: "搜索回答", user: "搜索提问人" };
+    document.getElementById("msg-field").addEventListener("change", (e) => {
+      input.placeholder = msgPlaceholders[e.target.value] || "搜索…";
+      rerun();
     });
 
     loadMessages();
@@ -597,13 +710,16 @@ const AdminView = (() => {
   async function loadMessages() {
     const tbody = document.getElementById("msg-tbody");
     if (!tbody) return;
-    const filter = document.getElementById("msg-kb-filter")?.value || "";
-    // 服务端分页：只取当前页，问答再多也不会把整张表拉进浏览器
+    // 服务端分页 + 服务端搜索：只取当前页，问答再多也不会把整张表拉进浏览器
     const params = new URLSearchParams({
       limit: String(msgPageSize),
       offset: String((msgPage - 1) * msgPageSize),
     });
-    if (filter) params.set("course", filter);
+    const keyword = (document.getElementById("msg-search")?.value || "").trim();
+    if (keyword) {
+      params.set("q", keyword);
+      params.set("field", document.getElementById("msg-field")?.value || "question");
+    }
     try {
       const data = await API.request("GET", `/api/chat/admin/messages?${params.toString()}`);
       msgCache = data.items || [];

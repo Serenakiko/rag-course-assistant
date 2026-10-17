@@ -35,7 +35,19 @@ const ChatView = (() => {
     const inputEl = document.getElementById("chat-input");
     const sendBtn = document.getElementById("send-btn");
 
-    document.getElementById("chat-new").addEventListener("click", () => {
+    document.getElementById("chat-new").addEventListener("click", async () => {
+      const hasMessages = document.querySelectorAll("#chat-messages .msg").length > 0;
+      if (!hasMessages) {
+        Common.toast("已经是一个新对话了，直接输入问题就行。");
+        return;
+      }
+      const ok = await Common.confirmDialog({
+        title: "新建对话",
+        message: "当前对话会保留在左侧列表，随时可以打开。",
+        okText: "新建对话",
+        danger: false,
+      });
+      if (!ok) return;
       if (abortController) {
         pendingConvId = currentConvId;  // 记录未完成生成的会话，便于返回时补生成
         abortController.abort();  // 先停止正在进行的生成

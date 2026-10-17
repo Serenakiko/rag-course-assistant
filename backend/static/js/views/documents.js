@@ -1,4 +1,4 @@
-/* ============ 视图：文档管理（筛选 + 上传 + 表格） ============ */
+/* ============ 视图：文档管理（搜索 + 表格） ============ */
 const DocumentsView = (() => {
   let pollTimer = null;
   let docCache = [];
@@ -8,13 +8,19 @@ const DocumentsView = (() => {
   function render(container) {
     container.innerHTML = `
       <div class="page-toolbar">
-        <div class="toolbar-left">
-          <select class="form-control" id="doc-course-filter" style="max-width:240px">
-            <option value="">选择知识库筛选</option>
+        <div class="toolbar-left" style="gap:10px">
+          <select class="form-control" id="doc-field" style="width:132px" aria-label="搜索范围">
+            <option value="filename">文件名</option>
+            <option value="course">知识库</option>
+            <option value="type">类型</option>
           </select>
-        </div>
-        <div class="toolbar-right">
-          <button class="btn btn-primary" id="doc-upload-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>上传文档</button>
+          <div class="search-box" id="doc-search-box" style="width:300px">
+            <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6f6a61" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input class="form-control" id="doc-search" placeholder="搜索文档…">
+            <button type="button" class="search-clear" id="doc-search-clear" title="清空">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+            </button>
+          </div>
         </div>
       </div>
       <div class="card">
@@ -29,150 +35,21 @@ const DocumentsView = (() => {
         <div class="pagination pagination-fixed" id="doc-pagination"></div>
       </div>`;
 
-    document.getElementById("doc-upload-btn").addEventListener("click", openUploadModal);
-
-    // 加载知识库下拉
-    API.request("GET", "/api/knowledge/courses").then((courses) => {
-      const sel = document.getElementById("doc-course-filter");
-      courses.forEach((c) => {
-        const opt = document.createElement("option");
-        opt.value = c; opt.textContent = c;
-        sel.appendChild(opt);
-      });
-    }).catch(() => {});
-
-    document.getElementById("doc-course-filter").addEventListener("change", () => {
-      docPage = 1; renderDocTableRows();
+    const input = document.getElementById("doc-search");
+    const box = document.getElementById("doc-search-box");
+    const syncClear = () => box.classList.toggle("has-value", input.value.length > 0);
+    input.addEventListener("input", () => { docPage = 1; syncClear(); renderDocTableRows(); });
+    document.getElementById("doc-search-clear").addEventListener("click", () => {
+      input.value = ""; docPage = 1; syncClear(); renderDocTableRows(); input.focus();
+    });
+    const docPlaceholders = { filename: "搜索文件名", course: "搜索知识库", type: "搜索类型（pdf / md）" };
+    document.getElementById("doc-field").addEventListener("change", (e) => {
+      docPage = 1;
+      input.placeholder = docPlaceholders[e.target.value] || "搜索…";
+      renderDocTableRows();
     });
 
     loadDocuments();
-  }
-
-  function openUploadModal() {
-    const curCourse = document.getElementById("doc-course-filter")?.value || "";
-    API.request("GET", "/api/knowledge/courses")
-      .then((courses) => showUploadModal(courses || [], curCourse))
-      .catch(() => showUploadModal([], curCourse));
-  }
-
-  function showUploadModal(courses, curCourse) {
-    const opts = courses.length
-      ? courses.map((c) =>
-          `<option value="${Common.escapeHtml(c)}" ${c === curCourse ? "selected" : ""}>${Common.escapeHtml(c)}</option>`).join("")
-      : `<option value="">暂无知识库</option>`;
-    Common.openModal(`
-      <div class="modal-header">
-        <h3>上传文档</h3>
-        <button class="modal-close" data-close>×</button>
-      </div>
-      <div class="form-group">
-        <label>选择知识库</label>
-        <div style="display:flex;gap:8px;align-items:center">
-          <select class="form-control" id="up-course" style="flex:1">${opts}</select>
-          <button type="button" class="btn" id="up-new-base" style="white-space:nowrap"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>新建知识库</button>
-        </div>
-        <div id="up-new-box" style="display:none;margin-top:10px;background:#faf9f7;border:1px solid #e6e3dc;border-radius:10px;padding:12px 14px">
-          <label style="display:block;margin-bottom:6px;font-weight:500;color:var(--text-2);font-size:13px">新知识库名称</label>
-          <div style="display:flex;gap:8px">
-            <input class="form-control" id="up-new-name" placeholder="例如：计算机网络" style="flex:1">
-            <button type="button" class="btn btn-primary" id="up-new-ok" style="white-space:nowrap">创建</button>
-          </div>
-        </div>
-      </div>
-      <div class="form-group">
-        <label>选择文件</label>
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-          <button type="button" class="btn" id="up-pick">选择文件</button>
-          <span class="muted" id="up-files" style="font-size:13px"></span>
-        </div>
-        <input type="file" id="up-file-input" accept=".pdf,.txt,.md,.markdown,.csv" multiple style="display:none">
-        <div class="muted" style="margin-top:8px;font-size:12.5px">支持 pdf、txt、md、csv 格式，最大 20MB</div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn" data-close>取消</button>
-        <button class="btn btn-primary" id="up-submit" disabled>上传</button>
-      </div>
-    `, { onOpen: (box) => {
-      const input = box.querySelector("#up-file-input");
-      const newBox = box.querySelector("#up-new-box");
-      const newName = box.querySelector("#up-new-name");
-      box.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", Common.closeModal));
-
-      async function refreshCourses(selected) {
-        const list = await API.request("GET", "/api/knowledge/courses");
-        const sel = box.querySelector("#up-course");
-        sel.innerHTML = list.length
-          ? list.map((c) =>
-              `<option value="${Common.escapeHtml(c)}" ${c === selected ? "selected" : ""}>${Common.escapeHtml(c)}</option>`).join("")
-          : `<option value="">暂无知识库</option>`;
-      }
-
-      box.querySelector("#up-new-base").addEventListener("click", () => {
-        const show = newBox.style.display === "none";
-        newBox.style.display = show ? "" : "none";
-        if (show) newName.focus();
-      });
-      async function createBase() {
-        const name = newName.value.trim();
-        if (!name) { Common.toast("请输入知识库名称", "error"); return; }
-        const okBtn = box.querySelector("#up-new-ok");
-        okBtn.disabled = true;
-        try {
-          await API.request("POST", "/api/knowledge/bases", { name, description: "" });
-          Common.toast("知识库已创建", "success");
-          await refreshCourses(name);
-          newName.value = "";
-          newBox.style.display = "none";
-        } catch (err) {
-          Common.toast(err.message === "已存在同名知识库"
-            ? "同名知识库已存在，直接在列表中选择即可"
-            : err.message, "error");
-        } finally {
-          okBtn.disabled = false;
-        }
-      }
-      box.querySelector("#up-new-ok").addEventListener("click", createBase);
-      newName.addEventListener("keydown", (e) => { if (e.key === "Enter") createBase(); });
-
-      box.querySelector("#up-pick").addEventListener("click", () => input.click());
-      input.addEventListener("change", () => {
-        const files = Array.from(input.files || []);
-        box.querySelector("#up-files").textContent = files.length
-          ? `已选 ${files.length} 个文件：${files.map((f) => f.name).join("、")}`
-          : "";
-        box.querySelector("#up-submit").disabled = files.length === 0;
-      });
-      box.querySelector("#up-submit").addEventListener("click", async () => {
-        const files = Array.from(input.files || []);
-        if (!files.length) return;
-        const course = box.querySelector("#up-course").value;
-        Common.closeModal();
-        await uploadFiles(files, course);
-      });
-    }});
-  }
-
-  async function uploadFiles(files, courseOverride) {
-    const list = Array.from(files).filter((f) => {
-      const ok = /\.(pdf|txt|md|markdown|csv)$/i.test(f.name);
-      if (!ok) Common.toast(`跳过不支持的文件：${f.name}`, "error");
-      return ok;
-    });
-    if (!list.length) return;
-    const course = courseOverride !== undefined ? courseOverride : (document.getElementById("doc-course-filter")?.value || "");
-    for (const file of list) {
-      const form = new FormData();
-      form.append("file", file);
-      if (course) form.append("course", course);
-      try {
-        await API.request("POST", "/api/documents/upload", form, { form: true });
-        Common.toast(`已提交：${file.name}，正在解析入库…`, "success");
-      } catch (err) {
-        Common.toast(`${file.name}：${err.message}`, "error");
-      }
-    }
-    loadDocuments();
-    startPolling();
   }
 
   async function loadDocuments() {
@@ -188,18 +65,29 @@ const DocumentsView = (() => {
     }
   }
 
+  function filteredDocs() {
+    const keyword = (document.getElementById("doc-search")?.value || "").trim().toLowerCase();
+    if (!keyword) return docCache;
+    const field = document.getElementById("doc-field")?.value || "filename";
+    return docCache.filter((d) => {
+      if (field === "course") return (d.course || "").toLowerCase().includes(keyword);
+      if (field === "type") return (d.file_type || "").toLowerCase().includes(keyword);
+      return (d.filename || "").toLowerCase().includes(keyword);
+    });
+  }
+
   function renderDocTableRows() {
     const tbody = document.getElementById("doc-tbody");
     if (!tbody) return;
-    const course = document.getElementById("doc-course-filter")?.value || "";
-    const filtered = course ? docCache.filter((d) => (d.course || "") === course) : docCache;
+    const keyword = (document.getElementById("doc-search")?.value || "").trim();
+    const filtered = filteredDocs();
     const totalPages = Math.max(1, Math.ceil(filtered.length / docPageSize));
     if (docPage > totalPages) docPage = totalPages;
     const start = (docPage - 1) * docPageSize;
     const pageRows = filtered.slice(start, start + docPageSize);
 
     if (!pageRows.length) {
-      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:36px;color:var(--text-3)">暂无文档</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:36px;color:var(--text-3)">${keyword ? "没有匹配的文档" : "暂无文档"}</td></tr>`;
     } else {
       tbody.innerHTML = pageRows.map((d, i) => `
         <tr>

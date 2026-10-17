@@ -6,8 +6,8 @@ from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, or_, select
+from sqlalchemy.orm import Session, aliased
 
 from ..config import settings
 from ..database import SessionLocal, get_db
@@ -252,7 +252,8 @@ def _kb_from_conv(raw: str | None) -> str:
 
 @router.get("/admin/messages", summary="全部问答对（管理员，分页）")
 def admin_qa_pairs(
-    course: str = "",
+    q: str = "",
+    field: str = "question",
     limit: int = 20,
     offset: int = 0,
     admin: User = Depends(require_role("admin")),
@@ -280,10 +281,26 @@ def admin_qa_pairs(
         .join(User, Conversation.user_id == User.id)
         .where(Message.role == "user")
     )
-    if course.strip():
-        base = base.where(
-            Conversation.knowledge_bases.like(f'%"{course.strip()}"%')
-        )
+    # 搜索范围：问题 / 回答 / 提问人（回答按"同一会话中此后的 assistant 消息"匹配）
+    keyword = q.strip()
+    if keyword:
+        like = f"%{keyword}%"
+        if field == "answer":
+            later = aliased(Message)
+            base = base.where(
+                select(later.id)
+                .where(
+                    later.conversation_id == Message.conversation_id,
+                    later.role == "assistant",
+                    later.id > Message.id,
+                    later.content.like(like),
+                )
+                .exists()
+            )
+        elif field == "user":
+            base = base.where(or_(User.username.like(like), User.real_name.like(like)))
+        else:
+            base = base.where(Message.content.like(like))
 
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
     rows = db.execute(
