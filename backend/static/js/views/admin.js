@@ -144,7 +144,9 @@ const AdminView = (() => {
   function renderDonut(dist) {
     const el = document.getElementById("chart-donut");
     if (!el) return;
-    if (!dist.length || dist.reduce((a, d) => a + d.count, 0) === 0) {
+    // 空知识库（0 个知识点）不占图例，否则会出现 0% 的无效扇区
+    dist = (dist || []).filter((d) => d.count > 0);
+    if (!dist.length) {
       el.innerHTML = `<div class="empty-state"><p>暂无数据</p></div>`;
       return;
     }
@@ -206,12 +208,16 @@ const AdminView = (() => {
           ${pat ? `<rect width="10" height="10" rx="3" fill="url(#${pat})"/>` : ""}
         </svg>
         <span style="flex:1">${Common.escapeHtml(d.name)}</span>
-        <span style="color:var(--text-3)">${d.count}</span>
+        <span style="color:var(--text-3);font-variant-numeric:tabular-nums">${d.count} · ${Math.round((d.count / total) * 100)}%</span>
       </div>`;
     }).join("");
 
     el.innerHTML = `<div class="donut-wrap">
-      <svg viewBox="0 0 180 180" style="width:160px;height:160px">${donutDefs}${arcs}</svg>
+      <svg viewBox="0 0 180 180" style="width:160px;height:160px" role="img" aria-label="各知识库知识点占比">
+        ${donutDefs}${arcs}
+        <text x="90" y="88" text-anchor="middle" font-size="24" font-weight="600" fill="#1d1b18">${total}</text>
+        <text x="90" y="106" text-anchor="middle" font-size="11" fill="#6f6a61">个知识点</text>
+      </svg>
       <div class="donut-legend" style="flex:1">${legend}</div>
     </div>`;
   }

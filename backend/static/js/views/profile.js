@@ -4,88 +4,64 @@ const ProfileView = (() => {
   const EYE_ON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>';
   const EYE_OFF = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/></svg>';
 
-  function render(container) {
+  function render(container, editing = false) {
     const user = API.getUser();
+    const roleText = user.role === "admin" ? "管理员" : "学生";
+    const ro = editing ? "" : "readonly";
     container.innerHTML = `
       <div style="max-width:520px;margin:0 auto">
-          <div class="card p-card">
-            <div class="row-between p-card-head">
-              <div style="font-size:15px;font-weight:600;color:var(--text-1)">个人信息</div>
-              <button class="btn btn-sm btn-primary" id="p-edit">编辑资料</button>
-            </div>
-            <div class="p-card-section">
-              <div style="display:flex;flex-direction:column;align-items:center">
-                <div id="p-avatar-main">${Common.avatarHtml(user, 88)}</div>
-                <div class="mt-8"><button class="btn btn-sm btn-primary" id="p-avatar">更换头像</button></div>
-              </div>
-              <div style="margin-top:18px">
-                <div class="form-group"><label>账号</label><input class="form-control" id="p-username" value="${Common.escapeHtml(user.username)}" readonly></div>
-                <div class="form-group"><label>用户名</label><input class="form-control" id="p-name-box" value="${Common.escapeHtml(user.real_name || "")}" readonly></div>
-                <div class="form-group"><label>角色</label><input class="form-control" value="${user.role === "admin" ? "管理员" : "学生"}" readonly></div>
-              </div>
-            </div>
+        <div class="card p-card">
+          <div class="p-id">
+            <div id="p-avatar-view">${Common.avatarHtml(user, 76)}</div>
+            <button type="button" class="p-avatar-change" id="p-avatar-btn">更换头像</button>
           </div>
 
-          <div class="card p-card" style="margin-top:16px">
-            <div class="p-card-head">
-              <div style="font-size:15px;font-weight:600;color:var(--text-1)">安全设置</div>
+          <div class="p-form">
+            <div class="form-group">
+              <label>账号</label>
+              <input class="form-control" id="p-username" value="${Common.escapeHtml(user.username)}" maxlength="8" autocomplete="off" ${ro}>
             </div>
-            <div class="p-card-section">
-              <div class="form-group">
-                <label>原密码</label>
-                <div class="p-pwd-wrap">
-                  <input class="form-control p-pwd-input" id="p-old" type="password" placeholder="请输入原密码" autocomplete="new-password">
-                  <button type="button" class="p-pwd-toggle" data-toggle="p-old" aria-label="显示或隐藏密码">${EYE_ON}</button>
-                </div>
+            <div class="form-group">
+              <label>用户名</label>
+              <input class="form-control" id="p-name-box" value="${Common.escapeHtml(user.real_name || "")}" maxlength="32" autocomplete="off" ${ro}>
+            </div>
+            <div class="form-group">
+              <label>角色</label>
+              <input class="form-control" value="${roleText}" readonly>
+            </div>
+
+            <div class="p-divider"></div>
+
+            <div class="form-group">
+              <label>原密码</label>
+              <div class="p-pwd-wrap">
+                <input class="form-control p-pwd-input" id="p-old" type="password" placeholder="请输入原密码" autocomplete="new-password" ${ro}>
+                <button type="button" class="p-pwd-toggle" data-toggle="p-old" aria-label="显示或隐藏密码">${EYE_ON}</button>
               </div>
-              <div class="form-group">
-                <label>新密码</label>
-                <div class="p-pwd-wrap">
-                  <input class="form-control p-pwd-input" id="p-new" type="password" placeholder="请输入新密码" autocomplete="new-password">
-                  <button type="button" class="p-pwd-toggle" data-toggle="p-new" aria-label="显示或隐藏密码">${EYE_ON}</button>
-                </div>
+            </div>
+            <div class="form-group">
+              <label>新密码</label>
+              <div class="p-pwd-wrap">
+                <input class="form-control p-pwd-input" id="p-new" type="password" placeholder="至少 6 位" autocomplete="new-password" ${ro}>
+                <button type="button" class="p-pwd-toggle" data-toggle="p-new" aria-label="显示或隐藏密码">${EYE_ON}</button>
               </div>
-              <div class="form-group">
-                <label>确认密码</label>
-                <div class="p-pwd-wrap">
-                  <input class="form-control p-pwd-input" id="p-new2" type="password" placeholder="请确认新密码" autocomplete="new-password">
-                  <button type="button" class="p-pwd-toggle" data-toggle="p-new2" aria-label="显示或隐藏密码">${EYE_ON}</button>
-                </div>
+            </div>
+            <div class="form-group">
+              <label>确认新密码</label>
+              <div class="p-pwd-wrap">
+                <input class="form-control p-pwd-input" id="p-new2" type="password" placeholder="再输入一次新密码" autocomplete="new-password" ${ro}>
+                <button type="button" class="p-pwd-toggle" data-toggle="p-new2" aria-label="显示或隐藏密码">${EYE_ON}</button>
               </div>
-              <div style="display:flex;justify-content:flex-end">
-                <button class="btn btn-primary" id="p-pwd-save">修改密码</button>
-              </div>
+            </div>
+
+            <div class="p-card-actions">
+              ${editing
+                ? `<button class="btn" id="p-cancel">取消</button><button class="btn btn-primary" id="p-save">保存</button>`
+                : `<button class="btn" id="p-edit">编辑资料</button>`}
             </div>
           </div>
-        </div>`;
-
-    document.getElementById("p-avatar").addEventListener("click", () => openAvatarModal());
-
-    let editing = false;
-    document.getElementById("p-edit").addEventListener("click", async () => {
-      const btn = document.getElementById("p-edit");
-      const uName = document.getElementById("p-username");
-      const rName = document.getElementById("p-name-box");
-      if (!editing) {
-        editing = true;
-        uName.readOnly = false;
-        rName.readOnly = false;
-        btn.textContent = "保存";
-        uName.focus();
-        return;
-      }
-      const username = uName.value.trim();
-      const realName = rName.value.trim();
-      if (!username) return Common.toast("账号不能为空", "error");
-      if (!/^\d{8}$/.test(username)) return Common.toast("账号必须是 8 位数字", "error");
-      try {
-        const u = await API.request("PUT", "/api/auth/profile", { username, real_name: realName });
-        API.saveSession(API.getToken(), { ...API.getUser(), ...u });
-        App.refreshUserInfo();
-        Common.toast("资料已更新", "success");
-        render(container);
-      } catch (err) { Common.toast(err.message, "error"); }
-    });
+        </div>
+      </div>`;
 
     document.querySelectorAll(".p-pwd-toggle").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -96,22 +72,56 @@ const ProfileView = (() => {
       });
     });
 
-    document.getElementById("p-pwd-save").addEventListener("click", async () => {
+    document.getElementById("p-avatar-btn").addEventListener("click", () => openAvatarModal());
+
+    if (!editing) {
+      document.getElementById("p-edit").addEventListener("click", () => render(container, true));
+      return;
+    }
+
+    document.getElementById("p-cancel").addEventListener("click", () => render(container, false));
+
+    document.getElementById("p-save").addEventListener("click", async () => {
+      const username = document.getElementById("p-username").value.trim();
+      const realName = document.getElementById("p-name-box").value.trim();
       const oldPwd = document.getElementById("p-old").value;
       const newPwd = document.getElementById("p-new").value;
       const newPwd2 = document.getElementById("p-new2").value;
-      if (!oldPwd || !newPwd) return Common.toast("请填写完整", "error");
-      if (newPwd.length < 6) return Common.toast("新密码至少 6 位", "error");
-      if (newPwd !== newPwd2) return Common.toast("两次输入的新密码不一致", "error");
+
+      if (!/^\d{8}$/.test(username)) return Common.toast("账号必须是 8 位数字", "error");
+
+      const wantsPwd = !!(oldPwd || newPwd || newPwd2);
+      if (wantsPwd) {
+        if (!oldPwd || !newPwd) return Common.toast("修改密码请填写原密码和新密码", "error");
+        if (newPwd.length < 6) return Common.toast("新密码至少 6 位", "error");
+        if (newPwd !== newPwd2) return Common.toast("两次输入的新密码不一致", "error");
+      }
+
+      const btn = document.getElementById("p-save");
+      btn.disabled = true;
+      btn.textContent = "保存中…";
       try {
-        await API.request("POST", "/api/auth/change-password", { old_password: oldPwd, new_password: newPwd });
-        Common.toast("密码已更新，请重新登录", "success");
-        setTimeout(() => API.goLogin(), 800);
-      } catch (err) { Common.toast(err.message, "error"); }
+        const u = await API.request("PUT", "/api/auth/profile", { username, real_name: realName });
+        API.saveSession(API.getToken(), { ...API.getUser(), ...u });
+        App.refreshUserInfo();
+
+        if (wantsPwd) {
+          await API.request("POST", "/api/auth/change-password", { old_password: oldPwd, new_password: newPwd });
+          Common.toast("密码已更新，请重新登录", "success");
+          setTimeout(() => API.goLogin(), 900);
+          return;
+        }
+        Common.toast("已保存", "success");
+        render(container, false);
+      } catch (err) {
+        Common.toast(err.message, "error");
+        btn.disabled = false;
+        btn.textContent = "保存";
+      }
     });
   }
 
-  /* 点击头部/侧边栏头像时弹出“更换头像”弹窗（与设置页同一套逻辑） */
+  /* 更换头像弹窗：个人中心「更换头像」与侧边栏头像共用 */
   function openAvatarModal() {
     const user = API.getUser();
     Common.openModal(`
@@ -138,8 +148,8 @@ const ProfileView = (() => {
         App.refreshUserInfo();
         const preview = box.querySelector("#av-preview");
         if (preview) preview.innerHTML = Common.avatarHtml(u, 64);
-        const main = document.getElementById("p-avatar-main");
-        if (main) main.innerHTML = Common.avatarHtml(u, 88);
+        const main = document.getElementById("p-avatar-view");
+        if (main) main.innerHTML = Common.avatarHtml(u, 76);
         const resetBtn = box.querySelector("#av-reset");
         if (resetBtn) resetBtn.disabled = !u.avatar;
       };

@@ -83,7 +83,7 @@ const WorkbenchView = (() => {
       const listEl = document.getElementById("wb-resolved-list");
       if (listEl) {
         if (!items || !items.length) {
-          listEl.innerHTML = `<div class="wb-fb-empty">还没有提交过反馈。提问时如果知识库里没有相关内容，会自动记到这里；老师补完资料后，你能在这里看到回答。</div>`;
+          listEl.innerHTML = `<div class="wb-fb-empty">还没有提交过反馈。提问时如果知识库里没有相关内容，会自动记到这里；管理员补完资料后，你能在这里看到回答。</div>`;
         } else {
           listEl.innerHTML = items.slice(0, 5).map((r) => `
             <div class="fb-row" data-fb="${r.id}">

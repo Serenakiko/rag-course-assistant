@@ -137,14 +137,14 @@ textarea.form-control { resize: vertical; min-height: 90px; }
 }
 .toast {
   background: var(--card); color: var(--text-1);
-  border: 1px solid var(--border); border-left: 3px solid var(--primary);
+  border: 1px solid var(--border);
   padding: 10px 16px; border-radius: 6px;
   font-size: 13.5px; line-height: 1.6; box-shadow: var(--shadow-lg);
   animation: toastIn .2s ease; max-width: 480px;
 }
-.toast-error   { border-left-color: var(--danger);  color: var(--danger); }
-.toast-success { border-left-color: var(--success); color: var(--success); }
-.toast-warning { border-left-color: var(--warning); color: var(--warning); }
+.toast-error   { color: var(--danger); }
+.toast-success { color: var(--success); }
+.toast-warning { color: var(--warning); }
 @keyframes toastIn { from { transform: translateY(-8px); opacity: 0; } to { transform: none; opacity: 1; } }
 
 /* ---------- 空状态 ---------- */

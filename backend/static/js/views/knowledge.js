@@ -63,8 +63,12 @@ const KnowledgeView = (() => {
   function renderOverview(container) {
     container.innerHTML = `
       <div class="page-toolbar">
-        <div class="filters">
-          ${searchBoxHtml("kb-search", "搜索知识库名称 / 简介…")}
+        <div class="filters" style="gap:10px">
+          <select class="form-control" id="kb-field" style="width:110px" aria-label="搜索范围">
+            <option value="name">名称</option>
+            <option value="description">简介</option>
+          </select>
+          ${searchBoxHtml("kb-search", "搜索知识库名称")}
         </div>
         <button class="btn btn-primary" id="kb-add"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>新建知识库</button>
       </div>
@@ -73,7 +77,23 @@ const KnowledgeView = (() => {
       </div>
       <div class="pagination pagination-fixed" id="kb-pagination"></div>`;
 
-    bindSearch("kb-search", loadBases);
+    const searchInput = document.getElementById("kb-search");
+    const searchWrap = document.getElementById("kb-search-box");
+    const syncClear = () => searchWrap.classList.toggle("has-value", searchInput.value.length > 0);
+    const doSearch = () => { syncClear(); loadBases(); };
+    searchInput.addEventListener("input", syncClear);
+    searchInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); doSearch(); }
+    });
+    Common.attachSearchButton(searchWrap, doSearch);
+    document.getElementById("kb-search-clear").addEventListener("click", () => {
+      searchInput.value = ""; syncClear(); doSearch(); searchInput.focus();
+    });
+    const kbPlaceholders = { name: "搜索知识库名称", description: "搜索知识库简介" };
+    document.getElementById("kb-field").addEventListener("change", (e) => {
+      searchInput.placeholder = kbPlaceholders[e.target.value] || "搜索…";
+      doSearch();
+    });
     document.getElementById("kb-add").addEventListener("click", () => openBaseEditor(null));
     loadBases();
   }
@@ -85,7 +105,11 @@ const KnowledgeView = (() => {
     try {
       const params = new URLSearchParams();
       if (keyword) params.set("keyword", keyword);
-      kbCache = (await API.request("GET", "/api/knowledge/bases?" + params.toString())) || [];
+      const field = document.getElementById("kb-field")?.value || "name";
+      const list = (await API.request("GET", "/api/knowledge/bases?" + params.toString())) || [];
+      kbCache = !keyword ? list : list.filter((b) => (field === "description"
+        ? (b.description || "").toLowerCase().includes(keyword.toLowerCase())
+        : b.name.toLowerCase().includes(keyword.toLowerCase())));
       kbPage = 1;
       renderKbGrid();
     } catch (err) {
@@ -227,11 +251,14 @@ const KnowledgeView = (() => {
         const btn = box.querySelector("#kb-save");
         btn.disabled = true; btn.textContent = "保存中…";
         try {
+          let created = null;
           if (isEdit) await API.request("PUT", `/api/knowledge/bases/${base.id}`, { name, description });
-          else await API.request("POST", "/api/knowledge/bases", { name, description });
+          else created = await API.request("POST", "/api/knowledge/bases", { name, description });
           Common.toast("保存成功", "success");
           Common.closeModal();
           loadBases();
+          // 新建完成后直接接着传资料，不用再进详情页找上传
+          if (created) setTimeout(() => showKpUploadModal(created), 120);
         } catch (err) {
           Common.toast(err.message, "error");
           btn.disabled = false; btn.textContent = isEdit ? "保存" : "创建";
@@ -281,7 +308,9 @@ const KnowledgeView = (() => {
     showKpUploadModal();
   }
 
-  function showKpUploadModal() {
+  function showKpUploadModal(targetBase) {
+    const target = targetBase || currentBase;
+    if (!target) return;
     Common.openModal(`
       <div class="modal-header">
         <h3>上传文档</h3>
@@ -292,7 +321,7 @@ const KnowledgeView = (() => {
           <button type="button" class="btn" id="up-pick">选择文件</button>
         </div>
         <input type="file" id="up-file-input" accept=".pdf,.txt,.md,.markdown,.csv" multiple style="display:none">
-        <div class="muted" style="margin-top:8px;font-size:12.5px">上传到「${Common.escapeHtml(currentBase ? currentBase.name : "")}」，支持 pdf、txt、md、csv 格式，最大 20MB</div>
+        <div class="muted" style="margin-top:8px;font-size:12.5px">上传到「${Common.escapeHtml(target.name)}」，支持 pdf、txt、md、csv 格式，最大 20MB</div>
       </div>
       <div class="modal-footer">
         <button class="btn" data-close>取消</button>
@@ -310,9 +339,8 @@ const KnowledgeView = (() => {
       box.querySelector("#up-submit").addEventListener("click", async () => {
         const files = Array.from(input.files || []);
         if (!files.length) return;
-        const course = currentBase ? currentBase.name : "";
         Common.closeModal();
-        await uploadToBase(files, course);
+        await uploadToBase(files, target.name);
       });
     }});
   }
@@ -333,7 +361,8 @@ const KnowledgeView = (() => {
         Common.toast(`${file.name}：${err.message}`, "error");
       }
     }
-    setTimeout(loadPoints, 2000);  // 等文档解析入库后再刷新知识点
+    // 等文档解析入库后再刷新：在详情页刷知识点，在列表页刷卡片计数
+    setTimeout(() => { if (currentBase) loadPoints(); else loadBases(); }, 2000);
   }
 
   async function loadPoints() {
