@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+from fastapi import HTTPException
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -67,3 +68,17 @@ def allowed_course_names(user: User, db: Session) -> list[str] | None:
         if c and c not in known
     }
     return sorted(visible | legacy)
+
+
+def assert_writable_course(user: User, db: Session, course: str) -> None:
+    """校验写权限：学生只能往自己可见的知识库写内容，空课程（未分类）放行。
+
+    新增/编辑知识点、上传文档都要走这里。不校验的话，学生随手填一个课程名就能
+    把内容塞进别的学生的私有知识库，或者造出一个「不属于任何知识库」的课程名，
+    而这类历史课程对所有学生都是可见的。
+    """
+    name = (course or "").strip()
+    if not name or user.role == "admin":
+        return
+    if name not in (visible_base_names(user, db) or set()):
+        raise HTTPException(status_code=403, detail="没有权限向该知识库写入内容")

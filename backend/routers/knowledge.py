@@ -32,6 +32,7 @@ from ..services.kb_scope import (
     admin_user_ids as _admin_user_ids,
     all_base_names,
     allowed_course_names,
+    assert_writable_course,
     hidden_base_names,
     visible_base_names,
 )
@@ -242,6 +243,8 @@ def create_point(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> KnowledgePoint:
+    # 只能写进自己可见的知识库（管理员不受限）
+    assert_writable_course(user, db, payload.course)
     point = KnowledgePoint(
         title=payload.title.strip(),
         content=payload.content.strip(),
@@ -277,6 +280,8 @@ def update_point(
         raise HTTPException(status_code=404, detail="知识点不存在")
     if point.course in _hidden_base_names(user, db):
         raise HTTPException(status_code=403, detail="只能编辑自己能访问的知识库下的知识点")
+    # 编辑时允许改挂知识库，但要确认目标知识库同样可写，否则等于借编辑把自己挪进别人的库
+    assert_writable_course(user, db, payload.course)
     point.title = payload.title.strip()
     point.content = payload.content.strip()
     point.course = payload.course.strip()
