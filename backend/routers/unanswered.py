@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..database import get_db
 from ..deps import require_role
 from ..models import UnansweredQuestion, User
@@ -75,9 +76,9 @@ def unanswered_stats(
         )
         or 0
     )
-    today_local = datetime.now(timezone.utc) + timedelta(hours=8)
+    today_local = datetime.now(timezone.utc) + timedelta(hours=settings.UTC_OFFSET_HOURS)
     start_local = today_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    start_utc = start_local - timedelta(hours=8)
+    start_utc = start_local - timedelta(hours=settings.UTC_OFFSET_HOURS)
     today = (
         db.scalar(
             select(func.count(UnansweredQuestion.id)).where(

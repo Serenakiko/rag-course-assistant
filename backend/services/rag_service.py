@@ -266,7 +266,10 @@ async def generate_answer(question: str, courses: list[str] | None = None) -> di
     返回：{"answer", "recommended", "matched"}
       - matched=False 表示仍未命中知识库（空库 / 距离门控），answer 为拒答文案
     """
-    docs = vector_search(question, settings.TOP_K, courses)
+    # 向量化 + Chroma 查询是同步 IO，放到线程里跑，避免阻塞事件循环
+    docs = await asyncio.to_thread(
+        vector_search, question, settings.TOP_K, courses
+    )
     if not docs:
         return {
             "answer": "知识库里还没有相关内容，先补充课程资料再试。",
@@ -331,7 +334,9 @@ async def stream_answer(
     history = history or []
     try:
         # 1. 检索（可按知识库/课程限定范围）
-        docs = vector_search(question, settings.TOP_K, courses)
+        docs = await asyncio.to_thread(
+            vector_search, question, settings.TOP_K, courses
+        )
         # 兜底：知识库没有任何内容时直接拒绝，不调用模型
         if not docs:
             yield {

@@ -49,6 +49,10 @@ def _looks_like_image(data: bytes, ext: str) -> bool:
 _LOGIN_WINDOW = 600.0
 _LOGIN_MAX_FAILS = 10
 _login_fails: dict[str, list[float]] = {}
+# 注册限流：同一 IP 10 分钟最多 5 次，防止脚本批量刷账号
+_REG_WINDOW = 600.0
+_REG_MAX = 5
+_reg_log: dict[str, list[float]] = {}
 _login_lock = threading.Lock()
 
 
@@ -79,7 +83,19 @@ def _clear_fails(key: str) -> None:
 
 
 @router.post("/register", response_model=UserOut, summary="注册（学生）")
-def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> User:
+def register(
+    payload: RegisterRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> User:
+    client = request.client.host if request.client else "-"
+    now = time.monotonic()
+    with _login_lock:
+        stamps = [t for t in _reg_log.get(client, []) if now - t < _REG_WINDOW]
+        if len(stamps) >= _REG_MAX:
+            raise HTTPException(status_code=429, detail="注册过于频繁，请稍后再试")
+        stamps.append(now)
+        _reg_log[client] = stamps
     exists = db.scalar(select(User).where(User.username == payload.username))
     if exists:
         raise HTTPException(status_code=400, detail="账号已存在")
@@ -109,7 +125,9 @@ def login(
         _note_fail(key)
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     _clear_fails(key)
-    token = create_access_token(user.id, user.username, user.role)
+    token = create_access_token(
+        user.id, user.username, user.role, user.token_version or 0
+    )
     return LoginResponse(token=token, user=UserOut.model_validate(user))
 
 
@@ -127,6 +145,8 @@ def change_password(
     if not verify_password(payload.old_password, user.password_hash):
         raise HTTPException(status_code=400, detail="原密码错误")
     user.password_hash = hash_password(payload.new_password)
+    # 让所有已签发的令牌失效，避免旧 token 在 72 小时内继续可用
+    user.token_version = int(user.token_version or 0) + 1
     db.commit()
     return {"ok": True}
 

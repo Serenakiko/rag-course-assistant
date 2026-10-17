@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..database import get_db
 from ..deps import get_current_user, require_role
 from ..models import Conversation, Document, KnowledgeBase, KnowledgePoint, Message, UnansweredQuestion, User
@@ -82,9 +83,9 @@ def admin_stats(
     messages = db.scalar(select(func.count(Message.id))) or 0
 
     # 近 7 天每日会话数（按本地时区 UTC+8 折算）
-    today_local = datetime.now(timezone.utc) + timedelta(hours=8)
+    today_local = datetime.now(timezone.utc) + timedelta(hours=settings.UTC_OFFSET_HOURS)
     start_local = today_local.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=6)
-    start_utc = start_local - timedelta(hours=8)
+    start_utc = start_local - timedelta(hours=settings.UTC_OFFSET_HOURS)
 
     rows = db.execute(
         select(

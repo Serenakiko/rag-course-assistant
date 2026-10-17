@@ -20,7 +20,7 @@ sys.path.insert(0, str(BASE_DIR))
 from sqlalchemy import func, select  # noqa: E402
 
 from backend.database import SessionLocal, init_db  # noqa: E402
-from backend.models import KnowledgeBase, KnowledgePoint  # noqa: E402
+from backend.models import KnowledgeBase, KnowledgePoint, User  # noqa: E402
 from backend.seed import SAMPLE_BASES, SAMPLE_POINTS  # noqa: E402
 from backend.services.vector_store import delete_knowledge_point  # noqa: E402
 
@@ -52,6 +52,11 @@ def main() -> None:
             print("[1/4] 无旧示例知识点需要删除")
 
         # 2. 创建四门课程知识库（按名称幂等）
+        # created_by 必须落到管理员身上：留空的话按可见性规则学生看不到这些库
+        admin = session.scalar(
+            select(User).where(User.role == "admin").order_by(User.id)
+        )
+        creator_id = admin.id if admin else None
         created_bases = 0
         for item in SAMPLE_BASES:
             exists = session.scalar(
@@ -62,7 +67,7 @@ def main() -> None:
                     KnowledgeBase(
                         name=item["name"],
                         description=item["description"],
-                        created_by=None,
+                        created_by=creator_id,
                     )
                 )
                 created_bases += 1
@@ -106,7 +111,9 @@ def main() -> None:
         patched = 0
         for (course,) in old_courses:
             if course and course not in base_names:
-                session.add(KnowledgeBase(name=course, description="", created_by=None))
+                session.add(
+                    KnowledgeBase(name=course, description="", created_by=creator_id)
+                )
                 base_names.add(course)
                 patched += 1
         session.commit()

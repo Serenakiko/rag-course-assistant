@@ -35,6 +35,9 @@ def get_current_user(
     user = db.get(User, user_id)
     if user is None:
         raise unauthorized
+    # 改密、降权后旧令牌立即失效
+    if int(payload.get("ver", 0)) != int(user.token_version or 0):
+        raise unauthorized
     return user
 
 

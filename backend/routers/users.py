@@ -65,14 +65,20 @@ def admin_update_user(
     target = db.get(User, user_id)
     if target is None:
         raise HTTPException(status_code=404, detail="用户不存在")
+    changed_auth = False
     if payload.role is not None:
         if target.id == admin.id and payload.role != "admin":
             raise HTTPException(status_code=400, detail="不能取消自己的管理员权限")
+        if target.role != payload.role:
+            changed_auth = True
         target.role = payload.role
     if payload.real_name is not None:
         target.real_name = payload.real_name.strip() or target.real_name
     if payload.new_password:
         target.password_hash = hash_password(payload.new_password)
+        changed_auth = True
+    if changed_auth:
+        target.token_version = int(target.token_version or 0) + 1
     db.commit()
     db.refresh(target)
     return target

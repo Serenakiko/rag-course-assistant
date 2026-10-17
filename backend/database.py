@@ -44,6 +44,8 @@ def init_db() -> None:
         cols = [row[1] for row in conn.execute(text("PRAGMA table_info(users)"))]
         if "avatar" not in cols:
             conn.execute(text("ALTER TABLE users ADD COLUMN avatar VARCHAR(255) DEFAULT ''"))
+        if "token_version" not in cols:
+            conn.execute(text("ALTER TABLE users ADD COLUMN token_version INTEGER DEFAULT 0"))
         # unanswered_questions 增量迁移：为旧库补充闭环增强所需字段
         uq_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(unanswered_questions)"))]
         if "related_points" not in uq_cols:
@@ -67,6 +69,10 @@ def init_db() -> None:
                 "WHERE display_no IS NULL OR display_no = 0"
             )
         )
+        # documents 增量迁移：标记种子展示文档，重建向量时跳过
+        doc_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(documents)"))]
+        if "is_seed" not in doc_cols:
+            conn.execute(text("ALTER TABLE documents ADD COLUMN is_seed INTEGER DEFAULT 0"))
         # conversations 增量迁移：记录会话使用的知识库（历史会话按库筛选）
         conv_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(conversations)"))]
         if "knowledge_bases" not in conv_cols:

@@ -65,7 +65,7 @@ def main() -> None:
     print(f"  {settings.APP_NAME} v{settings.APP_VERSION}")
     print(f"  访问地址：{url}")
     print(f"  大模型模式：{settings.LLM_PROVIDER}")
-    print(f"  默认管理员：23040107 / 111111（登录后请尽快修改密码）")
+    print(f"  默认管理员账号：23040107（首次登录后请立即修改密码）")
     print("  按 Ctrl+C 停止服务")
     print("=" * 64)
     print()

@@ -25,6 +25,8 @@ class Settings:
     APP_VERSION: str = "1.0.0"
     HOST: str = _get("HOST", "127.0.0.1")
     PORT: int = int(_get("PORT", "8000"))
+    # 统计口径用的时区偏移（默认东八区），换部署环境时改这里
+    UTC_OFFSET_HOURS: int = int(_get("UTC_OFFSET_HOURS", "8"))
     # 不提供默认值：缺失或仍是模板占位值时由 _check_secret 直接拒绝启动，
     # 避免用公开的默认密钥签发令牌（否则任何人都能伪造管理员 token）。
     JWT_SECRET: str = _get("JWT_SECRET", "")
@@ -65,6 +67,7 @@ class Settings:
 
     # ---------- 对话 ----------
     HISTORY_LIMIT: int = 6  # 拼入提示词的历史轮数上限
+    HISTORY_CHAR_BUDGET: int = 6000  # 历史文本总长度上限，防止把 8192 上下文挤爆
     # 大模型单次回答的超时上限（秒）：超过即停止生成并返回错误提示，防止回答卡死
     LLM_TIMEOUT: float = float(_get("LLM_TIMEOUT", "180"))
     # 知识库无匹配判定阈值（L2 距离）：检索最相似资料的距离超过该值，判定知识库未覆盖该问题，

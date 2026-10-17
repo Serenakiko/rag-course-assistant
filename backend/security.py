@@ -35,13 +35,16 @@ def verify_password(password: str, stored: str) -> bool:
         return False
 
 
-def create_access_token(user_id: int, username: str, role: str) -> str:
-    """签发 JWT。"""
+def create_access_token(
+    user_id: int, username: str, role: str, token_version: int = 0
+) -> str:
+    """签发 JWT；ver 与用户当前 token_version 不一致时令牌失效。"""
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),
         "username": username,
         "role": role,
+        "ver": token_version,
         "iat": now,
         "exp": now + timedelta(hours=settings.JWT_EXPIRE_HOURS),
     }

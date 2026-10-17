@@ -33,7 +33,10 @@ def _sse(payload: dict) -> str:
 
 
 def _load_history(db: Session, conversation_id: int, limit: int) -> list[tuple[str, str]]:
-    """按时间升序取最近 limit 轮对话。"""
+    """按时间升序取最近 limit 轮对话，并按字符预算从旧到新丢弃。
+
+    只按轮数截断的话，长回答 + 长资料很容易把 8192 的上下文窗口挤爆。
+    """
     msgs = (
         db.execute(
             select(Message)
@@ -44,7 +47,15 @@ def _load_history(db: Session, conversation_id: int, limit: int) -> list[tuple[s
         .scalars()
         .all()
     )
-    return [(m.role, m.content) for m in reversed(msgs)]
+    picked: list[tuple[str, str]] = []
+    used = 0
+    for m in msgs:  # 从最新往前挑
+        size = len(m.content or "")
+        if picked and used + size > settings.HISTORY_CHAR_BUDGET:
+            break
+        picked.append((m.role, m.content))
+        used += size
+    return list(reversed(picked))
 
 
 def _next_unanswered_no(db: Session) -> int:
@@ -239,6 +250,15 @@ def admin_delete_conversation(
     return {"ok": True}
 
 
+def _kb_list(raw: str | None) -> list[str]:
+    """把会话里存的 knowledge_bases JSON 解析成列表。"""
+    try:
+        arr = json.loads(raw or "[]")
+        return [c for c in arr if c] if isinstance(arr, list) else []
+    except ValueError:
+        return []
+
+
 def _kb_from_conv(raw: str | None) -> str:
     """从会话的 knowledge_bases（JSON 数组）取第一个作为知识库名。"""
     try:
@@ -359,9 +379,15 @@ async def ask(
         if conv is None or conv.user_id != user.id:
             raise HTTPException(status_code=404, detail="会话不存在")
 
-    # 会话记录本次使用的知识库（历史会话按库筛选）
-    conv.knowledge_bases = json.dumps(payload.knowledge_bases, ensure_ascii=False)
-    db.commit()
+    selected = [c for c in payload.knowledge_bases if c]
+
+    # 会话记录本次使用的知识库；重新生成且没带选择时沿用原记录，不能清空
+    if selected:
+        conv.knowledge_bases = json.dumps(selected, ensure_ascii=False)
+        db.commit()
+    elif not payload.regenerate:
+        conv.knowledge_bases = "[]"
+        db.commit()
 
     # 2. 保存用户消息；重新生成模式不重复落库提问，并删除上一条待替换的回答
     if payload.regenerate:
@@ -377,15 +403,16 @@ async def ask(
         if last_assistant is not None:
             db.delete(last_assistant)
             db.commit()
-    else:
+        if not selected:
+            selected = _kb_list(conv.knowledge_bases)
+    history = _load_history(db, conversation_id, settings.HISTORY_LIMIT)
+    if not payload.regenerate:
         db.add(Message(conversation_id=conversation_id, role="user", content=payload.message))
         db.commit()
-    history = _load_history(db, conversation_id, settings.HISTORY_LIMIT)
 
     # 检索范围：学生只能在自己可见的知识库里检索。
     # 不做这一步的话，"列表里看不到的知识库"照样能被提问捞出来。
     allowed = allowed_course_names(user, db)
-    selected = [c for c in payload.knowledge_bases if c]
     if allowed is None:
         courses = selected or None          # 管理员：不选就是全部
     else:
@@ -399,6 +426,7 @@ async def ask(
         answer_parts: list[str] = []
         sources_json: str = "[]"
         unmatched: dict | None = None
+        failed = False
         try:
             async for event in rag_service.stream_answer(
                 payload.message,
@@ -412,26 +440,45 @@ async def ask(
                 elif event["type"] == "unmatched":
                     unmatched = event
                 elif event["type"] == "error":
-                    answer_parts.append(f"（回答失败：{event['message']}）")
+                    # 失败不写进正文，也不落库成正式回答
+                    failed = True
+                    yield _sse(event)
+                    break
                 yield _sse(event)
+            if failed:
+                return
             # 记录“未命中问题”：距离门控拦截（unmatched 事件）或模型判定知识库未收录（未收录特征短语）
             full_answer = "".join(answer_parts) or ""
             if unmatched or is_unmatched_answer(full_answer):
                 session = SessionLocal()
                 try:
-                    session.add(
-                        UnansweredQuestion(
-                            display_no=_next_unanswered_no(session),
-                            question=payload.message,
-                            course=(unmatched or {}).get("course", "") or "",
-                            related_points=json.dumps(
-                                (unmatched or {}).get("recommended", []),
-                                ensure_ascii=False,
-                            ),
-                            status="pending",
-                            created_by=user.id,
+                    course = (unmatched or {}).get("course", "") or ""
+                    related = json.dumps(
+                        (unmatched or {}).get("recommended", []),
+                        ensure_ascii=False,
+                    )
+                    # 同一学生反复问同一个问题时不重复刷反馈，更新已存在的那条
+                    existing = session.scalar(
+                        select(UnansweredQuestion).where(
+                            UnansweredQuestion.question == payload.message,
+                            UnansweredQuestion.created_by == user.id,
+                            UnansweredQuestion.status == "pending",
                         )
                     )
+                    if existing is not None:
+                        existing.course = course
+                        existing.related_points = related
+                    else:
+                        session.add(
+                            UnansweredQuestion(
+                                display_no=_next_unanswered_no(session),
+                                question=payload.message,
+                                course=course,
+                                related_points=related,
+                                status="pending",
+                                created_by=user.id,
+                            )
+                        )
                     session.commit()
                 finally:
                     session.close()

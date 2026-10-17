@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -27,6 +28,7 @@ from ..schemas import (
     KnowledgePointIn,
     KnowledgePointOut,
 )
+from ..services.chunker import split_text
 from ..services.document_parser import parse_file
 from ..services.kb_scope import (
     admin_user_ids as _admin_user_ids,
@@ -42,11 +44,14 @@ from ..services.kb_scope import (
     visible_course_names,
 )
 from ..services.vector_store import (
+    add_document_chunks,
     add_knowledge_point,
     delete_document,
     delete_knowledge_point,
     update_knowledge_point,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -156,12 +161,28 @@ def update_base(
         )
         if dup is not None:
             raise HTTPException(status_code=409, detail="已存在同名知识库")
-        # 同步更新该知识库下知识点的课程字段
-        db.execute(
-            KnowledgePoint.__table__.update()
-            .where(KnowledgePoint.course == base.name)
-            .values(course=name)
+        # 同步更新该知识库下知识点的课程字段与向量元数据
+        points = list(
+            db.scalars(select(KnowledgePoint).where(KnowledgePoint.course == base.name))
         )
+        for p in points:
+            p.course = name
+            update_knowledge_point(p.id, p.title, p.content, name, p.tags)
+
+        # 文档的课程归属和向量也要一起改，否则学生按新库名检索不到
+        docs = list(db.scalars(select(Document).where(Document.course == base.name)))
+        for d in docs:
+            d.course = name
+            try:
+                text = parse_file(Path(d.stored_path))
+                chunks = split_text(text)
+                delete_document(d.id)
+                if chunks:
+                    add_document_chunks(d.id, d.filename, name, chunks)
+            except Exception:  # noqa: BLE001
+                logger.exception("重命名知识库时重建文档向量失败 doc_id=%s", d.id)
+                # 旧课程名的向量必须清掉，避免检索到过期归属
+                delete_document(d.id)
     base.name = name
     base.description = payload.description.strip()
     db.commit()
@@ -189,9 +210,15 @@ def remove_base(
     db.execute(
         KnowledgePoint.__table__.delete().where(KnowledgePoint.course == base.name)
     )
+    # 文档连同向量、源文件一起删，否则会变成孤儿继续出现在文档管理里
+    docs = list(db.scalars(select(Document).where(Document.course == base.name)))
+    for d in docs:
+        delete_document(d.id)
+        Path(d.stored_path).unlink(missing_ok=True)
+        db.delete(d)
     db.delete(base)
     db.commit()
-    return {"ok": True, "removed_points": len(points)}
+    return {"ok": True, "removed_points": len(points), "removed_documents": len(docs)}
 
 
 # ==================== 知识点 ====================

@@ -26,10 +26,30 @@ logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
+def _warn_default_admin() -> None:
+    """默认管理员还在用 111111 时提醒一次（本地课程项目，不改默认密码但要提示）。"""
+    from .database import SessionLocal
+    from .models import User
+    from .security import verify_password
+
+    with SessionLocal() as db:
+        admin = (
+            db.query(User)
+            .filter(User.role == "admin")
+            .order_by(User.id)
+            .first()
+        )
+    if admin is not None and verify_password("111111", admin.password_hash):
+        logger.warning(
+            "管理员账号 %s 仍在使用默认密码 111111，请立即登录后修改", admin.username
+        )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
     init_seed()
+    _warn_default_admin()
     logger.info("数据库初始化完成：%s", settings.DB_PATH)
     yield
 

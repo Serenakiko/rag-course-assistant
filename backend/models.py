@@ -23,6 +23,8 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(160))
+    # 改密/降权时自增，旧的 JWT 立即失效（token 里带 ver 声明）
+    token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     real_name: Mapped[str] = mapped_column(String(64), default="")
     avatar: Mapped[str] = mapped_column(String(255), default="")  # emoji:😀 / /static/avatars/x.png
     role: Mapped[str] = mapped_column(String(16), default="student", index=True)
@@ -48,6 +50,8 @@ class Document(Base):
     status: Mapped[str] = mapped_column(String(16), default="processing")
     # processing / ready / failed
     course: Mapped[str] = mapped_column(String(128), default="", index=True)  # 所属知识库/课程名
+    # 由 sync_seed_documents.py 生成的展示记录：内容已作为知识点入过库，rebuild 时跳过
+    is_seed: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str] = mapped_column(Text, default="")
     uploaded_by: Mapped[int] = mapped_column(

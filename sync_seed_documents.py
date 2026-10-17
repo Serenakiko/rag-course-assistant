@@ -64,6 +64,7 @@ def main() -> None:
                     course=item["course"],
                     chunk_count=len(chunks),
                     uploaded_by=admin.id,
+                    is_seed=1,
                 )
             )
             created += 1

@@ -40,23 +40,36 @@ def main() -> None:
             add_knowledge_point(p.id, p.title, p.content, p.course, p.tags)
         print(f"知识点入库：{len(points)} 条")
 
-        # 3. 重新入库已就绪的课程文档
+        # 3. 重建文档向量（ready 的算重来，failed 的顺手重试一次）
         docs = list(
             session.scalars(
                 select(Document)
-                .where(Document.status == "ready")
+                .where(Document.status.in_(("ready", "failed")))
+                # 种子展示文档的内容已作为知识点入过库，再入一次会在检索里重复
+                .where(Document.is_seed == 0)
                 .order_by(Document.id)
             )
         )
+        ok_docs = 0
         for d in docs:
             try:
                 text = parse_file(Path(d.stored_path))
                 chunks = split_text(text)
-                count = add_document_chunks(d.id, d.filename, "", chunks)
-                print(f"文档入库：{d.filename}（{count} 块）")
+                if not chunks:
+                    raise ValueError("没有提取到有效文本")
+                # course 必须带上，否则分块丢失库归属，学生按库检索不到
+                count = add_document_chunks(d.id, d.filename, d.course or "", chunks)
+                d.status = "ready"
+                d.chunk_count = count
+                d.error = ""
+                ok_docs += 1
+                print(f"文档入库：{d.filename}（{count} 块，{d.course or '未分类'}）")
             except Exception as exc:  # noqa: BLE001
+                d.status = "failed"
+                d.error = str(exc)[:500]
                 print(f"文档失败：{d.filename} → {exc}")
-        print(f"文档处理：{len(docs)} 个")
+        session.commit()
+        print(f"文档处理：{ok_docs}/{len(docs)} 个成功")
     finally:
         session.close()
 
