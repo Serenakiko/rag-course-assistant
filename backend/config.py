@@ -43,7 +43,7 @@ class Settings:
 
     # Ollama
     OLLAMA_BASE_URL: str = _get("OLLAMA_BASE_URL", "http://localhost:11434")
-    OLLAMA_LLM_MODEL: str = _get("OLLAMA_LLM_MODEL", "qwen2.5:3b")
+    OLLAMA_LLM_MODEL: str = _get("OLLAMA_LLM_MODEL", "qwen3.5:4b")
     OLLAMA_EMBED_MODEL: str = _get("OLLAMA_EMBED_MODEL", "bge-m3")
     OLLAMA_TEMPERATURE: float = float(_get("OLLAMA_TEMPERATURE", "0.3"))
 

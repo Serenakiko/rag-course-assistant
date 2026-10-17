@@ -30,6 +30,8 @@ def get_llm() -> BaseChatModel:
         num_predict=1024,
         # Ollama 默认窗口 4096，多轮对话加检索资料会把系统规则挤出去，这里给到 8192。
         num_ctx=8192,
+        # qwen3.5 默认先思考再回答，长思考会把 num_predict 吃光导致正文为空
+        reasoning=False,
         timeout=settings.LLM_TIMEOUT,
     )
 

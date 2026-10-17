@@ -117,11 +117,11 @@ rag-course-assistant/
 
 ```bash
 # 安装 Ollama 后，在终端执行：
-ollama pull qwen2.5:3b    # 对话模型（回答生成）
+ollama pull qwen3.5:4b    # 对话模型（回答生成）
 ollama pull bge-m3        # 向量模型（中文语义检索效果好）
 ```
 
-> 默认 `qwen2.5:3b`，8G 内存的机器也跑得动；想回答质量更好可以换 `qwen2.5:7b`（更吃内存），向量模型也可以换 `bge-large-zh-v1.5`。改 `.env` 里的 `OLLAMA_LLM_MODEL` / `OLLAMA_EMBED_MODEL` 即可，**记得本文档里出现模型名的地方一起改**。
+> 默认 `qwen3.5:4b`，16G 内存的机器跑得比较顺；想回答质量更好可以换 `qwen3.5:9b`（更吃内存），向量模型也可以换 `bge-large-zh-v1.5`。改 `.env` 里的 `OLLAMA_LLM_MODEL` / `OLLAMA_EMBED_MODEL` 即可，**记得本文档里出现模型名的地方一起改**。
 > 若不使用本地模型，可跳过本步，改用 OpenAI 兼容 API（见第 4 节）。
 
 ### 2. 打开项目并安装依赖
@@ -214,7 +214,7 @@ OPENAI_EMBED_MODEL=text-embedding-3-small
 ## 六、常见问题（FAQ）
 
 **Q1：问答返回「回答生成失败：model xxx not found」**
-Ollama 未拉取对应模型。执行 `ollama pull qwen2.5:3b` 和 `ollama pull bge-m3`，重启服务。
+Ollama 未拉取对应模型。执行 `ollama pull qwen3.5:4b` 和 `ollama pull bge-m3`，重启服务。
 
 **Q2：头部状态显示「无法连接 Ollama」**
 确认 Ollama 已启动（托盘图标存在）。测试：浏览器访问 `http://localhost:11434`。
