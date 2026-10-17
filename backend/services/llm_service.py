@@ -28,6 +28,8 @@ def get_llm() -> BaseChatModel:
         temperature=settings.OLLAMA_TEMPERATURE,
         streaming=True,
         num_predict=1024,
+        # Ollama 默认窗口 4096，多轮对话加检索资料会把系统规则挤出去，这里给到 8192。
+        num_ctx=8192,
         timeout=settings.LLM_TIMEOUT,
     )
 
