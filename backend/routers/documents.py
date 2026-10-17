@@ -16,6 +16,7 @@ from ..models import Document, KnowledgePoint, UnansweredQuestion, User
 from ..schemas import DocumentDetailOut, DocumentOut
 from ..services.chunker import split_text
 from ..services.document_parser import is_supported, parse_file
+from ..services.kb_scope import assert_writable_course
 from ..services.vector_store import (
     add_document_chunks,
     add_knowledge_point,
@@ -44,6 +45,10 @@ async def upload_document(
             detail="不支持的文件类型，仅支持 PDF / TXT / Markdown / CSV",
         )
 
+    # 只能传到自己可见的知识库；空课程表示未分类
+    course_name = course.strip()
+    assert_writable_course(user, db, course_name)
+
     # 保存原始文件
     ext = Path(filename).suffix.lower()
     stored_name = f"{uuid.uuid4().hex}{ext}"
@@ -69,14 +74,14 @@ async def upload_document(
         file_size=size,
         stored_path=str(stored_path),
         status="processing",
-        course=course.strip(),
+        course=course_name,
         uploaded_by=user.id,
     )
     db.add(doc)
     db.commit()
     db.refresh(doc)
 
-    background.add_task(process_document, doc.id, course.strip())
+    background.add_task(process_document, doc.id, course_name)
     return doc
 
 
