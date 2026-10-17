@@ -1,10 +1,12 @@
 """认证路由：注册 / 登录 / 个人信息。"""
 from __future__ import annotations
 
+import threading
+import time
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -28,6 +30,41 @@ AVATAR_EXTS = {"png", "jpg", "jpeg", "gif", "webp"}
 AVATAR_MAX_SIZE = 2 * 1024 * 1024
 
 
+# ---------- 登录失败限流 ----------
+# 账号是 8 位数字、密码下限 6 位，不设限的话可以慢慢试出来。
+# 按「IP + 账号」记失败时间戳，窗口内失败 10 次就锁到窗口结束；成功登录即清零。
+_LOGIN_WINDOW = 600.0
+_LOGIN_MAX_FAILS = 10
+_login_fails: dict[str, list[float]] = {}
+_login_lock = threading.Lock()
+
+
+def _login_key(request: Request, username: str) -> str:
+    client = request.client.host if request.client else "-"
+    return f"{client}|{username}"
+
+
+def _recent_fails(key: str) -> int:
+    now = time.monotonic()
+    with _login_lock:
+        stamps = [t for t in _login_fails.get(key, []) if now - t < _LOGIN_WINDOW]
+        if stamps:
+            _login_fails[key] = stamps
+        else:
+            _login_fails.pop(key, None)
+        return len(stamps)
+
+
+def _note_fail(key: str) -> None:
+    with _login_lock:
+        _login_fails.setdefault(key, []).append(time.monotonic())
+
+
+def _clear_fails(key: str) -> None:
+    with _login_lock:
+        _login_fails.pop(key, None)
+
+
 @router.post("/register", response_model=UserOut, summary="注册（学生）")
 def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> User:
     exists = db.scalar(select(User).where(User.username == payload.username))
@@ -46,10 +83,19 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> User:
 
 
 @router.post("/login", response_model=LoginResponse, summary="登录")
-def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
+def login(
+    payload: LoginRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> LoginResponse:
+    key = _login_key(request, payload.username)
+    if _recent_fails(key) >= _LOGIN_MAX_FAILS:
+        raise HTTPException(status_code=429, detail="登录失败次数过多，请 10 分钟后再试")
     user = db.scalar(select(User).where(User.username == payload.username))
     if user is None or not verify_password(payload.password, user.password_hash):
+        _note_fail(key)
         raise HTTPException(status_code=401, detail="用户名或密码错误")
+    _clear_fails(key)
     token = create_access_token(user.id, user.username, user.role)
     return LoginResponse(token=token, user=UserOut.model_validate(user))
 
