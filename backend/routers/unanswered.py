@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from ..config import settings
 from ..database import get_db
@@ -44,13 +44,25 @@ def list_unanswered(
     admin: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
 ) -> dict:
-    """按 id 升序（1→n）返回记录；status 可选过滤 pending / resolved。"""
+    """按 id 升序（1→n）返回记录；status 可选过滤 pending / resolved。
+
+    total 必须单独 count：之前直接返回本页条数（最多 500），
+    前端拿它当总数展示就会少算。creator 用 joinedload 一次查出来，
+    避免逐行懒加载用户表。
+    """
     limit = min(max(limit, 1), 500)
-    query = select(UnansweredQuestion).order_by(UnansweredQuestion.id.asc()).limit(limit)
+    query = (
+        select(UnansweredQuestion)
+        .options(joinedload(UnansweredQuestion.creator))
+        .order_by(UnansweredQuestion.id.asc())
+    )
+    count_query = select(func.count(UnansweredQuestion.id))
     if status in ("pending", "resolved"):
         query = query.where(UnansweredQuestion.status == status)
-    rows = db.execute(query).scalars().all()
-    return {"items": [_to_dict(q) for q in rows], "total": len(rows)}
+        count_query = count_query.where(UnansweredQuestion.status == status)
+    total = db.scalar(count_query) or 0
+    rows = db.execute(query.limit(limit)).scalars().all()
+    return {"items": [_to_dict(q) for q in rows], "total": total}
 
 
 @router.get("/stats", summary="未命中问题统计（管理员）")
@@ -140,6 +152,8 @@ async def regenerate_answer(
         q.answer = ""
         message = "知识库还没有收录相关内容，请先添加资料（上传文档或添加知识点）后再生成"
         answer = ""
+    # 回答发生了变化：重新计为未读，等学生自己点开再清角标
+    q.read_at = None
     db.commit()
 
     return {
@@ -163,6 +177,9 @@ def update_unanswered(
         raise HTTPException(status_code=404, detail="记录不存在")
     if status not in ("pending", "resolved"):
         raise HTTPException(status_code=400, detail="status 仅支持 pending / resolved")
+    if q.status != status:
+        # 状态变了旧答案就不再作数，重置已读让新结果重新提醒
+        q.read_at = None
     q.status = status
     db.commit()
     return {"ok": True}

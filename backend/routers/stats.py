@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..deps import get_current_user, require_role
+from ..services.kb_scope import visible_course_names
 from ..models import Conversation, Document, KnowledgeBase, KnowledgePoint, Message, UnansweredQuestion, User
 from ..schemas import StatsOut
 
@@ -32,10 +33,35 @@ def my_stats(
         )
         or 0
     )
-    knowledge_points = db.scalar(select(func.count(KnowledgePoint.id))) or 0
-    documents_ready = (
-        db.scalar(select(func.count(Document.id)).where(Document.status == "ready")) or 0
-    )
+    # 个人统计只算自己看得见的内容；以前直接 count 全表，
+    # 学生看到的是所有人（含别人私有库）的规模。
+    visible = visible_course_names(user, db)
+    if visible is None:
+        knowledge_points = db.scalar(select(func.count(KnowledgePoint.id))) or 0
+        documents_ready = (
+            db.scalar(select(func.count(Document.id)).where(Document.status == "ready")) or 0
+        )
+    elif visible:
+        knowledge_points = (
+            db.scalar(
+                select(func.count(KnowledgePoint.id)).where(
+                    KnowledgePoint.course.in_(visible)
+                )
+            )
+            or 0
+        )
+        documents_ready = (
+            db.scalar(
+                select(func.count(Document.id)).where(
+                    Document.status == "ready",
+                    Document.course.in_(visible),
+                )
+            )
+            or 0
+        )
+    else:
+        knowledge_points = 0
+        documents_ready = 0
 
     # 最近 5 个会话（含消息数）
     recent_rows = db.execute(
@@ -82,18 +108,19 @@ def admin_stats(
     conversations = db.scalar(select(func.count(Conversation.id))) or 0
     messages = db.scalar(select(func.count(Message.id))) or 0
 
-    # 近 7 天每日会话数（按本地时区 UTC+8 折算）
+    # 近 7 天每日会话数（按配置的本地时区折算，不再写死 +8）
     today_local = datetime.now(timezone.utc) + timedelta(hours=settings.UTC_OFFSET_HOURS)
     start_local = today_local.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=6)
     start_utc = start_local - timedelta(hours=settings.UTC_OFFSET_HOURS)
+    tz_modifier = f"{settings.UTC_OFFSET_HOURS:+d} hours"
 
     rows = db.execute(
         select(
-            func.strftime("%Y-%m-%d", Conversation.created_at, "+8 hours"),
+            func.strftime("%Y-%m-%d", Conversation.created_at, tz_modifier),
             func.count(Conversation.id),
         )
         .where(Conversation.created_at >= start_utc)
-        .group_by(func.strftime("%Y-%m-%d", Conversation.created_at, "+8 hours"))
+        .group_by(func.strftime("%Y-%m-%d", Conversation.created_at, tz_modifier))
     ).all()
     daily_map = {str(d): c for d, c in rows}
 

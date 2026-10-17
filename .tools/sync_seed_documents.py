@@ -14,7 +14,7 @@
 同一内容在检索结果中重复出现；文档记录仅用于「文档管理」展示与文件管理。
 
 用法：
-    python sync_seed_documents.py
+    python .tools/sync_seed_documents.py
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ import sys
 import uuid
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
 from sqlalchemy import select  # noqa: E402
@@ -31,7 +31,8 @@ from backend.config import settings  # noqa: E402
 from backend.database import SessionLocal, init_db  # noqa: E402
 from backend.models import Document, User  # noqa: E402
 from backend.seed import SAMPLE_POINTS  # noqa: E402
-from backend.services.chunker import split_text  # noqa: E402
+from backend.services.chunker import split_text
+from backend.services.vector_store import delete_document  # noqa: E402
 
 
 def main() -> None:
@@ -44,10 +45,22 @@ def main() -> None:
             print("未找到默认管理员账号，请先启动后端完成初始化")
             return
 
-        created = skipped = 0
+        created = skipped = fixed = 0
         for item in SAMPLE_POINTS:
             filename = f"{item['title']}.md"
-            if session.scalar(select(Document).where(Document.filename == filename)):
+            existing = session.scalar(select(Document).where(Document.filename == filename))
+            if existing is not None:
+                # 旧版本生成的种子文档没有 is_seed 标记：内容与知识点一致时补上，
+                # 并删掉可能残留的文档向量（知识点已经有一份，留着就是双份）。
+                if not existing.is_seed:
+                    try:
+                        body = Path(existing.stored_path).read_text(encoding="utf-8")
+                    except OSError:
+                        body = ""
+                    if body == f"# {item['title']}\n\n{item['content']}":
+                        existing.is_seed = 1
+                        delete_document(existing.id)
+                        fixed += 1
                 skipped += 1
                 continue
             text = f"# {item['title']}\n\n{item['content']}"
@@ -69,7 +82,10 @@ def main() -> None:
             )
             created += 1
         session.commit()
-        print(f"完成：新增 {created} 个文档，跳过 {skipped} 个已存在的同名文档")
+        print(
+            f"完成：新增 {created} 个文档，跳过 {skipped} 个已存在的同名文档，"
+            f"补标 {fixed} 个种子文档"
+        )
     finally:
         session.close()
 

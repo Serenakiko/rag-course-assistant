@@ -6,8 +6,7 @@
 
 权限规则：
   - 新增知识点、新增知识库：所有登录用户
-  - 编辑知识点：所有登录用户（方便纠错）
-  - 删除知识点 / 编辑或删除知识库：创建者本人或管理员
+  - 编辑 / 删除知识点、编辑或删除知识库：创建者本人或管理员
 """
 from __future__ import annotations
 
@@ -16,7 +15,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from ..database import get_db
 from ..deps import get_current_user
@@ -32,15 +31,10 @@ from ..services.chunker import split_text
 from ..services.document_parser import parse_file
 from ..services.kb_scope import (
     admin_user_ids as _admin_user_ids,
-    all_base_names,
     all_course_names,
-    allowed_course_names,
     assert_writable_course,
     can_view_point,
-    hidden_base_names,
-    hidden_course_names,
     point_scope_condition,
-    visible_base_names,
     visible_course_names,
 )
 from ..services.vector_store import (
@@ -64,12 +58,6 @@ def can_manage(user: User, creator_id: int | None) -> bool:
 
 
 # 可见性规则统一在 services/kb_scope.py，浏览和问答检索共用同一套
-_all_base_names = all_base_names
-_all_course_names = all_course_names
-_visible_base_names = visible_base_names
-_visible_course_names = visible_course_names
-_hidden_base_names = hidden_base_names
-_hidden_course_names = hidden_course_names
 
 
 # ==================== 知识库 ====================
@@ -80,7 +68,7 @@ def list_bases(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[KnowledgeBaseSummary]:
-    stmt = select(KnowledgeBase)
+    stmt = select(KnowledgeBase).options(joinedload(KnowledgeBase.creator))
     if user.role != "admin":
         # 学生只收集：管理员发布的知识库 + 自己创建的
         stmt = stmt.where(
@@ -255,10 +243,10 @@ def list_courses(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[str]:
-    visible = _visible_course_names(user, db)
+    visible = visible_course_names(user, db)
     if visible is None:
         # 管理员：全部知识库 + 历史课程
-        return sorted(_all_course_names(db))
+        return sorted(all_course_names(db))
     # 学生：可见知识库 + 自己（或管理员）留下的历史课程
     return sorted(visible)
 
@@ -300,27 +288,47 @@ def update_point(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> KnowledgePoint:
-    # 所有登录用户都可编辑知识点（便于纠错），但只能是自己能访问的知识库下的
+    # 只有创建者本人或管理员能改内容：以前所有登录用户都能编辑，
+    # 改错了既没有留痕也追不回来。改挂知识库同样要目标库可写，
+    # 否则等于借编辑把自己挪进别人的库。
     point = db.get(KnowledgePoint, point_id)
     if point is None:
         raise HTTPException(status_code=404, detail="知识点不存在")
     if not can_view_point(user, db, point):
         raise HTTPException(status_code=403, detail="只能编辑自己能访问的知识库下的知识点")
-    # 编辑时允许改挂知识库，但要确认目标知识库同样可写，否则等于借编辑把自己挪进别人的库
+    if not can_manage(user, point.created_by):
+        raise HTTPException(status_code=403, detail="只能编辑自己创建的知识点")
     assert_writable_course(user, db, payload.course)
-    point.title = payload.title.strip()
-    point.content = payload.content.strip()
-    point.course = payload.course.strip()
-    point.tags = payload.tags.strip()
-    db.commit()
-    db.refresh(point)
+
+    new_values = (
+        payload.title.strip(),
+        payload.content.strip(),
+        payload.course.strip(),
+        payload.tags.strip(),
+    )
+    old_values = (point.title, point.content, point.course, point.tags)
+
+    # 先写向量再提交数据库：向量失败时数据库还停在旧值，rollback 即可；
+    # 数据库提交失败则把向量恢复成旧内容，避免两边不一致。
     try:
-        update_knowledge_point(point.id, point.title, point.content, point.course, point.tags)
+        update_knowledge_point(point_id, *new_values)
     except Exception:  # noqa: BLE001
+        db.rollback()
         raise HTTPException(
             status_code=500,
             detail="向量库更新失败，请确认大模型服务已启动",
         )
+    point.title, point.content, point.course, point.tags = new_values
+    try:
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        try:
+            update_knowledge_point(point_id, *old_values)
+        except Exception:  # noqa: BLE001
+            logger.exception("知识点 %s 保存失败后回滚向量也失败", point_id)
+        raise HTTPException(status_code=500, detail="知识点保存失败，已回滚")
+    db.refresh(point)
     return point
 
 

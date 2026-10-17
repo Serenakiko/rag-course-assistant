@@ -7,14 +7,14 @@
   4. 兼容历史数据：已有知识点的课程若未建知识库，自动补建。
 
 用法（建议先停止后端服务，避免 SQLite 写锁冲突）：
-    python update_knowledge_bases.py
+    python .tools/update_knowledge_bases.py
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
 from sqlalchemy import func, select  # noqa: E402

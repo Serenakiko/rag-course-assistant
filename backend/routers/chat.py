@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -26,6 +27,7 @@ from ..services.kb_scope import allowed_course_names
 from ..services.rag_service import is_unmatched_answer
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _sse(payload: dict) -> str:
@@ -117,6 +119,8 @@ def mark_unanswered_read(
     q = db.get(UnansweredQuestion, qid)
     if q is None or q.created_by != user.id:
         raise HTTPException(status_code=404, detail="记录不存在")
+    if q.status != "resolved":
+        raise HTTPException(status_code=400, detail="这条反馈还没有回答")
     if q.read_at is None:
         q.read_at = utcnow()
         db.commit()
@@ -260,14 +264,9 @@ def _kb_list(raw: str | None) -> list[str]:
 
 
 def _kb_from_conv(raw: str | None) -> str:
-    """从会话的 knowledge_bases（JSON 数组）取第一个作为知识库名。"""
-    try:
-        arr = json.loads(raw or "[]")
-        if arr:
-            return arr[0]
-    except Exception:
-        pass
-    return ""
+    """从会话的 knowledge_bases 取第一个作为知识库名（管理端展示用）。"""
+    arr = _kb_list(raw)
+    return arr[0] if arr else ""
 
 
 @router.get("/admin/messages", summary="全部问答对（管理员，分页）")
@@ -286,6 +285,8 @@ def admin_qa_pairs(
     """
     limit = min(max(limit, 1), 100)
     offset = max(offset, 0)
+    if field not in ("question", "answer", "user"):
+        raise HTTPException(status_code=400, detail="field 仅支持 question / answer / user")
 
     base = (
         select(
@@ -381,13 +382,14 @@ async def ask(
 
     selected = [c for c in payload.knowledge_bases if c]
 
-    # 会话记录本次使用的知识库；重新生成且没带选择时沿用原记录，不能清空
+    # 会话记录用过的知识库（并集）：历史按库筛选时要能找到每个用过的库，
+    # 只存最后一次选择会让更早用过的库筛不到这个会话。
     if selected:
-        conv.knowledge_bases = json.dumps(selected, ensure_ascii=False)
-        db.commit()
-    elif not payload.regenerate:
-        conv.knowledge_bases = "[]"
-        db.commit()
+        known = _kb_list(conv.knowledge_bases)
+        merged = list(dict.fromkeys(known + selected))
+        if merged != known:
+            conv.knowledge_bases = json.dumps(merged, ensure_ascii=False)
+            db.commit()
 
     # 2. 保存用户消息；重新生成模式不重复落库提问，并删除上一条待替换的回答
     if payload.regenerate:
@@ -400,12 +402,33 @@ async def ask(
             .order_by(Message.id.desc())
             .limit(1)
         ).first()
-        if last_assistant is not None:
+        last_user_id = db.scalar(
+            select(func.max(Message.id)).where(
+                Message.conversation_id == conversation_id,
+                Message.role == "user",
+            )
+        )
+        # 只删「当前提问之后」的回答。上次生成一个字都没吐出来时，最近一条
+        # 助手消息属于上一轮，删掉会把上一轮的答案也弄丢。
+        if (
+            last_assistant is not None
+            and last_user_id is not None
+            and last_assistant.id > last_user_id
+        ):
             db.delete(last_assistant)
             db.commit()
         if not selected:
             selected = _kb_list(conv.knowledge_bases)
     history = _load_history(db, conversation_id, settings.HISTORY_LIMIT)
+    # 重新生成时当前提问已经作为最后一条用户消息存在历史里，stream_answer 还会
+    # 再拼一次 question；不剔掉的话模型会看到同一个问题两遍。
+    if (
+        payload.regenerate
+        and history
+        and history[-1][0] == "user"
+        and history[-1][1].strip() == payload.message.strip()
+    ):
+        history.pop()
     if not payload.regenerate:
         db.add(Message(conversation_id=conversation_id, role="user", content=payload.message))
         db.commit()
@@ -457,22 +480,27 @@ async def ask(
                         (unmatched or {}).get("recommended", []),
                         ensure_ascii=False,
                     )
-                    # 同一学生反复问同一个问题时不重复刷反馈，更新已存在的那条
+                    # 同一学生问同一个问题只留一条：已解决的不再重复建待处理，
+                    # 否则管理员列表里会堆出同一问题的多张工单。
+                    question_text = payload.message.strip()
                     existing = session.scalar(
-                        select(UnansweredQuestion).where(
-                            UnansweredQuestion.question == payload.message,
+                        select(UnansweredQuestion)
+                        .where(
+                            UnansweredQuestion.question == question_text,
                             UnansweredQuestion.created_by == user.id,
-                            UnansweredQuestion.status == "pending",
                         )
+                        .order_by(UnansweredQuestion.id.desc())
+                        .limit(1)
                     )
                     if existing is not None:
-                        existing.course = course
-                        existing.related_points = related
+                        if existing.status == "pending":
+                            existing.course = course
+                            existing.related_points = related
                     else:
                         session.add(
                             UnansweredQuestion(
                                 display_no=_next_unanswered_no(session),
-                                question=payload.message,
+                                question=question_text,
                                 course=course,
                                 related_points=related,
                                 status="pending",
@@ -482,21 +510,29 @@ async def ask(
                     session.commit()
                 finally:
                     session.close()
-            # 落库
-            session = SessionLocal()
-            try:
-                session.add(
-                    Message(
-                        conversation_id=conversation_id,
-                        role="assistant",
-                        content=full_answer or "（无回答）",
-                        sources=sources_json,
-                    )
-                )
-                session.commit()
-            finally:
-                session.close()
         except Exception as exc:  # noqa: BLE001
             yield _sse({"type": "error", "message": f"服务异常：{exc}"})
+        finally:
+            # 正常结束、超时、异常、客户端断开（切换会话/停止生成）都会走到这里：
+            # 把已经生成的半截回答存下来。不存的话，切回会话触发补生成时
+            # 提问会被再落一条，出现重复提问，半截内容也直接丢了。
+            partial = "".join(answer_parts).strip()
+            if partial:
+                session = SessionLocal()
+                try:
+                    session.add(
+                        Message(
+                            conversation_id=conversation_id,
+                            role="assistant",
+                            content=partial,
+                            sources=sources_json,
+                        )
+                    )
+                    session.commit()
+                except Exception:  # noqa: BLE001
+                    logger.exception("保存中断的部分回答失败 conversation_id=%s", conversation_id)
+                    session.rollback()
+                finally:
+                    session.close()
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")

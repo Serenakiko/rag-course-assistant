@@ -1,6 +1,7 @@
 /* ============ 视图：文档管理（搜索 + 表格） ============ */
 const DocumentsView = (() => {
   let pollTimer = null;
+  let pollCount = 0;   // 轮询次数上限：解析卡住时别让页面无限请求
   let docCache = [];
   let docPage = 1;
   let docPageSize = 10;
@@ -156,9 +157,16 @@ const DocumentsView = (() => {
   }
 
   function startPolling() {
-    stopPolling();
+    if (pollTimer) return;  // 已在轮询：不要重置计数，否则永远到不了上限
+    pollCount = 0;
     pollTimer = setInterval(() => {
-      loadDocuments().catch(() => stopPolling());
+      pollCount += 1;
+      if (pollCount > 30) {  // 60 秒还没解析完，停止轮询
+        stopPolling();
+        Common.toast("文档解析时间较长，稍后刷新页面查看结果", "error");
+        return;
+      }
+      loadDocuments();
     }, 2000);
   }
 

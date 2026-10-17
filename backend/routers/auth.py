@@ -36,6 +36,28 @@ AVATAR_SIGNATURES = {
 }
 
 
+def _avatar_file(avatar: str, user_id: int) -> Path | None:
+    """把 /static/avatars/u{id}_xxx 映射到磁盘文件；别人的或非上传头像不处理。"""
+    prefix = "/static/avatars/"
+    if not avatar or not avatar.startswith(prefix):
+        return None
+    name = avatar[len(prefix):]
+    if not name or "/" in name or "\\" in name or not name.startswith(f"u{user_id}_"):
+        return None
+    return AVATAR_DIR / name
+
+
+def _delete_avatar_file(avatar: str, user_id: int) -> None:
+    """删除被替换下来的头像文件；失败不影响主流程。"""
+    path = _avatar_file(avatar, user_id)
+    if path is None:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _looks_like_image(data: bytes, ext: str) -> bool:
     """按文件头判断，光看扩展名挡不住把任意文件改名成 .png 上传。"""
     if ext == "webp":
@@ -54,6 +76,24 @@ _REG_WINDOW = 600.0
 _REG_MAX = 5
 _reg_log: dict[str, list[float]] = {}
 _login_lock = threading.Lock()
+_last_prune = 0.0
+_PRUNE_INTERVAL = 60.0
+
+
+def _prune_expired(now: float) -> None:
+    """清掉窗口外的限流记录。
+
+    只按 key 懒清理的话，换 IP / 换账号试过一轮，旧 key 就永远留在内存里。
+    每 60 秒扫一次，调用方必须已经持有 _login_lock。
+    """
+    global _last_prune
+    if now - _last_prune < _PRUNE_INTERVAL:
+        return
+    _last_prune = now
+    for store, window in ((_login_fails, _LOGIN_WINDOW), (_reg_log, _REG_WINDOW)):
+        expired = [k for k, stamps in store.items() if not any(now - t < window for t in stamps)]
+        for key in expired:
+            del store[key]
 
 
 def _login_key(request: Request, username: str) -> str:
@@ -64,6 +104,7 @@ def _login_key(request: Request, username: str) -> str:
 def _recent_fails(key: str) -> int:
     now = time.monotonic()
     with _login_lock:
+        _prune_expired(now)
         stamps = [t for t in _login_fails.get(key, []) if now - t < _LOGIN_WINDOW]
         if stamps:
             _login_fails[key] = stamps
@@ -91,6 +132,7 @@ def register(
     client = request.client.host if request.client else "-"
     now = time.monotonic()
     with _login_lock:
+        _prune_expired(now)
         stamps = [t for t in _reg_log.get(client, []) if now - t < _REG_WINDOW]
         if len(stamps) >= _REG_MAX:
             raise HTTPException(status_code=429, detail="注册过于频繁，请稍后再试")
@@ -166,10 +208,14 @@ def update_profile(
             user.username = new_username
     if payload.real_name is not None:
         user.real_name = payload.real_name.strip() or user.real_name
+    old_avatar = user.avatar
     if payload.avatar is not None:
         user.avatar = payload.avatar.strip()
     db.commit()
     db.refresh(user)
+    # 数据库落定后再删旧文件：提交失败时头像字段还指向它，删了就成了破图
+    if old_avatar and old_avatar != user.avatar:
+        _delete_avatar_file(old_avatar, user.id)
     return user
 
 
@@ -182,6 +228,8 @@ async def upload_avatar(
     ext = (file.filename or "").rsplit(".", 1)[-1].lower()
     if ext not in AVATAR_EXTS:
         raise HTTPException(status_code=400, detail="仅支持 png/jpg/jpeg/gif/webp 图片")
+    if (file.size or 0) > AVATAR_MAX_SIZE:
+        raise HTTPException(status_code=400, detail="图片不能超过 2MB")
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="文件为空")
@@ -192,7 +240,10 @@ async def upload_avatar(
     AVATAR_DIR.mkdir(parents=True, exist_ok=True)
     name = f"u{user.id}_{uuid.uuid4().hex[:8]}.{ext}"
     (AVATAR_DIR / name).write_bytes(data)
+    old_avatar = user.avatar
     user.avatar = f"/static/avatars/{name}"
     db.commit()
     db.refresh(user)
+    if old_avatar and old_avatar != user.avatar:
+        _delete_avatar_file(old_avatar, user.id)
     return user

@@ -170,12 +170,19 @@ const ChatView = (() => {
       messagesEl.innerHTML = "";
       msgs.forEach((m) => renderMessage(m.role, m.content, m.sources));
       scrollBottom();
-      // 返回“生成未完成”的会话：最后一条是提问但没有回答时，自动重新生成
+      // 返回“生成未完成”的会话：补生成。带 regenerate，后端不再重复落一条提问。
       if (id === pendingConvId) {
         pendingConvId = null;
         const last = msgs[msgs.length - 1];
         if (last && last.role === "user") {
-          send(last.content, { silentUser: true });
+          send(last.content, { silentUser: true, regenerate: true });
+        } else if (last && last.role === "assistant") {
+          // 中断时半截回答已经落库，先去掉这条再从头生成，避免出现两条回答
+          const lastUser = [...msgs].reverse().find((m) => m.role === "user");
+          if (lastUser) {
+            if (messagesEl.lastElementChild) messagesEl.lastElementChild.remove();
+            send(lastUser.content, { silentUser: true, regenerate: true });
+          }
         }
       }
     } catch {
@@ -337,6 +344,7 @@ const ChatView = (() => {
     const inputEl = document.getElementById("chat-input");
     const seq = ++streamSeq;  // 标记本次生成；切换会话后旧生成的回调将不再操作界面
     const silentUser = !!(opts && opts.silentUser);  // 补生成模式：不重复渲染提问、不新建会话
+    const regenerate = !!(opts && opts.regenerate);  // 重新生成：后端不重复落提问、先删旧回答
 
     let convId;
     if (silentUser) {
@@ -430,7 +438,7 @@ const ChatView = (() => {
           // 出错且已有部分内容时，保留 onError 中“部分内容 + 错误提示”的渲染结果
           scrollBottom();
         },
-      }, { knowledgeBases });
+      }, { knowledgeBases, regenerate });
     } catch (err) {
       if (seq !== streamSeq) return;
       hadError = true;

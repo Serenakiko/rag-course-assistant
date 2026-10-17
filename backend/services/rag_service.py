@@ -20,6 +20,30 @@ from .vector_store import search as vector_search
 
 logger = logging.getLogger(__name__)
 
+
+async def _astream_with_deadline(chain, inputs: dict, timeout: float) -> AsyncGenerator:
+    """带总时长上限地迭代 chain.astream。
+
+    只在循环体里判断 deadline 是假防线：模型卡住时一个 chunk 都不来，
+    判断根本执行不到。这里每个 chunk 都用 wait_for 包一层，剩余时间一到
+    就取消底层请求，保证「超时」真的会停。
+    """
+    agen = chain.astream(inputs)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            try:
+                chunk = await asyncio.wait_for(agen.__anext__(), timeout=remaining)
+            except StopAsyncIteration:
+                return
+            yield chunk
+    finally:
+        await agen.aclose()
+
+
 # 模型判定“知识库未收录”时的特征短语（模型输出格式可能不完全受控，用模糊匹配兜底）
 UNMATCHED_MARKERS = (
     "【知识库未收录】",
@@ -142,9 +166,9 @@ COURSE_STRONG_KEYWORDS = (
     "调度", "信号量", "计算机网络", "TCP", "UDP", "HTTP", "HTTPS", "三次握手",
     "四次挥手", "路由", "DNS", "子网", "端口", "交换机", "路由器", "计算机组成",
     "CPU", "存储器", "指令", "流水线", "寄存器", "总线", "数据库", "SQL", "索引",
-    "事务", "范式", "主键", "外键", "编程", "代码", "函数", "类", "对象", "继承",
-    "多态", "指针", "数组", "字符串", "变量", "循环", "软件工程", "需求分析",
-    "软件测试", "版本控制", "Git", "前端", "后端", "接口", "框架", "编译", "解释",
+    "范式", "主键", "外键", "继承",
+    "多态", "指针", "数组", "字符串", "软件工程", "需求分析",
+    "软件测试", "版本控制", "Git", "前端", "后端", "编译",
     "知识点", "课件", "章节", "考点", "习题", "实验报告", "作业", "复习", "考试",
     "课程", "助教", "知识库", "课本", "笔记",
 )
@@ -161,14 +185,17 @@ IRRELEVANT_KEYWORDS = (
 async def is_course_related(question: str, timeout: float = 10.0) -> bool:
     """轻量判定：该问题是否与课程学习相关。
 
-    规则优先：明显课程术语（红黑树/进程/TCP 等）直接判相关；
-    明显无关（天气/考公/娱乐等）直接判不相关；
+    规则优先：先判明显无关（天气/考公/娱乐等），命中直接不相关；
+    再看课程术语（红黑树/进程/TCP 等）判相关；
     其余交给 LLM 二分类。LLM 失败时保守返回 False。
+
+    顺序不能反："考研面试里的多线程" 同时命中课程词和无关词，
+    先判课程词就会把它当课程问题，反而刷进反馈列表。
     """
-    if any(k in question for k in COURSE_STRONG_KEYWORDS):
-        return True
     if any(k in question for k in IRRELEVANT_KEYWORDS):
         return False
+    if any(k in question for k in COURSE_STRONG_KEYWORDS):
+        return True
     try:
         llm = get_llm()
         resp = await asyncio.wait_for(
@@ -296,15 +323,18 @@ async def generate_answer(question: str, courses: list[str] | None = None) -> di
     prompt = ChatPromptTemplate.from_messages(messages)
     chain = prompt | get_llm()
 
-    deadline = time.monotonic() + settings.LLM_TIMEOUT
     answer_parts: list[str] = []
-    async for chunk in chain.astream({"context": context, "question": question}):
-        if time.monotonic() > deadline:
-            answer_parts.append("（回答生成超时了，稍后再试）")
-            break
-        content = getattr(chunk, "content", "")
-        if isinstance(content, str) and content:
-            answer_parts.append(content)
+    try:
+        async for chunk in _astream_with_deadline(
+            chain,
+            {"context": context, "question": question},
+            settings.LLM_TIMEOUT,
+        ):
+            content = getattr(chunk, "content", "")
+            if isinstance(content, str) and content:
+                answer_parts.append(content)
+    except asyncio.TimeoutError:
+        answer_parts.append("（回答生成超时了，稍后再试）")
     answer = "".join(answer_parts).strip() or "这次没生成出有效回答，检查一下模型服务，或者稍后再试。"
 
     # 模型判定未收录时同样追加推荐与反馈提示
@@ -400,21 +430,25 @@ async def stream_answer(
         prompt = ChatPromptTemplate.from_messages(messages)
         chain = prompt | get_llm()
 
-        # 3. 流式生成（带超时兜底：超过 LLM_TIMEOUT 秒停止，避免模型卡死一直挂着）
-        deadline = time.monotonic() + settings.LLM_TIMEOUT
+        # 3. 流式生成：每个 chunk 都用 wait_for 兜底，模型卡死（一个 token 都不来）也能停
         answer_parts: list[str] = []
-        async for chunk in chain.astream({"context": context, "question": question}):
-            if time.monotonic() > deadline:
-                logger.warning("RAG 回答生成超过 %.0f 秒，已强制停止", settings.LLM_TIMEOUT)
-                yield {
-                    "type": "error",
-                    "message": f"回答生成超时（超过 {settings.LLM_TIMEOUT:.0f} 秒），稍后再试或者换个问法。",
-                }
-                return
-            content = getattr(chunk, "content", "")
-            if isinstance(content, str) and content:
-                answer_parts.append(content)
-                yield {"type": "token", "content": content}
+        try:
+            async for chunk in _astream_with_deadline(
+                chain,
+                {"context": context, "question": question},
+                settings.LLM_TIMEOUT,
+            ):
+                content = getattr(chunk, "content", "")
+                if isinstance(content, str) and content:
+                    answer_parts.append(content)
+                    yield {"type": "token", "content": content}
+        except asyncio.TimeoutError:
+            logger.warning("RAG 回答生成超过 %.0f 秒，已强制停止", settings.LLM_TIMEOUT)
+            yield {
+                "type": "error",
+                "message": f"回答生成超时（超过 {settings.LLM_TIMEOUT:.0f} 秒），稍后再试或者换个问法。",
+            }
+            return
 
         answer = "".join(answer_parts).strip()
         if not answer:

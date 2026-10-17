@@ -19,7 +19,6 @@ from ..services.document_parser import is_supported, parse_file
 from ..services.kb_scope import assert_writable_course
 from ..services.vector_store import (
     add_document_chunks,
-    add_knowledge_point,
     delete_document,
     delete_knowledge_point,
 )
@@ -44,8 +43,11 @@ async def upload_document(
             status_code=400,
             detail="不支持的文件类型，仅支持 PDF / TXT / Markdown / CSV",
         )
+    # 先看声明的文件大小，避免先把几十 MB 写进磁盘再报错
+    if (file.size or 0) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="文件超过 20MB 限制")
 
-    # 只能传到自己可见的知识库；空课程表示未分类
+    # 必须选一个已存在的知识库；空课程会变成问不出来的「未分类」资料，直接 400
     course_name = course.strip()
     assert_writable_course(user, db, course_name)
 
@@ -103,20 +105,20 @@ def process_document(doc_id: int, course: str) -> None:
         doc.status = "ready"
         doc.chunk_count = count
         doc.error = ""
-        # 自动生成知识点：文档名即知识点标题，内容取正文前 2000 字（便于详情页展示与检索）
+        # 自动生成知识点：文档名即标题，内容取正文前 2000 字，只作详情页展示。
+        # 不再写入向量：文档分块已经入过库，同一段内容存两份会在检索里重复命中。
         try:
             title = Path(doc.filename).stem or doc.filename
-            kp = KnowledgePoint(
-                title=title[:255],
-                content=text[:2000],
-                course=course,
-                tags="",
-                created_by=doc.uploaded_by,
+            session.add(
+                KnowledgePoint(
+                    title=title[:255],
+                    content=text[:2000],
+                    course=course,
+                    tags="",
+                    created_by=doc.uploaded_by,
+                )
             )
-            session.add(kp)
             session.commit()
-            session.refresh(kp)
-            add_knowledge_point(kp.id, kp.title, kp.content, kp.course, kp.tags)
         except Exception:  # noqa: BLE001
             logger.exception("文档自动生成知识点失败 doc_id=%s", doc_id)
         session.commit()

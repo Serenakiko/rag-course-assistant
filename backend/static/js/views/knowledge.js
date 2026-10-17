@@ -1,8 +1,7 @@
 /* ============ 视图：知识库（总览卡片 → 知识点列表，所有登录用户可维护） ============
  * 权限规则：
  *   - 新增知识库 / 新增知识点：所有登录用户
- *   - 编辑知识点：所有登录用户（方便纠错）
- *   - 删除知识点 / 编辑或删除知识库：创建者本人 或 管理员
+ *   - 编辑 / 删除知识点、编辑或删除知识库：创建者本人 或 管理员
  */
 const KnowledgeView = (() => {
   let currentBase = null;   // null=总览视图；否则为当前知识库对象
@@ -348,6 +347,10 @@ const KnowledgeView = (() => {
   /* 上传文档到指定知识库，入库后刷新知识点列表 */
   async function uploadToBase(files, courseOverride) {
     const course = courseOverride !== undefined ? courseOverride : (currentBase ? currentBase.name : "");
+    if (!course) {
+      Common.toast("请先选择知识库再上传", "error");
+      return;
+    }
     const list = files.filter((f) => /\.(pdf|txt|md|markdown|csv)$/i.test(f.name));
     if (!list.length) return;
     for (const file of list) {
@@ -392,8 +395,8 @@ const KnowledgeView = (() => {
             </div>
           </div>
           <div class="kp-ops-row">
-            <button class="btn btn-sm" data-edit="${p.id}">编辑</button>
-            ${canManage(p.created_by) ? `<button class="btn btn-sm btn-danger" data-del="${p.id}">删除</button>` : ""}
+            ${canManage(p.created_by) ? `<button class="btn btn-sm" data-edit="${p.id}">编辑</button>
+            <button class="btn btn-sm btn-danger" data-del="${p.id}">删除</button>` : ""}
           </div>
         </div>`).join("");
 
@@ -450,21 +453,28 @@ const KnowledgeView = (() => {
       const sel = box.querySelector("#kp-course");
       try {
         const bases = await API.request("GET", "/api/knowledge/bases");
-        sel.innerHTML = bases.map((b) => {
-          const val = Common.escapeHtml(b.name);
+        if (!bases.length) {
+          sel.innerHTML = '<option value="">（还没有知识库）</option>';
+          Common.toast("还没有知识库，请先新建一个再添加知识点", "error");
+        } else {
           const current = isEdit ? point.course : (currentBase ? currentBase.name : "");
-          return `<option value="${val}" ${b.name === current ? "selected" : ""}>${val}</option>`;
-        }).join("");
+          sel.innerHTML = bases.map((b) => {
+            const val = Common.escapeHtml(b.name);
+            return `<option value="${val}" ${b.name === current ? "selected" : ""}>${val}</option>`;
+          }).join("");
+        }
       } catch { /* 忽略 */ }
       box.querySelector("#kp-save").addEventListener("click", async () => {
         const title = box.querySelector("#kp-title").value.trim();
         const content = box.querySelector("#kp-content").value.trim();
         if (!title) return Common.toast("请输入标题", "error");
         if (!content) return Common.toast("请输入内容", "error");
+        const course = box.querySelector("#kp-course").value;
+        if (!course) return Common.toast("请选择所属知识库", "error");
         const payload = {
           title,
           content,
-          course: box.querySelector("#kp-course").value,
+          course,
           tags: box.querySelector("#kp-tags").value.trim(),
         };
         const btn = box.querySelector("#kp-save");

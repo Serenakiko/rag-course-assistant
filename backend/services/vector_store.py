@@ -36,7 +36,7 @@ def get_vector_store() -> Chroma:
     return _vector_store
 
 
-def _doc(chunk_id: str, text: str, metadata: dict) -> Document:
+def _doc(text: str, metadata: dict) -> Document:
     return Document(page_content=text, metadata=metadata)
 
 
@@ -47,7 +47,6 @@ def add_document_chunks(doc_id: int, filename: str, course: str, chunks: list[st
         return 0
     docs = [
         _doc(
-            f"doc-{doc_id}-{i}",
             text,
             {
                 "source_type": "document",
@@ -79,7 +78,6 @@ def delete_document(doc_id: int) -> None:
 # ---------- 知识点 ----------
 def add_knowledge_point(point_id: int, title: str, content: str, course: str, tags: str) -> None:
     doc = _doc(
-        f"point-{point_id}",
         f"{title}\n{content}",
         {
             "source_type": "knowledge_point",

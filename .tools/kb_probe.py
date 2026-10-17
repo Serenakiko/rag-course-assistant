@@ -1,5 +1,7 @@
 import sys
-sys.path.insert(0, r"D:\rag-course-assistant")
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from backend.services.vector_store import get_vector_store
 
 tests = [

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import get_current_user, require_role
-from ..models import User
+from ..models import KnowledgeBase, User
 from ..schemas import AdminUserUpdate, UserOut
 from ..security import hash_password
 
@@ -87,14 +87,44 @@ def admin_update_user(
 @router.delete("/admin/users/{user_id}", summary="删除用户（管理员）")
 def admin_delete_user(
     user_id: int,
+    transfer_to: int | None = None,
     admin: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
 ) -> dict:
+    """删除用户；名下还有知识库时必须先指定接收人。
+
+    知识库的 created_by 是 ON DELETE SET NULL，直接删用户会留下无主知识库：
+    学生可见性只认「管理员发布的 + 自己创建的」，无主库谁都看不到，
+    知识点和文档却还在库里，等于资料凭空消失。
+    """
     if user_id == admin.id:
         raise HTTPException(status_code=400, detail="不能删除自己的账号")
     target = db.get(User, user_id)
     if target is None:
         raise HTTPException(status_code=404, detail="用户不存在")
+
+    owned = list(
+        db.scalars(select(KnowledgeBase).where(KnowledgeBase.created_by == target.id))
+    )
+    if owned and transfer_to is None:
+        names = "、".join(b.name for b in owned[:5]) + (" 等" if len(owned) > 5 else "")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"该用户名下有 {len(owned)} 个知识库（{names}），"
+                "删除后会变成无主知识库、学生端不可见。"
+                "请先指定接收人转移，或先删除这些知识库。"
+            ),
+        )
+    if owned:
+        if transfer_to == target.id:
+            raise HTTPException(status_code=400, detail="接收人不能是待删除的用户")
+        heir = db.get(User, transfer_to)
+        if heir is None:
+            raise HTTPException(status_code=404, detail="知识库接收人不存在")
+        for base in owned:
+            base.created_by = heir.id
+
     db.delete(target)
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "transferred_bases": len(owned)}

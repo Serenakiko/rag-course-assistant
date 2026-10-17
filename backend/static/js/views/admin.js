@@ -400,6 +400,16 @@ const AdminView = (() => {
 
   async function removeUser(user) {
     if (!user) return;
+    // 名下有知识库：必须先转移，否则删完会变成无主库，学生端直接看不到
+    let owned = [];
+    try {
+      const bases = await API.request("GET", "/api/knowledge/bases");
+      owned = (bases || []).filter((b) => Number(b.created_by) === Number(user.id));
+    } catch { /* 查询失败按无库处理，后端还会再拦一次 */ }
+    if (owned.length) {
+      openTransferModal(user, owned);
+      return;
+    }
     const ok = await Common.confirmDialog({
       title: "删除用户",
       message: `将删除用户「${Common.escapeHtml(user.real_name || user.username)}」及其全部会话记录，不可恢复。确认？`,
@@ -411,6 +421,54 @@ const AdminView = (() => {
       Common.toast("已删除", "success");
       loadUsers();
     } catch (err) { Common.toast(err.message, "error"); }
+  }
+
+  function openTransferModal(user, owned) {
+    const others = usersCache.filter((u) => Number(u.id) !== Number(user.id));
+    const me = API.getUser();
+    const defaultTo = others.find((u) => me && Number(u.id) === Number(me.id)) || others[0];
+    const options = others.map((u) => `
+      <option value="${u.id}" ${defaultTo && u.id === defaultTo.id ? "selected" : ""}>
+        ${Common.escapeHtml(u.real_name || u.username)}（${u.role === "admin" ? "管理员" : "学生"}）
+      </option>`).join("");
+    Common.openModal(`
+      <div class="modal-header">
+        <h3>转移知识库后删除用户</h3>
+        <button class="modal-close" data-close>×</button>
+      </div>
+      <p style="margin:0 0 12px;line-height:1.7">
+        「${Common.escapeHtml(user.real_name || user.username)}」名下还有
+        <strong>${owned.length}</strong> 个知识库：
+        ${owned.map((b) => Common.escapeHtml(b.name)).join("、")}
+      </p>
+      <p class="muted" style="margin:0 0 12px;font-size:13px">
+        直接删除会留下无主知识库，学生端看不到这些资料。请先指定接收人。
+      </p>
+      <div class="form-group">
+        <label>知识库接收人</label>
+        <select class="form-control" id="transfer-to">${options}</select>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" data-close>取消</button>
+        <button class="btn btn-danger" id="transfer-delete">转移并删除</button>
+      </div>
+    `, { onOpen: (box) => {
+      box.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", Common.closeModal));
+      box.querySelector("#transfer-delete").addEventListener("click", async () => {
+        const to = box.querySelector("#transfer-to").value;
+        const btn = box.querySelector("#transfer-delete");
+        btn.disabled = true; btn.textContent = "处理中…";
+        try {
+          await API.request("DELETE", `/api/admin/users/${user.id}?transfer_to=${encodeURIComponent(to)}`);
+          Common.toast("已转移知识库并删除用户", "success");
+          Common.closeModal();
+          loadUsers();
+        } catch (err) {
+          Common.toast(err.message, "error");
+          btn.disabled = false; btn.textContent = "转移并删除";
+        }
+      });
+    }});
   }
 
   /* ==================== 知识库管理（表格） ==================== */

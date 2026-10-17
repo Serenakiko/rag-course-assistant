@@ -83,13 +83,6 @@ rag-course-assistant/
 ├── .env.example              # 配置模板
 ├── .env                      # 本机配置（不入库）
 │
-├── update_knowledge_bases.py # 迁移：删除旧示例知识点、重建四门课程知识库（幂等）
-├── sync_seed_documents.py    # 把种子知识点同步成文档记录（幂等）
-├── rebuild_vectors.py        # 清空 Chroma，从 SQLite 重建全部向量
-├── kb_probe.py               # 打印典型问题的 Top-1 距离
-├── kb_calibrate.py           # 打印多类问题的 Top-3 距离，用于标定阈值
-├── kb_e2e.py                 # 端到端验证：登录 → 问答 → 未命中记录 → 状态流转
-│
 ├── backend/
 │   ├── main.py               # 路由装配、静态托管、启动迁移
 │   ├── config.py             # 集中配置（.env 加载、JWT_SECRET 校验）
@@ -111,7 +104,15 @@ rag-course-assistant/
 │       ├── img/              # 品牌图标、登录页背景
 │       └── avatars/          # 用户上传头像（运行时生成，不入库）
 ├── data/                     # 运行时生成（不入库）：app.db、chroma/、uploads/
-└── .tools/                   # 本地调试产物与日志（不入库）
+└── .tools/                   # 一次性运维/调试脚本（入库）+ 本地日志（不入库）
+    ├── update_knowledge_bases.py
+    ├── sync_seed_documents.py
+    ├── rebuild_vectors.py
+    ├── kb_probe.py
+    ├── kb_calibrate.py
+    ├── kb_e2e.py
+    ├── make_demo_avatar.py
+    └── verify_avatar.py
 ```
 
 ---
@@ -162,7 +163,7 @@ OPENAI_LLM_MODEL=deepseek-chat
 OPENAI_EMBED_MODEL=text-embedding-3-small
 ```
 
-保存后重启即可。**换向量模型后必须重新标定 `UNMATCHED_DISTANCE`**，并运行 `python rebuild_vectors.py`。
+保存后重启即可。**换向量模型后必须重新标定 `UNMATCHED_DISTANCE`**，并运行 `python .tools/rebuild_vectors.py`。
 
 ### 5. 默认账号
 
@@ -265,22 +266,22 @@ Ollama 桌面端的「模型存储位置」指向了空目录。打开 Ollama �
 `run.py` 检测到端口已占用会直接跳过启动（防止开机自启重复起进程）。确实要换端口：`python run.py --port 9000` 或改 `.env` 的 `PORT`。
 
 **Q8：回答总被拒答 / 检索结果异常**
-先停后端，运行 `python rebuild_vectors.py` 重建向量；再运行 `python kb_probe.py` 看距离分布是否仍在 0.85 两侧。换过向量模型就必须重新标定阈值。
+先停后端，运行 `python .tools/rebuild_vectors.py` 重建向量；再运行 `python .tools/kb_probe.py` 看距离分布是否仍在 0.85 两侧。换过向量模型就必须重新标定阈值。
 
 ---
 
 ## 七、运维与调试脚本
 
-根目录脚本均为一次性工具，不参与运行时：
+`.tools/` 下的脚本均为一次性工具，不参与运行时，请在项目根目录执行：
 
 | 脚本 | 用途 | 何时使用 |
 |---|---|---|
-| `python update_knowledge_bases.py` | 重建四门课程知识库（幂等） | 知识库结构升级后 |
-| `python sync_seed_documents.py` | 种子知识点同步为文档记录（不重复入向量库） | 文档数与知识点数对不上时 |
-| `python rebuild_vectors.py` | 清空 Chroma，全部重建 | 换向量模型 / 索引损坏（先停后端） |
-| `python kb_probe.py` | 典型问题 Top-1 距离 | 调拒答阈值 |
-| `python kb_calibrate.py` | 多类问题 Top-3 距离 | 标定阈值边界 |
-| `python kb_e2e.py` | 登录 → 问答 → 反馈 → 状态流转 | 改完 RAG 链路做回归 |
+| `python .tools/update_knowledge_bases.py` | 重建四门课程知识库（幂等） | 知识库结构升级后 |
+| `python .tools/sync_seed_documents.py` | 种子知识点同步为文档记录（不重复入向量库） | 文档数与知识点数对不上时 |
+| `python .tools/rebuild_vectors.py` | 清空 Chroma，全部重建 | 换向量模型 / 索引损坏（先停后端） |
+| `python .tools/kb_probe.py` | 典型问题 Top-1 距离 | 调拒答阈值 |
+| `python .tools/kb_calibrate.py` | 多类问题 Top-3 距离 | 标定阈值边界 |
+| `python .tools/kb_e2e.py` | 登录 → 问答 → 反馈 → 状态流转 | 改完 RAG 链路做回归 |
 
 ---
 
@@ -346,7 +347,7 @@ Ollama 下载器连 Cloudflare R2 时走 IPv6，某些网络环境下会一直 `
 
 - 检索和入库在 `async` 路由里是同步调用，会阻塞事件循环；单机自用无感，并发上来是问题，正确做法是 `asyncio.to_thread` 包一层。
 - 多轮历史按条数截断（最近 6 轮），没按 token 算预算。
-- 没有 pytest，回归靠手动跑 `kb_e2e.py`。
+- 没有 pytest，回归靠手动跑 `.tools/kb_e2e.py`。
 
 ---
 

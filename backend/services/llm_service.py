@@ -32,7 +32,8 @@ def get_llm() -> BaseChatModel:
         num_ctx=8192,
         # qwen3.5 默认先思考再回答，长思考会把 num_predict 吃光导致正文为空
         reasoning=False,
-        timeout=settings.LLM_TIMEOUT,
+        client_kwargs={"timeout": settings.LLM_TIMEOUT},
+        async_client_kwargs={"timeout": settings.LLM_TIMEOUT},
     )
 
 

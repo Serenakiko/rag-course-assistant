@@ -1,7 +1,7 @@
 """向量库重建脚本：清理损坏的 Chroma 数据，并从数据库重新入库文档与知识点。
 
 用法（先停止后端服务再运行）：
-    python rebuild_vectors.py
+    python .tools/rebuild_vectors.py
 """
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import shutil
 import sys
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
 from sqlalchemy import select  # noqa: E402
@@ -34,11 +34,21 @@ def main() -> None:
 
     session = SessionLocal()
     try:
-        # 2. 重新入库全部知识点
+        # 2. 重新入库知识点（跳过文档自动生成的那批）
+        # 自动知识点只作展示，文档分块已经入过库；再写一份就是双份向量。
+        # 种子文档的 is_seed=1，它们对应的知识点是唯一向量来源，不能跳过。
+        auto_keys = {
+            (d.uploaded_by, d.course or "", Path(d.filename).stem)
+            for d in session.scalars(select(Document).where(Document.is_seed == 0))
+        }
         points = list(session.scalars(select(KnowledgePoint).order_by(KnowledgePoint.id)))
+        skipped = 0
         for p in points:
+            if (p.created_by, p.course or "", p.title) in auto_keys:
+                skipped += 1
+                continue
             add_knowledge_point(p.id, p.title, p.content, p.course, p.tags)
-        print(f"知识点入库：{len(points)} 条")
+        print(f"知识点入库：{len(points) - skipped} 条（跳过 {skipped} 条文档自动生成的知识点）")
 
         # 3. 重建文档向量（ready 的算重来，failed 的顺手重试一次）
         docs = list(

@@ -71,7 +71,8 @@ const API = (() => {
    * 流式问答：POST /api/chat/ask，按 SSE 事件回调。
    * handlers: { onToken, onSources, onError, onDone }
    * opts: { idleTimeout, totalTimeout }（毫秒）——长时间无内容 / 总时长超限时自动中止，
-   *       避免网络或模型异常导致页面一直卡在“生成中”；knowledgeBases——回答范围（课程名列表，空=全部）
+   *       避免网络或模型异常导致页面一直卡在“生成中”；knowledgeBases——回答范围（课程名列表，空=全部）；
+   *       regenerate——重新生成（后端不重复保存提问，先删掉旧回答）
    * 返回 AbortController（可调用 .abort() 停止）
    */
   async function streamAsk(conversationId, message, handlers, opts = {}) {
@@ -87,6 +88,7 @@ const API = (() => {
       body: JSON.stringify({
         conversation_id: conversationId,
         message,
+        regenerate: !!opts.regenerate,
         knowledge_bases: opts.knowledgeBases || [],
       }),
       signal: controller.signal,

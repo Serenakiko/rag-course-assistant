@@ -19,10 +19,16 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
 @event.listens_for(engine, "connect")
-def _enable_sqlite_fk(dbapi_connection, _connection_record) -> None:
-    """SQLite 默认不校验外键，删用户/删会话会留下孤儿消息，这里显式打开。"""
+def _enable_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
+    """SQLite 默认不校验外键，删用户/删会话会留下孤儿消息，这里显式打开。
+
+    WAL 让读写不互相阻塞，busy_timeout 给并发写留重试时间，避免直接
+    抛 database is locked。
+    """
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
     cursor.close()
 
 
@@ -73,6 +79,15 @@ def init_db() -> None:
         doc_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(documents)"))]
         if "is_seed" not in doc_cols:
             conn.execute(text("ALTER TABLE documents ADD COLUMN is_seed INTEGER DEFAULT 0"))
+        # 后台解析任务不会跨进程存活：启动时把上次残留的“解析中”标成失败，
+        # 否则文档会永远停在 processing，前端也一直轮询。
+        conn.execute(
+            text(
+                "UPDATE documents SET status = 'failed', "
+                "error = '服务重启，解析中断，请重新上传' "
+                "WHERE status = 'processing'"
+            )
+        )
         # conversations 增量迁移：记录会话使用的知识库（历史会话按库筛选）
         conv_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(conversations)"))]
         if "knowledge_bases" not in conv_cols:

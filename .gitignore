@@ -15,8 +15,9 @@ env/
 data/
 !data/.gitkeep
 
-# 本地运行日志与运维产物（启动日志、历史备份等）
-.tools/
+# 本地运行日志与运维产物（.tools 下的 Python 脚本仍入库）
+.tools/*
+!.tools/*.py
 
 # IDE
 .vscode/

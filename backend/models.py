@@ -50,7 +50,7 @@ class Document(Base):
     status: Mapped[str] = mapped_column(String(16), default="processing")
     # processing / ready / failed
     course: Mapped[str] = mapped_column(String(128), default="", index=True)  # 所属知识库/课程名
-    # 由 sync_seed_documents.py 生成的展示记录：内容已作为知识点入过库，rebuild 时跳过
+    # 由 .tools/sync_seed_documents.py 生成的展示记录：内容已作为知识点入过库，rebuild 时跳过
     is_seed: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str] = mapped_column(Text, default="")

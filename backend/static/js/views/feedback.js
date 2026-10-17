@@ -1,5 +1,5 @@
 /* ============ 视图：我的反馈（学生端） ============ */
-/* 待处理 / 已解决 分区展示；统计卡 + Tab 切换；未读高亮；进入即批量标记已读 */
+/* 待处理 / 已解决 分区展示；统计卡 + Tab 切换；未读高亮；点击条目后标记已读 */
 const FeedbackView = (() => {
   let allItems = [];
   let currentTab = "all";
@@ -35,19 +35,6 @@ const FeedbackView = (() => {
       allItems = await API.request("GET", "/api/chat/unanswered/mine");
       renderStats();
       renderList();
-      // 进入即视为已读：只标记“已解决且未读”的记录，随后刷新侧边栏角标
-      const unreadIds = allItems
-        .filter((it) => it.status === "resolved" && !it.read)
-        .map((it) => it.id);
-      if (unreadIds.length) {
-        await Promise.all(unreadIds.map((id) =>
-          API.request("POST", `/api/chat/unanswered/${id}/read`).catch(() => null)));
-        allItems = allItems.map((it) =>
-          unreadIds.includes(it.id) ? { ...it, read: true } : it);
-        renderStats();
-        renderList();
-        App.refreshFeedbackBadge();
-      }
     } catch (err) {
       list.innerHTML = `<div class="fb-empty"><p style="color:var(--danger)">${Common.escapeHtml(err.message)}</p></div>`;
     }
@@ -98,6 +85,7 @@ const FeedbackView = (() => {
       <div class="fb-item ${it.status === "resolved" && !it.read ? "fb-unread" : ""}" data-id="${it.id}">
         <div class="fb-head">
           ${it.status === "resolved" ? `<span class="fb-badge fb-badge-done">已解决</span>` : ""}
+          ${it.status === "resolved" && !it.read ? `<span class="fb-badge fb-badge-new" title="点击这条反馈标为已读">新回答</span>` : ""}
           <b class="fb-q" title="${Common.escapeHtml(it.question)}">${Common.escapeHtml(it.question)}</b>
           <span class="fb-time">${Common.fmtTime(it.status === "resolved" ? it.answered_at : it.created_at)}</span>
         </div>
@@ -105,6 +93,22 @@ const FeedbackView = (() => {
           ? `<div class="fb-answer md-body">${Markdown.render(it.answer)}</div>`
           : `<div class="fb-wait-tip"><span>已提交跟进，解决后会通知你</span></div>`}
       </div>`).join("");
+
+    // 点击这条反馈才标已读：进页面就全标掉的话，未读高亮和角标等于白做
+    list.querySelectorAll(".fb-item").forEach((el) =>
+      el.addEventListener("click", () => markRead(Number(el.dataset.id))));
+  }
+
+  async function markRead(id) {
+    const item = allItems.find((x) => x.id === id);
+    if (!item || item.status !== "resolved" || item.read) return;
+    try {
+      await API.request("POST", `/api/chat/unanswered/${id}/read`);
+      item.read = true;
+      renderStats();
+      renderList();
+      App.refreshFeedbackBadge();
+    } catch { /* 忽略：下次再点 */ }
   }
 
   return { render };
