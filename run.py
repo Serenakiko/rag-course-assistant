@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import socket
 import sys
 import webbrowser
 from threading import Timer
@@ -30,6 +31,14 @@ def check_dependencies() -> bool:
     return True
 
 
+def _port_in_use(host: str, port: int) -> bool:
+    """端口是否已被占用：开机自启时服务可能已经在跑，重复启动直接跳过。"""
+    target = "127.0.0.1" if host in ("", "0.0.0.0", "::") else host
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex((target, port)) == 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="智答系统（基于 RAG 大模型的智能问答）")
     parser.add_argument("--reload", action="store_true", help="开发模式：代码修改后自动重启")
@@ -46,6 +55,10 @@ def main() -> None:
 
     port = args.port or settings.PORT
     url = f"http://{settings.HOST}:{port}"
+
+    if _port_in_use(settings.HOST, port):
+        print(f"  端口 {port} 上已经有服务在跑，本次启动跳过。")
+        return
 
     print()
     print("=" * 64)
