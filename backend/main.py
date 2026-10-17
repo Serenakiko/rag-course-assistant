@@ -5,13 +5,15 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from .database import init_db
+from .deps import get_current_user
+from .models import User
 from .routers import auth, chat, documents, knowledge, stats, unanswered, users
 from .seed import init_seed
 
@@ -38,9 +40,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# 只放行本机页面跨端口访问；通配符会让任何网站都能拿着浏览器里的令牌调这套接口
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -62,7 +65,7 @@ def health() -> dict:
 
 
 @app.get("/api/llm/status", tags=["系统"], summary="大模型连接状态")
-def llm_status() -> dict:
+def llm_status(user: User = Depends(get_current_user)) -> dict:
     from .services.llm_service import check_llm_connection
 
     ok, message = check_llm_connection()
