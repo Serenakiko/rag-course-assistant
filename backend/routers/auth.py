@@ -28,6 +28,19 @@ router = APIRouter()
 AVATAR_DIR = Path(__file__).resolve().parent.parent / "static" / "avatars"
 AVATAR_EXTS = {"png", "jpg", "jpeg", "gif", "webp"}
 AVATAR_MAX_SIZE = 2 * 1024 * 1024
+AVATAR_SIGNATURES = {
+    "png": (b"\x89PNG\r\n\x1a\n",),
+    "jpg": (b"\xff\xd8\xff",),
+    "jpeg": (b"\xff\xd8\xff",),
+    "gif": (b"GIF87a", b"GIF89a"),
+}
+
+
+def _looks_like_image(data: bytes, ext: str) -> bool:
+    """按文件头判断，光看扩展名挡不住把任意文件改名成 .png 上传。"""
+    if ext == "webp":
+        return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+    return any(data.startswith(sig) for sig in AVATAR_SIGNATURES.get(ext, ()))
 
 
 # ---------- 登录失败限流 ----------
@@ -154,6 +167,8 @@ async def upload_avatar(
         raise HTTPException(status_code=400, detail="文件为空")
     if len(data) > AVATAR_MAX_SIZE:
         raise HTTPException(status_code=400, detail="图片不能超过 2MB")
+    if not _looks_like_image(data, ext):
+        raise HTTPException(status_code=400, detail="文件内容不是有效的图片")
     AVATAR_DIR.mkdir(parents=True, exist_ok=True)
     name = f"u{user.id}_{uuid.uuid4().hex[:8]}.{ext}"
     (AVATAR_DIR / name).write_bytes(data)
