@@ -117,6 +117,9 @@ class UnansweredQuestion(Base):
     __tablename__ = "unanswered_questions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # 展示编号：删除后可以重排成 1..n，主键 id 永不变动。
+    # 以前直接重排主键，外部拿着旧编号去操作就会打偏（删错记录）。
+    display_no: Mapped[int] = mapped_column(Integer, default=0, index=True)
     question: Mapped[str] = mapped_column(Text)
     course: Mapped[str] = mapped_column(String(128), default="", index=True)  # 推测的关联课程，可为空
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)  # pending / resolved

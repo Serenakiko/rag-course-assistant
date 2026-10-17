@@ -26,3 +26,5 @@ data/
 # 系统
 Thumbs.db
 .DS_Store
+# 用户上传的头像（运行时产物，不入库）
+backend/static/avatars/

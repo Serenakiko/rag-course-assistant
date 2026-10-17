@@ -522,6 +522,7 @@ const AdminView = (() => {
 
   /* ==================== 对话历史（问答对表格） ==================== */
   let msgCache = [];
+  let msgTotal = 0;
   let msgPage = 1;
   let msgPageSize = 10;   // 可在 10 / 20 之间切换
 
@@ -566,9 +567,22 @@ const AdminView = (() => {
     const tbody = document.getElementById("msg-tbody");
     if (!tbody) return;
     const filter = document.getElementById("msg-kb-filter")?.value || "";
+    // 服务端分页：只取当前页，问答再多也不会把整张表拉进浏览器
+    const params = new URLSearchParams({
+      limit: String(msgPageSize),
+      offset: String((msgPage - 1) * msgPageSize),
+    });
+    if (filter) params.set("course", filter);
     try {
-      msgCache = (await API.request("GET", "/api/chat/admin/messages") || []).slice().sort((a, b) => Number(a.id) - Number(b.id));
-      if (filter) msgCache = msgCache.filter((m) => (m.knowledge_base || "") === filter);
+      const data = await API.request("GET", `/api/chat/admin/messages?${params.toString()}`);
+      msgCache = data.items || [];
+      msgTotal = data.total || 0;
+      const totalPages = Math.max(1, Math.ceil(msgTotal / msgPageSize));
+      if (msgPage > totalPages) {
+        msgPage = totalPages;
+        await loadMessages();
+        return;
+      }
       renderMsgTable();
     } catch (err) {
       tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:36px;color:var(--danger)">${Common.escapeHtml(err.message)}</td></tr>`;
@@ -578,15 +592,12 @@ const AdminView = (() => {
   function renderMsgTable() {
     const tbody = document.getElementById("msg-tbody");
     if (!tbody) return;
-    const totalPages = Math.max(1, Math.ceil(msgCache.length / msgPageSize));
-    if (msgPage > totalPages) msgPage = totalPages;
     const start = (msgPage - 1) * msgPageSize;
-    const pageRows = msgCache.slice(start, start + msgPageSize);
 
-    if (!pageRows.length) {
+    if (!msgCache.length) {
       tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:36px;color:var(--text-3)">暂无对话记录</td></tr>`;
     } else {
-      tbody.innerHTML = pageRows.map((m, i) => `
+      tbody.innerHTML = msgCache.map((m, i) => `
         <tr>
           <td>${start + i + 1}</td>
           <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${Common.escapeHtml(m.question)}">${Common.escapeHtml(m.question)}</td>
@@ -600,12 +611,12 @@ const AdminView = (() => {
     tbody.querySelectorAll("[data-detail]").forEach((b) =>
       b.addEventListener("click", () => viewMsgDetail(msgCache.find((m) => m.id === Number(b.dataset.detail)))));
 
-    renderPagination("msg-pagination", msgCache.length, totalPages, msgPage, (p) => {
-      msgPage = p; renderMsgTable();
+    renderPagination("msg-pagination", msgTotal, Math.max(1, Math.ceil(msgTotal / msgPageSize)), msgPage, (p) => {
+      msgPage = p; loadMessages();
     }, {
       pageSize: msgPageSize,
       sizeOptions: [10, 20],
-      onSizeChange: (s) => { msgPageSize = s; msgPage = 1; renderMsgTable(); },
+      onSizeChange: (s) => { msgPageSize = s; msgPage = 1; loadMessages(); },
     });
   }
 
