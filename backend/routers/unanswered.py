@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -23,6 +23,7 @@ def _to_dict(q: UnansweredQuestion) -> dict:
         pass
     return {
         "id": q.id,
+        "no": q.display_no or q.id,
         "question": q.question,
         "course": q.course or "",
         "status": q.status,
@@ -167,31 +168,18 @@ def update_unanswered(
 
 
 def _renumber_unanswered(db: Session) -> None:
-    """删除后重排 id 为 1..n，保证反馈编号始终连续。
+    """删除后把展示编号重排成 1..n，主键 id 一律不动。
 
-    若表使用 AUTOINCREMENT 则同步重置 sqlite_sequence；
-    否则 SQLite 会按 max(rowid)+1 分配新 id，无需额外处理。
+    以前是直接改主键：删掉一条之后其余记录的 id 全部前移，前端或脚本手里的
+    旧编号就指向了别人，删起来会打偏（之前就是这么误删过反馈记录）。
     """
     rows = db.scalars(
         select(UnansweredQuestion).order_by(UnansweredQuestion.id.asc())
     ).all()
     for i, r in enumerate(rows, start=1):
-        if r.id != i:
-            r.id = i
+        if r.display_no != i:
+            r.display_no = i
     db.flush()
-    has_seq = (
-        db.execute(
-            text("SELECT name FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'")
-        ).fetchone()
-        is not None
-    )
-    if has_seq:
-        max_id = db.scalar(select(func.max(UnansweredQuestion.id))) or 0
-        db.execute(
-            text("UPDATE sqlite_sequence SET seq = :m WHERE name = 'unanswered_questions'"),
-            {"m": max_id},
-        )
-        db.flush()
 
 
 @router.delete("/{qid}", summary="删除未命中问题记录（管理员）")

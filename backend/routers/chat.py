@@ -47,6 +47,11 @@ def _load_history(db: Session, conversation_id: int, limit: int) -> list[tuple[s
     return [(m.role, m.content) for m in reversed(msgs)]
 
 
+def _next_unanswered_no(db: Session) -> int:
+    """反馈的下一个展示编号；删除后会被重排，不依赖主键。"""
+    return (db.scalar(select(func.max(UnansweredQuestion.display_no))) or 0) + 1
+
+
 @router.post("/sessions", response_model=ConversationOut, summary="新建会话")
 def create_session(
     payload: CreateConversationRequest,
@@ -165,11 +170,17 @@ def list_messages(
 
 # ---------- 对话管理（管理员） ----------
 
-@router.get("/admin/conversations", response_model=list[AdminConversationOut], summary="全部会话（管理员）")
+@router.get("/admin/conversations", summary="全部会话（管理员，分页）")
 def admin_list_conversations(
+    limit: int = 50,
+    offset: int = 0,
     admin: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
-) -> list[dict]:
+) -> dict:
+    """分页返回会话列表；数据量大的时候不再整表塞给前端。"""
+    limit = min(max(limit, 1), 200)
+    offset = max(offset, 0)
+    total = db.scalar(select(func.count(Conversation.id))) or 0
     rows = db.execute(
         select(
             Conversation,
@@ -181,18 +192,23 @@ def admin_list_conversations(
         .outerjoin(Message, Message.conversation_id == Conversation.id)
         .group_by(Conversation.id)
         .order_by(Conversation.id.desc())
+        .limit(limit)
+        .offset(offset)
     ).all()
-    return [
-        {
-            "id": conv.id,
-            "title": conv.title,
-            "username": username,
-            "real_name": real_name,
-            "message_count": count,
-            "created_at": conv.created_at,
-        }
-        for conv, username, real_name, count in rows
-    ]
+    return {
+        "total": total,
+        "items": [
+            {
+                "id": conv.id,
+                "title": conv.title,
+                "username": username,
+                "real_name": real_name,
+                "message_count": count,
+                "created_at": conv.created_at,
+            }
+            for conv, username, real_name, count in rows
+        ],
+    }
 
 
 @router.get("/admin/conversations/{conv_id}/messages", response_model=list[MessageOut], summary="会话消息（管理员）")
@@ -234,80 +250,77 @@ def _kb_from_conv(raw: str | None) -> str:
     return ""
 
 
-@router.get("/admin/messages", summary="全部问答对（管理员，按时间倒序）")
+@router.get("/admin/messages", summary="全部问答对（管理员，分页）")
 def admin_qa_pairs(
     course: str = "",
+    limit: int = 20,
+    offset: int = 0,
     admin: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
-) -> list[dict]:
-    """返回每一轮 user 提问 + assistant 回答的配对列表，用于对话历史表格。"""
-    rows = db.execute(
+) -> dict:
+    """分页返回 user 提问 + 紧随其后的 assistant 回答，用于对话历史表格。
+
+    以前是把 messages 整表拉出来在 Python 里配对再切片；消息一多就要把整个表
+    读进内存。现在只取当前页的提问（每页最多 100 条），回答按需查。
+    """
+    limit = min(max(limit, 1), 100)
+    offset = max(offset, 0)
+
+    base = (
         select(
             Message.id,
-            Message.conversation_id,
-            Message.role,
             Message.content,
-            Message.sources,
+            Message.conversation_id,
             Message.created_at,
             Conversation.knowledge_bases,
-            Conversation.user_id,
             User.username,
             User.real_name,
         )
         .join(Conversation, Message.conversation_id == Conversation.id)
         .join(User, Conversation.user_id == User.id)
-        .order_by(Message.id.asc())
+        .where(Message.role == "user")
+    )
+    if course.strip():
+        base = base.where(
+            Conversation.knowledge_bases.like(f'%"{course.strip()}"%')
+        )
+
+    total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    rows = db.execute(
+        base.order_by(Message.id.asc()).limit(limit).offset(offset)
     ).all()
 
-    # 按会话把 user 提问与随后的 assistant 回答配对（升序遍历；
-    # 提问落库后回答随即落库，故同会话中紧随其后、id 更大的第一条 assistant 即其回答）
-    pairs: list[dict] = []
-    pending: dict[int, object] = {}  # conversation_id -> 尚未配对的 user 行
+    items: list[dict] = []
     for r in rows:
-        if r.role == "user":
-            pending[r.conversation_id] = r
-            continue
-        if r.role != "assistant":
-            continue
-        u = pending.pop(r.conversation_id, None)
-        if u is None:
-            continue
-        # 知识库取会话记录（提问时选择的知识库）；旧会话无记录则为空
-        # （前端显示“全部知识库”），不用检索命中来源的课程名冒充归属
-        kb_name = _kb_from_conv(r.knowledge_bases)
-        pairs.append({
-            "id": u.id,
-            "question": u.content,
-            "answer": r.content,
-            "knowledge_base": kb_name,
-            "sources": json.loads(r.sources or "[]"),
-            "conversation_id": u.conversation_id,
-            "username": u.username,
-            "real_name": u.real_name,
-            "created_at": u.created_at,
-        })
+        ans = db.execute(
+            select(Message.content, Message.sources)
+            .where(
+                Message.conversation_id == r.conversation_id,
+                Message.role == "assistant",
+                Message.id > r.id,
+            )
+            .order_by(Message.id.asc())
+            .limit(1)
+        ).first()
+        try:
+            sources = json.loads(ans[1] or "[]") if ans else []
+        except ValueError:
+            sources = []
+        items.append(
+            {
+                "id": r.id,
+                "question": r.content,
+                "answer": ans[0] if ans else "",
+                "knowledge_base": _kb_from_conv(r.knowledge_bases),
+                "sources": sources if isinstance(sources, list) else [],
+                "conversation_id": r.conversation_id,
+                "username": r.username,
+                "real_name": r.real_name,
+                "created_at": r.created_at,
+            }
+        )
+    return {"total": total, "items": items}
 
-    # 尚未配对的提问（无回答，如生成中断）也列出，answer 为空
-    for u in pending.values():
-        kb_name = _kb_from_conv(u.knowledge_bases)
-        pairs.append({
-            "id": u.id,
-            "question": u.content,
-            "answer": "",
-            "knowledge_base": kb_name,
-            "sources": [],
-            "conversation_id": u.conversation_id,
-            "username": u.username,
-            "real_name": u.real_name,
-            "created_at": u.created_at,
-        })
-
-    # 最新在前
-    pairs.sort(key=lambda p: p["id"], reverse=True)
-
-    if course.strip():
-        pairs = [p for p in pairs if course.strip() in (p.get("knowledge_base") or "")]
-    return pairs
 
 
 @router.post("/ask", summary="智能问答（SSE 流式）")
@@ -391,6 +404,7 @@ async def ask(
                 try:
                     session.add(
                         UnansweredQuestion(
+                            display_no=_next_unanswered_no(session),
                             question=payload.message,
                             course=(unmatched or {}).get("course", "") or "",
                             related_points=json.dumps(
