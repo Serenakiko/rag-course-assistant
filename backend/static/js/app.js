@@ -107,8 +107,6 @@ const App = (() => {
       e.stopPropagation();
       ProfileView.openAvatarModal();
     });
-    checkLlmStatus();
-    setInterval(checkLlmStatus, 60000);
     navigate(API.getUser().role === "admin" ? "overview" : "workbench");
     startFeedbackPolling();  // 学生端：未读红点 + 新反馈 toast
   }
@@ -175,26 +173,6 @@ const App = (() => {
       default: container.innerHTML = `<div class="empty-state"><p>页面不存在</p></div>`;
     }
     currentView = key;
-  }
-
-  /* ---------- 大模型连接状态 ---------- */
-  async function checkLlmStatus() {
-    const el = document.getElementById("llm-status");
-    const text = document.getElementById("llm-status-text");
-    if (!el) return;
-    el.className = "llm-status checking";
-    text.textContent = "检测中…";
-    try {
-      const resp = await API.request("GET", "/api/llm/status");
-      el.className = "llm-status " + (resp.ok ? "ok" : "bad");
-      // 具体原因（模型名、pull 命令）只写控制台，界面上不展示
-      text.textContent = resp.ok ? "大模型已连接" : "模型未就绪";
-      el.title = "";
-      if (!resp.ok) console.warn("[llm]", resp.message);
-    } catch {
-      el.className = "llm-status bad";
-      text.textContent = "服务连接失败";
-    }
   }
 
   /* ---------- 学生端反馈通知：轮询未读角标 ---------- */
