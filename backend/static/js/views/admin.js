@@ -109,7 +109,7 @@ const AdminView = (() => {
       const gy = padT + (innerH / 4) * g;
       const val = Math.round(max - (max / 4) * g);
       grid += `<line x1="${padL}" y1="${gy}" x2="${w - padR}" y2="${gy}" stroke="#e3e0d9" stroke-width="1"/>`;
-      grid += `<text x="${padL - 8}" y="${gy + 4}" text-anchor="end" font-size="11" fill="#8b867d">${val}</text>`;
+      grid += `<text x="${padL - 8}" y="${gy + 4}" text-anchor="end" font-size="11" fill="#6f6a61">${val}</text>`;
     }
 
     // 折线 path
@@ -122,7 +122,7 @@ const AdminView = (() => {
     let labels = "";
     points.forEach((p, i) => {
       dots += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4" fill="#fff" stroke="#17505e" stroke-width="2"><title>${p.date}：${p.count} 次</title></circle>`;
-      labels += `<text x="${p.x.toFixed(1)}" y="${h - 10}" text-anchor="middle" font-size="11" fill="#8b867d">${p.date.slice(5)}</text>`;
+      labels += `<text x="${p.x.toFixed(1)}" y="${h - 10}" text-anchor="middle" font-size="11" fill="#6f6a61">${p.date.slice(5)}</text>`;
     });
 
     el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto" role="img" aria-label="近7天提问趋势">

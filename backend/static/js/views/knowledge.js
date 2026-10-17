@@ -71,7 +71,7 @@ const KnowledgeView = (() => {
       <div class="kb-grid" id="kb-grid" style="margin-bottom:64px">
         <div style="grid-column:1/-1;text-align:center;padding:40px"><span class="loading-spinner"></span></div>
       </div>
-      <div class="pagination" id="kb-pagination" style="position:fixed;bottom:0;left:232px;right:0;justify-content:center;background:var(--bg,#f6f5f2);margin:0;padding:12px 26px;border-top:1px solid var(--border,#e3e0d9);z-index:20"></div>`;
+      <div class="pagination pagination-fixed" id="kb-pagination"></div>`;
 
     bindSearch("kb-search", loadBases);
     document.getElementById("kb-add").addEventListener("click", () => openBaseEditor(null));

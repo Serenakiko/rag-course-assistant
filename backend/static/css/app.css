@@ -32,7 +32,7 @@
 
 /* ---------- 侧边栏角色主题（白色底，统一靛蓝点缀，学生/管理员不区分） ---------- */
 body.role-student .nav-group-title,
-body.role-admin  .nav-group-title { color: #8b867d; }
+body.role-admin  .nav-group-title { color: var(--text-3); }
 body.role-student .nav-item:hover,
 body.role-admin  .nav-item:hover { background: #f1efec; color: var(--primary-dark); }
 body.role-student .nav-item.active,
@@ -392,7 +392,7 @@ body.role-admin  .avatar { background: var(--primary); }
 .p-pwd-wrap .form-control { padding-right: 40px; }
 .p-pwd-toggle {
   position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
-  border: none; background: transparent; color: #8b867d; cursor: pointer;
+  border: none; background: transparent; color: var(--text-3); cursor: pointer;
   width: 26px; height: 26px; border-radius: 4px; padding: 0;
   display: flex; align-items: center; justify-content: center;
 }
@@ -476,7 +476,7 @@ body.role-admin  .avatar { background: var(--primary); }
 .pagination .page-btn:disabled { opacity: .4; cursor: not-allowed; }
 /* 列表页分页条：固定在窗口最底部（侧边栏右侧） */
 .pagination.pagination-fixed {
-  position: fixed; bottom: 0; left: 232px; right: 0;
+  position: fixed; bottom: 0; left: var(--sidebar-w); right: 0;
   justify-content: center; margin: 0;
   background: var(--bg); padding: 12px 26px;
   border-top: 1px solid var(--border); z-index: 20;
@@ -543,6 +543,7 @@ body.role-admin  .avatar { background: var(--primary); }
 
 /* ---------- 响应式 ---------- */
 @media (max-width: 960px) {
+  :root { --sidebar-w: 68px; }
   .sidebar { width: 68px; }
   .sidebar-logo .logo-text, .sidebar-logo .logo-sub, .nav-item span:not(.nav-icon), .nav-group-title, .sidebar-user .u-name { display: none; }
   .nav-item { justify-content: center; }
