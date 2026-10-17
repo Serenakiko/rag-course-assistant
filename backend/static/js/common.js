@@ -115,6 +115,18 @@ const Common = (() => {
     });
   }
 
+  // 在搜索框右侧挂一个「搜索」按钮，四个列表页共用
+  function attachSearchButton(searchBox, onSearch, label = "搜索") {
+    if (!searchBox) return null;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn search-go";
+    btn.textContent = label;
+    searchBox.insertAdjacentElement("afterend", btn);
+    btn.addEventListener("click", onSearch);
+    return btn;
+  }
+
   function roleBadge(role) {
     const map = { student: "学生", admin: "管理员" };
     return `<span class="badge badge-${role}">${map[role] || role}</span>`;
@@ -133,5 +145,5 @@ const Common = (() => {
     return `<div class="avatar" style="width:${size}px;height:${size}px;font-size:${Math.max(13, Math.round(size * 0.42))}px;border-radius:${Math.round(size / 2)}px">${avatarContent(user)}</div>`;
   }
 
-  return { toast, escapeHtml, fmtTime, fmtSize, openModal, closeModal, alertDialog, confirmDialog, roleBadge, avatarContent, avatarHtml };
+  return { toast, escapeHtml, fmtTime, fmtSize, openModal, closeModal, alertDialog, confirmDialog, attachSearchButton, roleBadge, avatarContent, avatarHtml };
 })();

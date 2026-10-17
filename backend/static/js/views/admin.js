@@ -232,7 +232,7 @@ const AdminView = (() => {
           </select>
           <div class="search-box" id="users-search-box">
             <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8b867d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-            <input class="form-control" id="users-search" placeholder="搜索账号或用户名">
+            <input class="form-control" id="users-search" placeholder="搜索账号">
             <button type="button" class="search-clear" id="users-search-clear" title="清空"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
           </div>
           <span class="list-count" id="users-count" style="margin-left:10px"></span>
@@ -254,15 +254,19 @@ const AdminView = (() => {
     document.getElementById("user-add").addEventListener("click", () => openUserEditor(null));
     const input = document.getElementById("users-search");
     const syncClear = () => document.getElementById("users-search-box").classList.toggle("has-value", input.value.length > 0);
-    input.addEventListener("input", () => { usersPage = 1; renderUsersTable(); syncClear(); });
+    const doUserSearch = () => { usersPage = 1; renderUsersTable(); };
+    input.addEventListener("input", syncClear);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); doUserSearch(); }
+    });
+    Common.attachSearchButton(document.getElementById("users-search-box"), doUserSearch);
     document.getElementById("users-search-clear").addEventListener("click", () => {
-      input.value = ""; usersPage = 1; renderUsersTable(); syncClear(); input.focus();
+      input.value = ""; syncClear(); doUserSearch(); input.focus();
     });
     const userPlaceholders = { account: "搜索账号", name: "搜索用户名", role: "搜索角色（学生/管理员）" };
     document.getElementById("users-field").addEventListener("change", (e) => {
-      usersPage = 1;
       input.placeholder = userPlaceholders[e.target.value] || "搜索…";
-      renderUsersTable();
+      doUserSearch();
     });
     loadUsers();
   }
@@ -392,7 +396,7 @@ const AdminView = (() => {
     if (!user) return;
     const ok = await Common.confirmDialog({
       title: "删除用户",
-      message: `将删除用户「${Common.escapeHtml(user.username)}」及其全部会话记录，不可恢复。确认？`,
+      message: `将删除用户「${Common.escapeHtml(user.real_name || user.username)}」及其全部会话记录，不可恢复。确认？`,
       okText: "删除",
     });
     if (!ok) return;
@@ -453,15 +457,21 @@ const AdminView = (() => {
 
     document.getElementById("kb-add").addEventListener("click", () => openKbEditor(null));
     const input = document.getElementById("kb-search");
-    input.addEventListener("input", () => { kbPage = 1; renderKbTableRows(); });
+    const box = document.getElementById("kb-search-box");
+    const syncClear = () => box.classList.toggle("has-value", input.value.length > 0);
+    const doKbSearch = () => { kbPage = 1; renderKbTableRows(); };
+    input.addEventListener("input", syncClear);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); doKbSearch(); }
+    });
+    Common.attachSearchButton(box, doKbSearch);
     document.getElementById("kb-search-clear").addEventListener("click", () => {
-      input.value = ""; kbPage = 1; renderKbTableRows(); input.focus();
+      input.value = ""; syncClear(); doKbSearch(); input.focus();
     });
     const kbPlaceholders = { name: "搜索知识库名称", description: "搜索描述", creator: "搜索创建者" };
     document.getElementById("kb-field").addEventListener("change", (e) => {
-      kbPage = 1;
       input.placeholder = kbPlaceholders[e.target.value] || "搜索…";
-      renderKbTableRows();
+      doKbSearch();
     });
     loadKbTable();
     // 启动 30s 静默同步（仅在停留在本页时运行）
@@ -670,7 +680,7 @@ const AdminView = (() => {
           </select>
           <div class="search-box" id="msg-search-box">
             <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6f6a61" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-            <input class="form-control" id="msg-search" placeholder="搜索问答…">
+            <input class="form-control" id="msg-search" placeholder="搜索问题">
             <button type="button" class="search-clear" id="msg-search-clear" title="清空"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
           </div>
         </div>
@@ -688,13 +698,12 @@ const AdminView = (() => {
     const input = document.getElementById("msg-search");
     const box = document.getElementById("msg-search-box");
     const syncClear = () => box.classList.toggle("has-value", input.value.length > 0);
-    let timer = null;
     const rerun = () => { msgPage = 1; loadMessages(); };
-    input.addEventListener("input", () => {
-      syncClear();
-      clearTimeout(timer);
-      timer = setTimeout(rerun, 250);
+    input.addEventListener("input", syncClear);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); rerun(); }
     });
+    Common.attachSearchButton(box, rerun);
     document.getElementById("msg-search-clear").addEventListener("click", () => {
       input.value = ""; syncClear(); rerun(); input.focus();
     });

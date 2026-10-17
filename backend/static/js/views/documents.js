@@ -16,7 +16,7 @@ const DocumentsView = (() => {
           </select>
           <div class="search-box" id="doc-search-box" style="width:300px">
             <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6f6a61" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-            <input class="form-control" id="doc-search" placeholder="搜索文档…">
+            <input class="form-control" id="doc-search" placeholder="搜索文件名">
             <button type="button" class="search-clear" id="doc-search-clear" title="清空">
               <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
             </button>
@@ -38,15 +38,19 @@ const DocumentsView = (() => {
     const input = document.getElementById("doc-search");
     const box = document.getElementById("doc-search-box");
     const syncClear = () => box.classList.toggle("has-value", input.value.length > 0);
-    input.addEventListener("input", () => { docPage = 1; syncClear(); renderDocTableRows(); });
+    const doDocSearch = () => { docPage = 1; renderDocTableRows(); };
+    input.addEventListener("input", syncClear);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); doDocSearch(); }
+    });
+    Common.attachSearchButton(box, doDocSearch);
     document.getElementById("doc-search-clear").addEventListener("click", () => {
-      input.value = ""; docPage = 1; syncClear(); renderDocTableRows(); input.focus();
+      input.value = ""; syncClear(); doDocSearch(); input.focus();
     });
     const docPlaceholders = { filename: "搜索文件名", course: "搜索知识库", type: "搜索类型（pdf / md）" };
     document.getElementById("doc-field").addEventListener("change", (e) => {
-      docPage = 1;
       input.placeholder = docPlaceholders[e.target.value] || "搜索…";
-      renderDocTableRows();
+      doDocSearch();
     });
 
     loadDocuments();
