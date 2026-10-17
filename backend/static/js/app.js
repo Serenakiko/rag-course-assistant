@@ -186,8 +186,10 @@ const App = (() => {
     try {
       const resp = await API.request("GET", "/api/llm/status");
       el.className = "llm-status " + (resp.ok ? "ok" : "bad");
-      text.textContent = resp.ok ? "大模型已连接" : resp.message;
-      el.title = resp.message || "";
+      // 具体原因（模型名、pull 命令）只写控制台，界面上不展示
+      text.textContent = resp.ok ? "大模型已连接" : "模型未就绪";
+      el.title = "";
+      if (!resp.ok) console.warn("[llm]", resp.message);
     } catch {
       el.className = "llm-status bad";
       text.textContent = "服务连接失败";

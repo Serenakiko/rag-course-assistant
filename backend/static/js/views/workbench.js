@@ -59,13 +59,15 @@ const WorkbenchView = (() => {
         </div>
       </div>
 
-      <div class="card" id="wb-resolved" style="display:none;margin-top:16px">
+      <div class="card" id="wb-resolved" style="margin-top:16px">
         <div class="row-between mb-16">
           <b>我的反馈</b>
           <button class="btn btn-sm" id="wb-fb-all">查看全部</button>
         </div>
-        <div id="wb-resolved-list"></div>
+        <div id="wb-resolved-list"><div class="fb-loading"><span class="loading-spinner"></span></div></div>
       </div>`;
+
+    document.getElementById("wb-fb-all").addEventListener("click", () => App.navigate("feedback"));
 
     container.querySelectorAll(".wb-func-card").forEach((card) => {
       card.addEventListener("click", () => App.navigate(card.dataset.go));
@@ -78,21 +80,25 @@ const WorkbenchView = (() => {
     // 我的反馈：与管理员数据概览反馈区块同款行式列表（状态徽标 + 问题 + 时间），点击进入反馈页
     try {
       const items = await API.request("GET", "/api/chat/unanswered/mine");
-      const box = document.getElementById("wb-resolved");
       const listEl = document.getElementById("wb-resolved-list");
-      if (items && items.length && box && listEl) {
-        box.style.display = "";
-        listEl.innerHTML = items.map((r) => `
-          <div class="fb-row" data-fb="${r.id}">
-            <span class="fb-status">${r.status === "resolved" ? "已解决" : "处理中"}</span>
-            <span class="fb-q" style="flex:1;min-width:0">${Common.escapeHtml(r.question)}</span>
-            <span class="muted" style="flex:none">${Common.fmtTime(r.status === "resolved" ? r.answered_at : r.created_at)}</span>
-          </div>`).join("");
-        listEl.querySelectorAll("[data-fb]").forEach((row) =>
-          row.addEventListener("click", () => App.navigate("feedback")));
-        document.getElementById("wb-fb-all").addEventListener("click", () => App.navigate("feedback"));
+      if (listEl) {
+        if (!items || !items.length) {
+          listEl.innerHTML = `<div class="wb-fb-empty">还没有提交过反馈。提问时如果知识库里没有相关内容，会自动记到这里；老师补完资料后，你能在这里看到回答。</div>`;
+        } else {
+          listEl.innerHTML = items.slice(0, 5).map((r) => `
+            <div class="fb-row" data-fb="${r.id}">
+              <span class="fb-status">${r.status === "resolved" ? "已解决" : "处理中"}</span>
+              <span class="fb-q" style="flex:1;min-width:0">${Common.escapeHtml(r.question)}</span>
+              <span class="muted" style="flex:none">${Common.fmtTime(r.status === "resolved" ? r.answered_at : r.created_at)}</span>
+            </div>`).join("");
+          listEl.querySelectorAll("[data-fb]").forEach((row) =>
+            row.addEventListener("click", () => App.navigate("feedback")));
+        }
       }
-    } catch { /* 静默：接口异常不影响工作台主内容 */ }
+    } catch (err) {
+      const listEl = document.getElementById("wb-resolved-list");
+      if (listEl) listEl.innerHTML = `<div class="wb-fb-empty">反馈加载失败：${Common.escapeHtml(err.message)}</div>`;
+    }
 
     try {
       const s = await API.request("GET", "/api/stats/me");

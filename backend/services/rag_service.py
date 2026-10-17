@@ -435,14 +435,13 @@ async def stream_answer(
     except Exception as exc:  # noqa: BLE001
         logger.exception("RAG 流式回答失败")
         err = str(exc)
-        # 模型缺失（Ollama 404）：给出可操作的提示，而不是裸报错
+        # 模型缺失（Ollama 404）：界面上只给一句人话，细节写日志
         if "404" in err or "model not found" in err.lower():
+            # 模型名和 pull 命令只写日志，界面上给学生一句人话
+            logger.error("模型未安装：%s", settings.OLLAMA_LLM_MODEL)
             yield {
                 "type": "error",
-                "message": (
-                    f"模型 {settings.OLLAMA_LLM_MODEL} 未安装。"
-                    f"请先运行：ollama pull {settings.OLLAMA_LLM_MODEL}，然后重启服务再试。"
-                ),
+                "message": "模型服务还没准备好，这次答不了。过一会儿再试，一直这样的话找老师看一下。",
             }
             return
         yield {"type": "error", "message": f"回答生成失败：{exc}"}
