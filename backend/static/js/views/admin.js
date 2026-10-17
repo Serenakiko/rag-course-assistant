@@ -109,7 +109,7 @@ const AdminView = (() => {
       const gy = padT + (innerH / 4) * g;
       const val = Math.round(max - (max / 4) * g);
       grid += `<line x1="${padL}" y1="${gy}" x2="${w - padR}" y2="${gy}" stroke="#e3e0d9" stroke-width="1"/>`;
-      grid += `<text x="${padL - 8}" y="${gy + 4}" text-anchor="end" font-size="11" fill="#6f6a61">${val}</text>`;
+      grid += `<text x="${padL - 8}" y="${gy + 4}" text-anchor="end" font-size="12" fill="#6f6a61">${val}</text>`;
     }
 
     // 折线 path
@@ -122,7 +122,7 @@ const AdminView = (() => {
     let labels = "";
     points.forEach((p, i) => {
       dots += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4" fill="#fff" stroke="#17505e" stroke-width="2"><title>${p.date}：${p.count} 次</title></circle>`;
-      labels += `<text x="${p.x.toFixed(1)}" y="${h - 10}" text-anchor="middle" font-size="11" fill="#6f6a61">${p.date.slice(5)}</text>`;
+      labels += `<text x="${p.x.toFixed(1)}" y="${h - 10}" text-anchor="middle" font-size="12" fill="#6f6a61">${p.date.slice(5)}</text>`;
     });
 
     el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto" role="img" aria-label="近7天提问趋势">
@@ -149,6 +149,28 @@ const AdminView = (() => {
       return;
     }
     const colors = ["#17505e", "#b0762c", "#5d7a52", "#8a5a4a", "#4a6b8a", "#7a6a8a", "#6b675f"];
+    // 除颜色外再叠一层纹理：色觉障碍用户靠纹理也能区分扇区
+    const patterns = ["", "p-hatch", "p-dots", "p-cross", "p-hline", "p-vline", "p-diag"];
+    const donutDefs = `<defs>
+      <pattern id="p-hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+        <line x1="0" y1="0" x2="0" y2="8" stroke="rgba(255,255,255,.6)" stroke-width="2.2"/>
+      </pattern>
+      <pattern id="p-dots" width="8" height="8" patternUnits="userSpaceOnUse">
+        <circle cx="4" cy="4" r="1.5" fill="rgba(255,255,255,.65)"/>
+      </pattern>
+      <pattern id="p-cross" width="8" height="8" patternUnits="userSpaceOnUse">
+        <path d="M0 0 L8 8 M8 0 L0 8" stroke="rgba(255,255,255,.5)" stroke-width="1.3"/>
+      </pattern>
+      <pattern id="p-hline" width="8" height="8" patternUnits="userSpaceOnUse">
+        <line x1="0" y1="4" x2="8" y2="4" stroke="rgba(255,255,255,.6)" stroke-width="2.2"/>
+      </pattern>
+      <pattern id="p-vline" width="8" height="8" patternUnits="userSpaceOnUse">
+        <line x1="4" y1="0" x2="4" y2="8" stroke="rgba(255,255,255,.6)" stroke-width="2.2"/>
+      </pattern>
+      <pattern id="p-diag" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
+        <line x1="0" y1="0" x2="0" y2="9" stroke="rgba(0,0,0,.22)" stroke-width="3.5"/>
+      </pattern>
+    </defs>`;
     const total = Math.max(1, dist.reduce((a, d) => a + d.count, 0));
     const cx = 90, cy = 90, r = 70, innerR = 44;
 
@@ -168,19 +190,28 @@ const AdminView = (() => {
       const x4 = cx + innerR * Math.cos(startAngle);
       const y4 = cy + innerR * Math.sin(startAngle);
       const color = colors[i % colors.length];
-      arcs += `<path d="M${x1.toFixed(1)},${y1.toFixed(1)} A${r},${r} 0 ${largeArc} 1 ${x2.toFixed(1)},${y2.toFixed(1)} L${x3.toFixed(1)},${y3.toFixed(1)} A${innerR},${innerR} 0 ${largeArc} 0 ${x4.toFixed(1)},${y4.toFixed(1)} Z" fill="${color}"><title>${d.name}：${d.count}</title></path>`;
+      const arcPath = `M${x1.toFixed(1)},${y1.toFixed(1)} A${r},${r} 0 ${largeArc} 1 ${x2.toFixed(1)},${y2.toFixed(1)} L${x3.toFixed(1)},${y3.toFixed(1)} A${innerR},${innerR} 0 ${largeArc} 0 ${x4.toFixed(1)},${y4.toFixed(1)} Z`;
+      arcs += `<path d="${arcPath}" fill="${color}"><title>${d.name}：${d.count}</title></path>`;
+      const pat = patterns[i % patterns.length];
+      if (pat) arcs += `<path d="${arcPath}" fill="url(#${pat})" pointer-events="none"/>`;
       startAngle = endAngle;
     });
 
-    const legend = dist.map((d, i) => `
+    const legend = dist.map((d, i) => {
+      const pat = patterns[i % patterns.length];
+      return `
       <div class="donut-legend-item">
-        <span class="donut-legend-dot" style="background:${colors[i % colors.length]}"></span>
+        <svg class="donut-legend-dot" viewBox="0 0 10 10" aria-hidden="true">
+          <rect width="10" height="10" rx="3" fill="${colors[i % colors.length]}"/>
+          ${pat ? `<rect width="10" height="10" rx="3" fill="url(#${pat})"/>` : ""}
+        </svg>
         <span style="flex:1">${Common.escapeHtml(d.name)}</span>
         <span style="color:var(--text-3)">${d.count}</span>
-      </div>`).join("");
+      </div>`;
+    }).join("");
 
     el.innerHTML = `<div class="donut-wrap">
-      <svg viewBox="0 0 180 180" style="width:160px;height:160px">${arcs}</svg>
+      <svg viewBox="0 0 180 180" style="width:160px;height:160px">${donutDefs}${arcs}</svg>
       <div class="donut-legend" style="flex:1">${legend}</div>
     </div>`;
   }

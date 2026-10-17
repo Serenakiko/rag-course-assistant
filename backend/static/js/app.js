@@ -59,6 +59,7 @@ const App = (() => {
     document.body.classList.add("role-" + (API.getUser().role === "admin" ? "admin" : "student"));
     refreshUserInfo();
     renderNav();
+    setupMobileNav();
     // 退出登录：点一下弹确认框；长按 0.65 秒直接退出，不弹任何提示
     const logoutBtn = document.getElementById("logout-btn");
     function doLogout() {
@@ -218,6 +219,42 @@ const App = (() => {
   function startFeedbackPolling() {
     refreshFeedbackBadge();
     feedbackTimer = setInterval(refreshFeedbackBadge, 60_000);
+  }
+
+  /* ---------- 窄屏抽屉导航（≤640px） ---------- */
+  function setupMobileNav() {
+    const toggle = document.getElementById("nav-toggle");
+    const backdrop = document.getElementById("nav-backdrop");
+    const sidebar = document.getElementById("sidebar");
+    if (!toggle || !backdrop || !sidebar) return;
+
+    const isOpen = () => document.body.classList.contains("nav-open");
+    const setOpen = (open, restoreFocus = true) => {
+      document.body.classList.toggle("nav-open", open);
+      toggle.setAttribute("aria-expanded", String(open));
+      toggle.setAttribute("aria-label", open ? "关闭菜单" : "打开菜单");
+      if (open) {
+        const first = sidebar.querySelector(".nav-item.active") || sidebar.querySelector(".nav-item");
+        if (first) setTimeout(() => first.focus(), 30);
+      } else if (restoreFocus) {
+        toggle.focus();
+      }
+    };
+
+    toggle.addEventListener("click", () => setOpen(!isOpen()));
+    backdrop.addEventListener("click", () => setOpen(false));
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && isOpen()) setOpen(false);
+    });
+    sidebar.addEventListener("click", (e) => {
+      if (!e.target.closest(".nav-item") || !isOpen()) return;
+      setOpen(false, false);
+      const main = document.getElementById("main-content");
+      if (main) setTimeout(() => main.focus(), 60);
+    });
+    window.addEventListener("resize", () => {
+      if (window.innerWidth > 640 && isOpen()) setOpen(false, false);
+    });
   }
 
   return { init, refreshUserInfo, navigate, refreshFeedbackBadge };
