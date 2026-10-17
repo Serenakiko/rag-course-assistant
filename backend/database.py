@@ -56,6 +56,17 @@ def init_db() -> None:
             conn.execute(text("ALTER TABLE unanswered_questions ADD COLUMN read_at DATETIME"))
         if "updated_at" not in uq_cols:
             conn.execute(text("ALTER TABLE unanswered_questions ADD COLUMN updated_at DATETIME"))
+        if "display_no" not in uq_cols:
+            conn.execute(
+                text("ALTER TABLE unanswered_questions ADD COLUMN display_no INTEGER DEFAULT 0")
+            )
+        # 旧数据回填：先按主键排一遍，之后删除时只重排这一列
+        conn.execute(
+            text(
+                "UPDATE unanswered_questions SET display_no = id "
+                "WHERE display_no IS NULL OR display_no = 0"
+            )
+        )
         # conversations 增量迁移：记录会话使用的知识库（历史会话按库筛选）
         conv_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(conversations)"))]
         if "knowledge_bases" not in conv_cols:
