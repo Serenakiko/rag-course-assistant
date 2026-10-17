@@ -1,6 +1,6 @@
 # 智答系统（基于 RAG 大模型）
 
-一个可本地运行的全栈 Web 应用：**FastAPI + LangChain + ChromaDB** 构建 RAG 知识问答后端，**原生 HTML/CSS/JS** 构建前后端分离的网页界面，支持 **学生 / 管理员** 双角色，大模型接入支持 **Ollama 本地模型** 与 **OpenAI 兼容 API** 一键切换。
+一个可本地运行的全栈 Web 应用：**FastAPI + SQLAlchemy + SQLite + ChromaDB** 构建 RAG 问答后端，**原生 HTML / CSS / JS** 构建无需构建步骤的网页界面，支持 **学生 / 管理员** 双角色。对话模型默认走 **Ollama `qwen3.5:4b`**，向量模型 **`bge-m3`**，也可以通过 `.env` 切到任意 OpenAI 兼容接口。
 
 ---
 
@@ -8,39 +8,45 @@
 
 | 角色 | 功能 |
 |---|---|
-| 学生 | 智能问答（流式输出、引用溯源）、会话管理、知识库浏览与**自助添加知识库/知识点**（可管理自己创建的内容）、个人中心 |
-| 管理员 | 数据概览（用户/文档/知识点/会话统计与近 7 日趋势）、用户管理（角色调整/重置密码/删除）、知识库管理（课程文档上传 PDF/TXT/Markdown/CSV 后台自动解析分块入库 + 知识库与知识点全量维护）、对话管理（全部用户会话的查看与删除）、**反馈闭环**（统计 / 生成回答 / 通知学生） |
+| 学生 | 工作台（今日提问、知识点总数、我的反馈）、知识库浏览与自建（新建后可立刻上传资料、维护知识点）、智能问答（流式输出 + 引用溯源 + 会话管理）、我的反馈、个人中心 |
+| 管理员 | 数据概览（用户 / 知识库 / 文档 / 今日提问 + 趋势图 + 知识库文档占比）、知识库管理（建库即传资料、知识点维护）、文档管理（检索 / 详情 / 删除）、对话历史（按问题 / 回答 / 提问人搜索）、问题反馈（生成回答 / 状态流转 / 删除）、用户管理（搜索 / 角色调整 / 重置密码 / 删除） |
 
 核心能力：
-- **RAG 问答**：问题 → 向量检索 Top-K → 拼接上下文 → 大模型流式生成，回答附引用来源，可溯源。
-- **多轮对话**：会话历史自动带入上下文，支持新建/切换/删除会话。
-- **知识库双源**：上传文档分块向量化 + 用户维护的知识点（按知识库/课程组织），统一进 ChromaDB 检索。
-- **多角色权限**：JWT 认证，接口级角色校验（学生仅可提问与浏览，管理员可维护知识与用户）。
-- **双模型模式**：`LLM_PROVIDER=ollama | openai` 一键切换，向量模型独立配置。
-- **反馈闭环**：问题与学习相关但知识库未覆盖时，双层拒答（距离门控 + 模型判定）不编造答案，并自动记录到"反馈"；管理员补充资料后可一键重新生成回答，学生在工作台查看解答。
+
+- **RAG 问答**：问题 → 向量检索 Top-K → 距离门控 → 组装上下文 → 大模型流式生成，回答附引用来源，可点开查看原文。
+- **多轮对话**：最近 6 轮自动带入上下文；当前对话有内容时新建会二次确认，历史会话保留在左侧。
+- **知识库双来源**：上传文档分块向量化 + 手工维护的知识点，统一进同一个 Chroma 集合检索。
+- **可见性隔离**：管理员看到全部知识库；学生只看到「管理员发布的 + 自己创建的」，检索、列表、知识点增改、文档上传共用同一套规则（`kb_scope.py`）。
+- **权限与安全**：JWT 认证、接口级角色校验、登录失败限流（同一账号 + IP 10 分钟内失败 10 次锁定）、头像上传按文件头校验、Markdown 渲染先转义后解析。
+- **双模型模式**：`LLM_PROVIDER=ollama | openai` 一键切换，对话与向量模型分别配置。
+- **反馈闭环**：课程相关但知识库没覆盖的问题自动记录；管理员补完资料后可一键重新生成回答，学生在工作台看到结果。
+- **零构建前端**：原生 JS 视图模块，服务端直接托管静态文件，改完刷新即生效。
 
 ---
 
 ## 二、系统架构
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│                        浏览器（前端）                        │
-│   index.html / app.html  +  CSS  +  JS（原生，无构建步骤）   │
-│   登录注册 · 学生（智能问答/知识点库） · 管理员（数据概览/用户管理/知识库管理/对话管理） │
-└──────────────┬───────────────────────────────┬────────────┘
-               │ REST API + SSE 流式             │ 静态资源
-┌──────────────▼───────────────────────────────▼────────────┐
-│                    FastAPI 应用层 (backend)                 │
-│  routers: auth / chat / knowledge / documents / users/stats │
-│  services: llm / embedding / parser / chunker / vector/rag  │
-└────────┬──────────────────────┬───────────────────┬────────┘
-         │                      │                   │
-┌────────▼────────┐   ┌─────────▼────────┐  ┌───────▼────────┐
-│  SQLite (元数据) │   │ ChromaDB (向量库) │  │ LLM / Embedding │
-│ 用户/会话/消息/  │   │ 文档分块 + 知识点  │  │ Ollama 或 API   │
-│ 文档/知识点      │   │ 持久化存储         │  │ 流式生成        │
-└─────────────────┘   └──────────────────┘  └────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                          浏览器（前端）                       │
+│  index.html / register.html / app.html + CSS + JS（无构建）   │
+│  学生：工作台 / 知识库 / 问答 / 反馈 / 个人中心               │
+│  管理员：概览 / 知识库 / 文档 / 问答 / 反馈 / 历史 / 用户     │
+└───────────────┬───────────────────────────────┬──────────────┘
+                │ REST API + SSE 流式            │ 静态资源
+┌───────────────▼───────────────────────────────▼──────────────┐
+│                     FastAPI 应用层（backend）                  │
+│  routers: auth / chat / knowledge / documents / users / stats │
+│           unanswered                                          │
+│  services: llm / embedding / parser / chunker / vector / rag   │
+│            kb_scope                                           │
+└────────┬──────────────────────┬────────────────────┬──────────┘
+         │                      │                    │
+┌────────▼────────┐   ┌─────────▼────────┐  ┌────────▼─────────┐
+│ SQLite（元数据） │   │ ChromaDB（向量）  │  │ Ollama / 兼容 API │
+│ 用户/会话/消息/  │   │ 文档分块 + 知识点 │  │ qwen3.5:4b 对话   │
+│ 文档/知识点/反馈 │   │ 持久化存储        │  │ bge-m3 向量       │
+└─────────────────┘   └──────────────────┘  └──────────────────┘
 ```
 
 ### RAG 回答流程
@@ -49,104 +55,104 @@
 用户问题
    │
    ▼
-向量化（Embedding）
+按可见范围确定课程 → 向量化（Embedding）
    │
    ▼
 ChromaDB 相似度检索 Top-K ──── 来源：课程文档分块 / 知识点
    │
-   ▼
-组装提示词（系统角色 + 参考资料 + 最近 N 轮对话历史）
+   ├─ 最相似距离 > 0.85 ──► 判定「知识库未收录」，不调用模型，记录反馈
    │
    ▼
-大模型流式生成（SSE）──► 前端打字机渲染 + 引用来源折叠
+组装提示词（系统规则 + 参考资料 + 最近 6 轮对话）
    │
    ▼
-回答与来源落库（SQLite）
+大模型流式生成（SSE）──► 前端逐字渲染 + 引用来源
+   │
+   ▼
+回答、来源、耗时落库（SQLite）
 ```
 
 ### 目录结构
 
 ```
 rag-course-assistant/
-├── run.py                  # 一键启动入口（python run.py [--reload] [--port 8000] [--no-browser]）
-├── start.bat               # Windows 双击启动
-├── requirements.txt        # Python 依赖
-├── .env.example            # 配置模板
-├── .env                    # 本机配置（已预置 Ollama 模式）
+├── run.py                    # 启动入口（--reload / --port / --no-browser；端口占用时自动跳过）
+├── start.bat                 # Windows 双击启动
+├── autostart_silent.vbs      # 登录后静默启动（隐藏窗口，输出写 .tools/server-start.log）
+├── requirements.txt
+├── .env.example              # 配置模板
+├── .env                      # 本机配置（不入库）
 │
-├── update_knowledge_bases.py  # 知识库迁移脚本（删除旧示例知识点、创建四门课程知识库，幂等可重复运行）
-├── sync_seed_documents.py     # 把 20 条种子知识点同步为「文档管理」中的文档记录（幂等，不重复入向量库）
-├── rebuild_vectors.py         # 向量库重建：清空 Chroma 后从 SQLite 重新入库知识点与已就绪文档
-├── kb_probe.py                # 调试探针：6 条典型问题的 Top-1 相似度分数（验证距离门控）
-├── kb_calibrate.py            # 调试探针：5 类问题（强匹配/弱匹配/无关）的 Top-3 分数校准
-├── kb_e2e.py                  # 端到端闭环验证：登录→建会话→三类问题 SSE→未命中记录→状态流转
+├── update_knowledge_bases.py # 迁移：删除旧示例知识点、重建四门课程知识库（幂等）
+├── sync_seed_documents.py    # 把种子知识点同步成文档记录（幂等）
+├── rebuild_vectors.py        # 清空 Chroma，从 SQLite 重建全部向量
+├── kb_probe.py               # 打印典型问题的 Top-1 距离
+├── kb_calibrate.py           # 打印多类问题的 Top-3 距离，用于标定阈值
+├── kb_e2e.py                 # 端到端验证：登录 → 问答 → 未命中记录 → 状态流转
 │
 ├── backend/
-│   ├── main.py             # FastAPI 入口：路由装配、静态托管、生命周期
-│   ├── config.py           # 集中配置（.env 加载）
-│   ├── database.py         # SQLite 引擎与会话
-│   ├── models.py           # ORM：用户/文档/知识点/会话/消息/未命中反馈
-│   ├── schemas.py          # Pydantic 请求响应模型
-│   ├── security.py         # PBKDF2 密码哈希 + JWT
-│   ├── deps.py             # 当前用户 / 角色校验依赖
-│   ├── seed.py             # 初始化：默认管理员 + 四门课程知识库与 20 条示例知识点
-│   ├── routers/            # auth / chat / knowledge / documents / users / stats / unanswered
-│   ├── services/           # llm / embedding / document_parser / chunker / vector_store / rag_service
-│   └── static/             # 前端（原生 HTML/CSS/JS，无构建步骤）
-│       ├── index.html      # 登录页
-│       ├── register.html   # 注册页
-│       ├── app.html        # 主工作台（学生 + 管理员界面）
-│       ├── css/            # common.css / auth.css / app.css
-│       ├── js/             # api.js / app.js / auth.js / common.js / markdown.js + views/ 各视图
-│       └── avatars/        # 用户头像
-├── docs/                   # 项目文档目录（预留）
-└── data/                   # 运行时生成（不入库）：app.db、chroma/、uploads/（含 avatars/）
+│   ├── main.py               # 路由装配、静态托管、启动迁移
+│   ├── config.py             # 集中配置（.env 加载、JWT_SECRET 校验）
+│   ├── database.py           # SQLite 引擎、外键约束、增量迁移
+│   ├── models.py             # ORM：用户/文档/知识点/会话/消息/反馈
+│   ├── schemas.py            # 请求响应模型与字段校验
+│   ├── security.py           # PBKDF2 密码哈希 + JWT
+│   ├── deps.py               # 当前用户 / 角色依赖
+│   ├── seed.py               # 默认管理员 + 四门课程知识库与示例知识点
+│   ├── routers/              # auth / chat / knowledge / documents / users / stats / unanswered
+│   ├── services/             # llm / embedding / document_parser / chunker / vector_store / rag_service / kb_scope
+│   └── static/
+│       ├── index.html        # 登录页
+│       ├── register.html     # 注册页
+│       ├── app.html          # 主界面（学生 + 管理员）
+│       ├── css/              # common.css / auth.css / app.css
+│       ├── js/               # api.js / app.js / auth.js / common.js / markdown.js
+│       │   └── views/        # workbench / knowledge / chat / feedback / profile / admin / documents / history
+│       ├── img/              # 品牌图标、登录页背景
+│       └── avatars/          # 用户上传头像（运行时生成，不入库）
+├── data/                     # 运行时生成（不入库）：app.db、chroma/、uploads/
+└── .tools/                   # 本地调试产物与日志（不入库）
 ```
 
 ---
 
-## 三、快速启动（VSCode）
+## 三、快速启动
 
 ### 0. 环境要求
 
-- Windows / macOS / Linux，**Python 3.10+**（本机 3.11/3.12 均可）
+- Windows / macOS / Linux，**Python 3.10+**（本机 3.11）
 - [Ollama](https://ollama.com/)（本地模型模式需要）
-- VSCode + Python 扩展
+- 首次启动会加载向量模型，**冷启动约 60 秒**，期间访问会提示连接被拒绝
 
-### 1. 安装 Ollama 并拉取模型（本地模式）
+### 1. 安装并拉取模型
 
 ```bash
-# 安装 Ollama 后，在终端执行：
-ollama pull qwen3.5:4b    # 对话模型（回答生成）
-ollama pull bge-m3        # 向量模型（中文语义检索效果好）
+ollama pull qwen3.5:4b    # 对话模型
+ollama pull bge-m3        # 向量模型（中文语义检索）
 ```
 
-> 默认 `qwen3.5:4b`，16G 内存的机器跑得比较顺；想回答质量更好可以换 `qwen3.5:9b`（更吃内存），向量模型也可以换 `bge-large-zh-v1.5`。改 `.env` 里的 `OLLAMA_LLM_MODEL` / `OLLAMA_EMBED_MODEL` 即可，**记得本文档里出现模型名的地方一起改**。
-> 若不使用本地模型，可跳过本步，改用 OpenAI 兼容 API（见第 4 节）。
+> 4B 模型在 16G 内存的机器上够用，首次回答约 20–30 秒（含模型加载），热态 10–15 秒。想更快可换 `qwen3.5:2b`，改 `.env` 的 `OLLAMA_LLM_MODEL` 即可。
+> qwen3.5 默认会先"思考"再回答，代码里已显式关闭思考（`ChatOllama(reasoning=False)`），否则回答正文会被思考过程挤空。
 
-### 2. 打开项目并安装依赖
-
-用 VSCode 打开 `D:\rag-course-assistant` 文件夹，在终端执行：
+### 2. 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-> 建议先创建虚拟环境：`python -m venv venv`，激活后（Windows: `venv\Scripts\activate`）再安装。
+建议先建虚拟环境：`python -m venv venv`，激活后（Windows: `venv\Scripts\activate`）再安装。
 
-### 3. 启动系统
+### 3. 启动
 
 ```bash
 python run.py
 ```
 
-启动成功后自动打开浏览器：**http://127.0.0.1:8000**
+启动成功后自动打开 **http://127.0.0.1:8000**。也可以双击 `start.bat`，或 `python run.py --no-browser` 不自动开浏览器。
 
-或直接双击 `start.bat`。
+如果希望登录 Windows 后自动在后台启动：把 `autostart_silent.vbs` 建一个快捷方式放进「启动」文件夹（`shell:startup`），脚本会用隐藏窗口运行 `python run.py --no-browser`。服务已经在跑时再次启动会自动跳过，不会重复占端口。
 
-### 4. 切换 OpenAI 兼容 API 模式（可选）
-
-编辑 `.env`：
+### 4. 切换到 OpenAI 兼容 API（可选）
 
 ```ini
 LLM_PROVIDER=openai
@@ -156,24 +162,38 @@ OPENAI_LLM_MODEL=deepseek-chat
 OPENAI_EMBED_MODEL=text-embedding-3-small
 ```
 
-保存后重启 `python run.py` 即可，无需改任何代码。
+保存后重启即可。**换向量模型后必须重新标定 `UNMATCHED_DISTANCE`**，并运行 `python rebuild_vectors.py`。
 
 ### 5. 默认账号
 
 | 账号 | 密码 | 角色 |
 |---|---|---|
-| 23040107 | 111111 | 管理员（登录后请立即在「个人中心」改密） |
-| （注册） | - | 学生自行注册 |
+| 23040107 | 111111 | 管理员（登录后请在个人中心修改） |
+| （注册） | - | 学生自行注册，账号固定 8 位数字 |
+
+> `JWT_SECRET` 没有默认值。缺失、过短或仍是模板占位值时服务会拒绝启动，按提示生成一个 64 位随机串写入 `.env` 即可。
 
 ---
 
 ## 四、使用指南
 
-1. **登录/注册**：首页选择登录或注册；注册身份固定为「学生」，管理员由已有管理员在「用户管理」中调整角色。
-2. **智能问答**：输入问题 → Enter 发送；回答实时流式输出，点击「📎 参考了 N 份资料」可查看引用来源；左侧可新建/切换/删除会话。
-3. **知识库**：以课程为单位的知识库卡片总览，点击进入查看知识点；所有登录用户均可**添加知识库 / 知识点**，创建者本人或管理员可编辑、删除（知识点自动进入向量索引）。
-4. **知识库管理**（管理员）：拖拽上传课程资料，系统自动解析、分块、向量入库；解析状态实时刷新，可查看分块详情。
-5. **数据概览 / 用户管理 / 对话管理**（管理员）：查看用户/文档/知识点/会话统计与近 7 日趋势；调整角色（学生/管理员）、重置密码、删除用户；查看与删除全部用户的问答会话。
+### 学生
+
+1. **登录 / 注册**：账号必须是 8 位数字，规则前后端一致；密码至少 6 位，两项不符会逐项弹窗提示。
+2. **工作台**：显示今日提问、已入库知识点、我的反馈（待处理 / 已解决）；没有反馈时也会保留卡片并给出说明。
+3. **智能问答**：Enter 发送、Shift+Enter 换行；回答流式输出，点「参考了 N 份资料」展开引用原文。左侧「+ 新对话」在当前对话有内容时会先确认，空对话则直接提示。
+4. **知识库**：卡片总览支持按「名称 / 简介」搜索；新建知识库后会**直接弹出上传资料**的窗口；进入某个库可维护知识点、上传文档。
+5. **我的反馈**：查看提问被记录后的处理状态与管理员补充的回答。
+6. **个人中心**：默认只读，点「编辑资料」后输入框才可编辑，同时出现「取消 / 保存」；头像下方有「更换头像」入口。
+
+### 管理员
+
+1. **数据概览**：用户 / 知识库 / 文档 / 今日提问四项统计，近 7 日提问趋势，知识库文档占比环形图（中心显示知识点总数，图例带数量与百分比，空知识库不显示）。
+2. **知识库管理**：新建后立即上传资料；列表支持按「名称 / 描述 / 创建者」搜索；每行可上传资料、编辑、删除。
+3. **文档管理**：只负责查看与清理。支持按「文件名 / 知识库 / 类型」搜索，可查看分块详情、删除文档。**上传入口只在知识库页面**。
+4. **对话历史**：按「问题 / 回答 / 提问人」搜索，服务端分页，点「详情」查看完整问答。
+5. **问题反馈**：查看未命中问题，补充资料后可重新生成回答（按提问学生的可见范围检索），支持标记状态与删除。
+6. **用户管理**：按「账号 / 用户名 / 角色」搜索；可调整角色、重置密码、删除用户（删除会级联清理其会话与消息）。
 
 ---
 
@@ -181,149 +201,162 @@ OPENAI_EMBED_MODEL=text-embedding-3-small
 
 | 方法 | 路径 | 说明 | 权限 |
 |---|---|---|---|
-| POST | /api/auth/register | 注册（学生） | 公开 |
-| POST | /api/auth/login | 登录，返回 JWT | 公开 |
-| GET | /api/auth/me | 当前用户信息 | 登录 |
+| POST | /api/auth/register | 注册（固定学生角色） | 公开 |
+| POST | /api/auth/login | 登录，返回 JWT（失败限流） | 公开 |
+| GET | /api/auth/me | 当前用户 | 登录 |
+| PUT | /api/auth/profile | 更新用户名 / 头像 | 登录 |
+| POST | /api/auth/avatar | 上传头像（校验文件头） | 登录 |
 | POST | /api/auth/change-password | 修改密码 | 登录 |
-| PUT | /api/auth/profile | 更新姓名 | 登录 |
-| GET | /api/chat/sessions | 会话列表 | 登录 |
+| GET | /api/chat/sessions | 我的会话列表 | 登录 |
+| POST | /api/chat/sessions | 新建会话 | 登录 |
+| GET / PATCH / DELETE | /api/chat/sessions/{id} | 会话消息 / 重命名 / 删除 | 登录 |
 | POST | /api/chat/ask | 流式问答（SSE） | 登录 |
-| GET/PATCH/DELETE | /api/chat/sessions/{id} | 会话消息/重命名/删除 | 登录 |
-| GET | /api/knowledge/bases | 知识库列表（含知识点数量/创建者） | 登录 |
-| POST/PUT/DELETE | /api/knowledge/bases(/{id}) | 知识库增删改（删除级联其下知识点） | 登录（创建者/管理员可改删） |
-| GET/POST/PUT/DELETE | /api/knowledge/points | 知识点增删改查 | 查=登录，写=登录（创建者/管理员可改删） |
-| GET | /api/knowledge/courses | 课程名称列表 | 登录 |
-| POST | /api/documents/upload | 上传文档（后台解析） | 管理员 |
-| GET/DELETE | /api/documents(/{id}) | 文档列表/详情/删除 | 管理员 |
+| GET | /api/chat/unanswered/mine | 我的反馈 | 登录 |
+| POST | /api/chat/unanswered/{id}/read | 标记反馈已读 | 登录 |
+| GET | /api/knowledge/bases | 知识库列表（按可见性过滤） | 登录 |
+| POST / PUT / DELETE | /api/knowledge/bases(/{id}) | 知识库增删改 | 登录（学生仅自己创建的） |
+| GET / POST / PUT / DELETE | /api/knowledge/points | 知识点增删改查（写入校验目标库可见性） | 登录 |
+| GET | /api/knowledge/courses | 可见课程名列表 | 登录 |
+| GET | /api/knowledge/stats/count | 知识点总数 | 登录 |
+| POST | /api/documents/upload | 上传文档（后台解析分块） | 登录（课程须可见） |
+| GET | /api/documents | 文档列表 | 管理员 |
+| GET / DELETE | /api/documents/{id} | 文档详情（分块预览）/ 删除 | 管理员 |
 | GET | /api/admin/users | 用户列表 | 管理员 |
-| PATCH/DELETE | /api/admin/users/{id} | 修改/删除用户 | 管理员 |
-| GET | /api/stats/admin/stats | 系统统计 | 管理员 |
-| GET | /api/chat/admin/conversations | 全部会话列表（含用户名/消息数） | 管理员 |
-| GET/DELETE | /api/chat/admin/conversations/{id} | 会话消息查看/删除 | 管理员 |
-| GET | /api/llm/status | 大模型连接状态探测 | 公开 |
-| GET | /api/admin/unanswered | 反馈列表（可按状态过滤） | 管理员 |
-| GET | /api/admin/unanswered/stats | 反馈统计（总数/待处理/已处理/今日/课程分布） | 管理员 |
-| POST | /api/admin/unanswered/{id}/regenerate | 补充资料后重新生成回答（成功置为已解决） | 管理员 |
-| PATCH/DELETE | /api/admin/unanswered/{id} | 标记状态 / 删除记录 | 管理员 |
-| GET | /api/chat/unanswered/mine | 我的已解答问题（学生工作台通知） | 登录 |
+| POST | /api/admin/users | 新增用户 | 管理员 |
+| PATCH / DELETE | /api/admin/users/{id} | 修改 / 删除用户 | 管理员 |
+| GET | /api/stats/me | 我的统计（工作台） | 登录 |
+| GET | /api/stats/admin/stats | 系统统计（含趋势与占比） | 管理员 |
+| GET | /api/chat/admin/conversations | 全部会话（分页） | 管理员 |
+| GET | /api/chat/admin/conversations/{id}/messages | 会话消息 | 管理员 |
+| DELETE | /api/chat/admin/conversations/{id} | 删除会话 | 管理员 |
+| GET | /api/chat/admin/messages | 问答对（`q` + `field=question\|answer\|user`，分页） | 管理员 |
+| GET | /api/admin/unanswered | 反馈列表（状态过滤） | 管理员 |
+| GET | /api/admin/unanswered/stats | 反馈统计 | 管理员 |
+| POST | /api/admin/unanswered/{id}/regenerate | 重新生成回答 | 管理员 |
+| PATCH / DELETE | /api/admin/unanswered/{id} | 标记状态 / 删除 | 管理员 |
+| GET | /api/llm/status | 模型连接状态（前端不再展示，供排查） | 登录 |
+| GET | /api/health | 健康检查 | 公开 |
 
-接口文档：启动后访问 **http://127.0.0.1:8000/docs**（Swagger UI）。
+接口文档：启动后访问 **http://127.0.0.1:8000/docs**。
 
 ---
 
-## 六、常见问题（FAQ）
+## 六、常见问题
 
-**Q1：问答返回「回答生成失败：model xxx not found」**
-Ollama 未拉取对应模型。执行 `ollama pull qwen3.5:4b` 和 `ollama pull bge-m3`，重启服务。
+**Q1：页面显示「127.0.0.1 拒绝了连接请求」**
+服务还没启动完。冷启动要一分钟左右（加载 Chroma 和依赖），等日志出现监听信息再刷新。若一直如此，检查终端报错，常见原因是 `JWT_SECRET` 未配置。
 
-**Q2：头部状态显示「无法连接 Ollama」**
-确认 Ollama 已启动（托盘图标存在）。测试：浏览器访问 `http://localhost:11434`。
+**Q2：问答报「模型服务还没准备好」**
+说明 Ollama 里没有对应模型，或 Ollama 未启动。执行 `ollama list` 确认有 `qwen3.5:4b` 和 `bge-m3`；没有就 `ollama pull`。具体原因在浏览器控制台（`[llm]` 开头）和服务端日志里。
 
-**Q3：上传 PDF 显示「解析失败」**
-可能是扫描件（无文本层），需 OCR 处理后再上传；或改用 TXT/Markdown 格式。
+**Q3：Ollama 明明装了模型，`ollama list` 却是空的**
+Ollama 桌面端的「模型存储位置」指向了空目录。打开 Ollama 设置检查该路径，模型文件通常位于 `C:\Users\<你>\.ollama\models`；改回正确目录后重启 Ollama。
 
-**Q4：示例知识点没有被创建**
-首次启动时若 Ollama 未就绪，示例知识点会自动回滚（避免库不一致）。启动 Ollama 后删除 `data/app.db` 再重启即可重新初始化。
+**Q4：上传 PDF 提示解析失败**
+多为扫描件（没有文本层），需要先 OCR；或者改用 TXT / Markdown。
 
-**Q5：如何清空所有数据？**
-停止服务后删除 `data/` 下的 `app.db` 和 `chroma/` 目录，重启即可回到初始状态。
+**Q5：示例知识点没有创建**
+首次启动时如果 Ollama 未就绪，种子知识点会回滚。启动 Ollama 后删除 `data/app.db` 再重启即可重新初始化。
 
-**Q6：端口被占用？**
-修改 `.env` 中的 `PORT`，或启动时指定：`python run.py --port 9000`。
+**Q6：如何清空所有数据**
+停止服务，删除 `data/app.db` 与 `data/chroma/`，重启回到初始状态。
 
-**Q7：回答总被拒答 / 向量库疑似损坏怎么办？**
-先停掉后端，运行 `python rebuild_vectors.py`：它会清空 `data/chroma/`，然后从 SQLite 里把全部知识点和已就绪文档重新分块、向量化入库。完成后重启 `python run.py`。
-若想先看距离门控是否过严，可在后端运行时另开终端执行 `python kb_probe.py`，观察「库里有答案」与「库里没答案」两类问题的相似度分数差，再据此调整 `.env` 中的检索阈值（如需）。
+**Q7：端口被占用**
+`run.py` 检测到端口已占用会直接跳过启动（防止开机自启重复起进程）。确实要换端口：`python run.py --port 9000` 或改 `.env` 的 `PORT`。
+
+**Q8：回答总被拒答 / 检索结果异常**
+先停后端，运行 `python rebuild_vectors.py` 重建向量；再运行 `python kb_probe.py` 看距离分布是否仍在 0.85 两侧。换过向量模型就必须重新标定阈值。
 
 ---
 
 ## 七、运维与调试脚本
 
-根目录下的脚本均为一次性运维/验证工具，**不参与系统运行时**，按需手动执行：
+根目录脚本均为一次性工具，不参与运行时：
 
 | 脚本 | 用途 | 何时使用 |
 |---|---|---|
-| `python update_knowledge_bases.py` | 迁移：删除旧示例知识点，重建四门课程知识库（幂等） | 知识库结构升级后 |
-| `python sync_seed_documents.py` | 把 20 条种子知识点在「文档管理」页同步为对应文档记录（幂等，**不重复入向量库**） | 首次部署后、「文档数」与「知识点数」对不上时 |
-| `python rebuild_vectors.py` | 清空 Chroma，从 SQLite 重建全部向量索引 | 向量库损坏、换了向量模型、检索结果异常时（先停后端） |
-| `python kb_probe.py` | 打印 6 条典型问题的 Top-1 相似度分数 | 调试距离门控/拒答阈值 |
-| `python kb_calibrate.py` | 打印 5 类问题（强匹配/弱匹配/语义近但库无/完全无关/宽泛）的 Top-3 分数 | 校准拒答策略边界 |
-| `python kb_e2e.py` | 端到端跑通：登录 → 建会话 → 三类问题 SSE 流式回答 → 检查未命中反馈记录 → 状态流转 | 改完 RAG 链路后做回归验证（需后端已启动） |
+| `python update_knowledge_bases.py` | 重建四门课程知识库（幂等） | 知识库结构升级后 |
+| `python sync_seed_documents.py` | 种子知识点同步为文档记录（不重复入向量库） | 文档数与知识点数对不上时 |
+| `python rebuild_vectors.py` | 清空 Chroma，全部重建 | 换向量模型 / 索引损坏（先停后端） |
+| `python kb_probe.py` | 典型问题 Top-1 距离 | 调拒答阈值 |
+| `python kb_calibrate.py` | 多类问题 Top-3 距离 | 标定阈值边界 |
+| `python kb_e2e.py` | 登录 → 问答 → 反馈 → 状态流转 | 改完 RAG 链路做回归 |
 
 ---
 
 ## 八、开发记录与踩坑
 
-这一节记几个当时真正卡住我的地方，以及最后是怎么定的。答辩被问「为什么这么做」的时候，答案基本都在这里。
+这一节记真正卡过的地方，以及最后为什么这么定。
 
 **1. 为什么是 Chroma + SQLite 两套存储**
 
-一开始想省事只留向量库，但知识点要能改能删、要按创建者鉴权、要看到底是谁改的，这些在向量库里做很别扭。最后是 SQLite 存元数据，Chroma 只存文本和检索需要的字段，两边靠 `doc_id` / `point_id` 关联。代价是增删都得两边各来一次，所以 `vector_store.py` 里的删除全是按元数据 `where` 过滤删的，没有按 id 删 —— 因为知识点改了内容之后 id 不变，但向量得重建。
+知识点要能改能删、要按创建者鉴权、要知道谁改的，这些在向量库里做很别扭。最后 SQLite 存元数据，Chroma 只存文本和检索字段，两边靠 `doc_id` / `point_id` 关联。代价是增删要两边各来一次，所以 `vector_store.py` 的删除都按元数据过滤，没有按 id 删。
 
 **2. 分块参数是试出来的**
 
-一开始块切得比较短，知识点被拦腰截断，检索回来是半句话。后来定成 800 字、重叠 120，中文段落基本能保住一个完整的语义单元。`chunker.py` 里除了按段落和换行切，还专门排了中文标点的切分优先级，不然一整段没问题号的课件会被硬切。
+块太短会把知识点拦腰截断，检索回来是半句话。最后定成 800 字、重叠 120；`chunker.py` 除了按段落和换行切，还排了中文标点的优先级，避免整段没有句号的课件被硬切。
 
 **3. 拒答这一层是被模型逼出来的**
 
-最早没有距离门控，检索到多少就直接丢给模型，结果它拿自己的知识开始编。最典型的是问「红黑树」，知识库里只有二叉树，它照样把红黑树的性质讲一遍，学生根本看不出来是编的。
+最早没有距离门控，模型拿自己的知识开始编。最典型的是问「红黑树」，库里只有二叉树，它照样把红黑树的性质讲了一遍。
 
-所以加了 `UNMATCHED_DISTANCE`：最相似资料的距离超过阈值就直接判「知识库没收录」，拒答文案由系统拼，不给模型自由发挥的空间。
-
-阈值是拿 18 条问题实测标出来的（`kb_calibrate.py` / 探针脚本），三堆分数的分布是这样：
+所以加了 `UNMATCHED_DISTANCE`：最相似资料的距离超过阈值就直接判「知识库没收录」，拒答文案由系统拼。阈值是拿 18 条问题实测标出来的：
 
 | 分组 | 最低 | 最高 |
 |---|---|---|
-| 库里有答案（栈和队列、TCP 三次握手、进程线程、死锁、快排、冯·诺依曼、OSI、哈希表、虚拟内存、子网划分） | 0.4631 | 0.7749 |
-| 库无但话题沾边（红黑树、B+ 树、AVL、Prim、协程、区块链） | 0.9133 | 1.0523 |
+| 库里有答案（栈、TCP、进程线程、死锁、快排、哈希表等） | 0.4631 | 0.7749 |
+| 库无但话题沾边（红黑树、B+ 树、AVL、协程等） | 0.9133 | 1.0523 |
 | 完全无关（天气、考公） | 1.1882 | 1.2134 |
 
-中间那条 **0.78 ~ 0.91 的空带**就是阈值该待的地方，取 **0.85**。一开始我拍的 1.10 落在「该拒答」那一档里，结果这 6 个沾边问题一个都没拦住 —— 问红黑树，模型拿着二叉树的资料硬编了一通，还编出了「每个节点都比其左子节点的颜色深」这种根本不存在的规则。
+中间 **0.78 ~ 0.91 的空带**就是阈值该待的位置，取 **0.85**。最初拍脑袋的 1.10 落在「该拒答」档里，那 6 个沾边问题一个都没拦住。
 
-**4. 这个阈值和向量模型绑死，我后来才意识到**
+**4. 阈值和向量模型绑死**
 
-中间换成 OpenAI 那套向量模型试了一轮（配置模板里留的是 text-embedding-3-small），同一批问题分数整体下移，当时那个阈值直接把所有问题都拒了。Chroma 返回的是 L2 距离，绝对值跟模型、跟归一化方式都有关，换个模型分带整体平移。所以阈值是 `.env` 里可配的，换向量模型之后必须重新标定再跑 `rebuild_vectors.py`。
+同一批问题换向量模型后分数整体平移，阈值会把所有问题都拒掉。所以阈值放在 `.env` 里，换模型必须重新标定并重建向量。
 
 **5. 拒答把反馈列表搞脏了**
 
-上了门控之后，「今天天气怎么样」「考公怎么选岗」这类问题也会进「未命中反馈」，教师端一屏全是垃圾。所以拒答之前先过一遍 `is_course_related()`：明显课程术语（红黑树、进程、TCP 之类）直接判相关；明显无关的（天气、考公、娱乐）直接判无关、不记录；剩下的才交给模型做二分类。那两张关键词表是硬编码的，但每一条都是踩出来的，不是什么优雅设计。
+「今天天气怎么样」「考公怎么选岗」也会进反馈，管理员一屏全是垃圾。所以拒答前先过 `is_course_related()`：明显课程术语直接相关，明显无关的直接不记录，剩下的交给模型二分类。
 
-**6. 「这门课讲了什么」被自己的门控误伤了**
+**6. 「这门课讲了什么」被门控误伤**
 
-学生问「这个知识库有什么内容」，这句话和库里的资料字面相似度很低，直接触发拒答，可这类问题恰恰是最该答的。所以单独做了 `OVERVIEW_PROMPT` 走另一条路：不做未收录判定，只把检索到的资料汇总介绍一遍。
+这类问题和资料的字面相似度很低，但它恰恰最该答。所以单独做了 `OVERVIEW_PROMPT`：不做未收录判定，只汇总介绍检索到的资料。
 
-**7. 阈值收到 0.85 之后的两件事**
+**7. 阈值 0.85 的两处代价**
 
-一是**宽泛问题会被误伤**：「帮我总结一下这门课的核心知识点框架」实测 1.09，现在会被判未收录，可这类问题其实该答。`is_course_overview_question` 那串硬匹配短语只覆盖了「这门课讲了什么」这类写法，没覆盖「总结一下 / 梳理一下」。
+宽泛问题（「帮我总结这门课的核心框架」）实测 1.09，会被判未覆盖；话题混搭的问题（「红黑树和二叉查找树有什么区别」）仍可能拿到 0.73 的距离被放行，然后模型照着二叉树编红黑树。
 
-二是**混了话题的问题照样拦不住**，而这恰恰是最危险的一类。比如问「红黑树是什么？它和普通的二叉查找树有什么区别？」—— 检索命中《二叉树及其遍历》，距离 0.7366，门控按设计放行；模型拿着二叉树的资料把红黑树的性质编了一整套，还编出「每个节点都比其左子节点的颜色深」这种根本不存在的规则。
+**8. 第三层防线在 3B 上不成立（默认关闭）**
 
-**8. 试过补第三层防线，在 3B 模型上不成立（所以默认关掉了）**
+曾尝试在检索后再问一次「资料里有没有直接讲这个问题」。当时用 qwen2.5:3b 试了 6 种提示词：要么恒定回答「没有」（连 Top-1 就是答案的「什么是哈希表」都被判未收录），要么在明明有依据时也说「无」。只给一句话的极简资料判定正确，给 3 段真实检索结果就失灵。所以 `ANSWERABILITY_CHECK=false`，代码保留。要启用，建议把这一步单独指给 7B 以上的模型。
 
-指望生成模型自己克制是没用的。我在提示词里加了具体反例（资料讲二叉查找树、学生问红黑树 → 按未收录处理），实测**照编不误**。
+**9. qwen3.5 的思考模式会吃空回答**
 
-于是加了第三层：检索命中之后，再用一次只输出「有／无」的窄任务，问模型「这些资料里有没有直接讲这个问题」。实测 qwen2.5:3b 做不了这个判定 —— 前后试了 6 种提示词写法，要么恒定回答「没有」（连「什么是哈希表？」这种 Top-1 就是《哈希表与冲突处理》、距离 0.79 的教科书式命中，都被判成未收录），要么在明明有依据时也说「无」。
+换成 qwen3.5:4b 后，第一次实测返回的 `response` 是空字符串——模型把预算全花在 `thinking` 里了。解决方式是 `ChatOllama(reasoning=False)`；同时把 `num_ctx` 显式设成 8192，否则多轮对话加资料很容易把系统规则挤出 4096 的默认窗口。
 
-对照实验能定位到原因：
+**10. Ollama 升级后模型"消失"**
 
-- 只给一句话的极简资料 → 判定正确
-- 给它 3 段真实检索结果 → 恒定回答「没有」
+桌面端某次升级把模型目录解析到了 `D:\` 根目录，`ollama list` 空空如也，日志里是 `total blobs: 0`。模型其实都在 `C:\Users\<你>\.ollama\models`。结论：Ollama 的模型目录以桌面端设置为准，不是环境变量；升级后先看设置里的存储位置。
 
-所以这一层**默认关闭**（`.env` 里的 `ANSWERABILITY_CHECK=false`），代码留着。要启用的话，得把这一步单独指给 7B 以上的模型（生成仍可以用 3B）。这是这套系统目前最大的已知局限：**问一个和知识库沾边、但库里其实没讲的知识点，它可能会照着相近资料把答案编出来。**
+**11. 拉模型卡在 IPv6**
 
-**9. 还没解决的**
+Ollama 下载器连 Cloudflare R2 时走 IPv6，某些网络环境下会一直 `SynSent`。最后用 `curl -4` 手动下载层文件 + 校验 SHA256 + 写回 manifest 才装上。遇到「pulling manifest」长时间不动，先怀疑 IPv6。
 
-- 检索和入库在 `async` 路由里是同步调用，会阻塞事件循环。单机自己用没感觉，并发上来就是问题，正确做法是拿 `asyncio.to_thread` 包一层。
-- 多轮历史按条数截断（最近 6 轮），没按 token 算预算，回答一长就可能把上下文挤爆。
-- 没有 pytest，回归验证靠手动跑 `kb_e2e.py`。这块欠着。
+**12. 还没解决的**
+
+- 检索和入库在 `async` 路由里是同步调用，会阻塞事件循环；单机自用无感，并发上来是问题，正确做法是 `asyncio.to_thread` 包一层。
+- 多轮历史按条数截断（最近 6 轮），没按 token 算预算。
+- 没有 pytest，回归靠手动跑 `kb_e2e.py`。
 
 ---
 
 ## 九、代码位置速查
 
-- **RAG 核心**：`backend/services/rag_service.py` —— 检索、门控、提示词、流式生成都在这一个文件里。
-- **文档处理**：`document_parser.py`（PDF / TXT / MD / CSV）+ `chunker.py`（递归分块，中文标点感知，重叠 120 字符）。
-- **向量库**：`vector_store.py` —— ChromaDB 持久化，文档与知识点放同一集合，按元数据过滤增删。
-- **模型切换**：`llm_service.py` / `embedding_service.py` —— 按配置返回 Ollama 或 OpenAI 兼容实现，改 `.env` 就行，业务代码不用动。
-- **流式协议**：SSE（`text/event-stream`），前端用 `fetch + ReadableStream` 解析，支持中途停止。
-- **认证**：PBKDF2-SHA256 哈希（标准库实现，省掉 bcrypt 的编译依赖）、JWT 无状态认证、接口级角色校验。
+- **RAG 核心**：`backend/services/rag_service.py` —— 检索、门控、提示词、流式生成。
+- **可见性规则**：`backend/services/kb_scope.py` —— 列表、检索、写入、上传共用同一套判断，别再在路由里各写一份。
+- **文档处理**：`document_parser.py`（PDF / TXT / MD / CSV）+ `chunker.py`（递归分块，中文标点感知）。
+- **向量库**：`vector_store.py` —— Chroma 持久化，文档与知识点同集合，按元数据过滤增删。
+- **模型切换**：`llm_service.py` / `embedding_service.py` —— 按配置返回 Ollama 或 OpenAI 兼容实现。
+- **认证**：`security.py`（PBKDF2-SHA256 + JWT）、`deps.py`（角色依赖）、`routers/auth.py`（登录限流、头像校验）。
+- **流式协议**：SSE（`text/event-stream`），前端 `fetch + ReadableStream` 解析，支持中途停止。
+- **前端结构**：`static/js/views/` 每个页面一个模块，统一的弹窗 / Toast / 搜索按钮在 `common.js`。
