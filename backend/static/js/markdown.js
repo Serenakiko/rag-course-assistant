@@ -8,21 +8,30 @@ const Markdown = (() => {
       .replace(/"/g, "&quot;");
   }
 
+  // 只放行安全协议，挡掉 javascript: / data: 这类可执行 URL
+  const SAFE_URL = /^(https?:|mailto:|\/|#)|^[^:]*$/i;
+
   function inline(text) {
-    let t = text;
+    // 先整体转义，之后的正则只在纯文本上工作，输出标签全部由本函数拼接
+    let t = escapeHtml(text);
     // 行内代码
-    t = t.replace(/`([^`]+)`/g, (_, code) => `<code>${escapeHtml(code)}</code>`);
+    t = t.replace(/`([^`]+)`/g, (_, code) => `<code>${code}</code>`);
     // 图片
-    t = t.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g,
-      (_, alt, src) => `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" style="max-width:100%;border-radius:8px">`);
+    t = t.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+[^)\s]+)?\)/g,
+      (_, alt, src) => (SAFE_URL.test(src)
+        ? `<img src="${src}" alt="${alt}" style="max-width:100%;border-radius:8px">`
+        : `![${alt}](${src})`));
     // 链接
     t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,
-      (_, label, href) => `<a href="${escapeHtml(href)}" target="_blank" rel="noopener">${label}</a>`);
+      (_, label, href) => (SAFE_URL.test(href)
+        ? `<a href="${href}" target="_blank" rel="noopener">${label}</a>`
+        : `[${label}](${href})`));
     // 粗体
     t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     // 斜体
     t = t.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
-    return t;
+    // 调用方用 \n 拼接多行，这里统一换成换行标签
+    return t.replace(/\n/g, "<br>");
   }
 
   function render(md) {
@@ -67,7 +76,7 @@ const Markdown = (() => {
         closeList();
         const buf = [];
         while (i < lines.length && /^>\s?/.test(lines[i])) { buf.push(lines[i].replace(/^>\s?/, "")); i++; }
-        html.push(`<blockquote>${inline(buf.join("<br>"))}</blockquote>`);
+        html.push(`<blockquote>${inline(buf.join("\n"))}</blockquote>`);
         continue;
       }
 
@@ -127,7 +136,7 @@ const Markdown = (() => {
         buf.push(lines[i]);
         i++;
       }
-      html.push(`<p>${inline(buf.join("<br>"))}</p>`);
+      html.push(`<p>${inline(buf.join("\n"))}</p>`);
     }
     closeList();
     return html.join("\n");
