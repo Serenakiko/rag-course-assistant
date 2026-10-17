@@ -6,9 +6,14 @@
 const KnowledgeView = (() => {
   let currentBase = null;   // null=总览视图；否则为当前知识库对象
   let searchTimer = null;
-  let kbCache = [];         // 知识库全量缓存（分页渲染用）
+  let kbCache = [];         // 当前页知识库
+  let kbTotal = 0;
   let kbPage = 1;
-  let kbPageSize = 10;      // 可在 10 / 20 之间切换
+  let kbPageSize = 12;      // 前端知识库固定每页 12 条
+  let kpRows = [];          // 当前页知识点
+  let kpTotal = 0;
+  let kpPage = 1;
+  let kpPageSize = 12;
 
   function canManage(creatorId) {
     const user = API.getUser();
@@ -79,7 +84,7 @@ const KnowledgeView = (() => {
     const searchInput = document.getElementById("kb-search");
     const searchWrap = document.getElementById("kb-search-box");
     const syncClear = () => searchWrap.classList.toggle("has-value", searchInput.value.length > 0);
-    const doSearch = () => { syncClear(); loadBases(); };
+    const doSearch = () => { syncClear(); kbPage = 1; loadBases(); };
     searchInput.addEventListener("input", syncClear);
     searchInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); doSearch(); }
@@ -94,6 +99,7 @@ const KnowledgeView = (() => {
       doSearch();
     });
     document.getElementById("kb-add").addEventListener("click", () => openBaseEditor(null));
+    kbPage = 1;
     loadBases();
   }
 
@@ -101,15 +107,19 @@ const KnowledgeView = (() => {
     const grid = document.getElementById("kb-grid");
     if (!grid) return;
     const keyword = document.getElementById("kb-search")?.value.trim() || "";
+    const field = document.getElementById("kb-field")?.value || "name";
     try {
-      const params = new URLSearchParams();
+      const params = new URLSearchParams({
+        field,
+        limit: String(kbPageSize),
+        offset: String((kbPage - 1) * kbPageSize),
+      });
       if (keyword) params.set("keyword", keyword);
-      const field = document.getElementById("kb-field")?.value || "name";
-      const list = (await API.request("GET", "/api/knowledge/bases?" + params.toString())) || [];
-      kbCache = !keyword ? list : list.filter((b) => (field === "description"
-        ? (b.description || "").toLowerCase().includes(keyword.toLowerCase())
-        : b.name.toLowerCase().includes(keyword.toLowerCase())));
-      kbPage = 1;
+      const data = await API.request("GET", "/api/knowledge/bases/page?" + params.toString());
+      kbCache = data.items || [];
+      kbTotal = data.total || 0;
+      const totalPages = Math.max(1, Math.ceil(kbTotal / kbPageSize));
+      if (kbPage > totalPages) { kbPage = totalPages; return loadBases(); }
       renderKbGrid();
     } catch (err) {
       grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1"><p>${Common.escapeHtml(err.message)}</p></div>`;
@@ -120,25 +130,19 @@ const KnowledgeView = (() => {
     const grid = document.getElementById("kb-grid");
     if (!grid) return;
     const keyword = document.getElementById("kb-search")?.value.trim() || "";
-    const totalPages = Math.max(1, Math.ceil(kbCache.length / kbPageSize));
-    if (kbPage > totalPages) kbPage = totalPages;
-    const start = (kbPage - 1) * kbPageSize;
-    const pageRows = kbCache.slice(start, start + kbPageSize);
+    const totalPages = Math.max(1, Math.ceil(kbTotal / kbPageSize));
 
-    if (!pageRows.length) {
+    if (!kbCache.length) {
       grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1">
         <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#8b867d" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
         <p>${keyword ? "没搜到相关的知识库，换个关键词试试" : "还没有知识库"}</p>
         ${!keyword ? `<p class="mt-8">点击右上角「新建知识库」，创建第一个课程知识库</p>` : ""}
       </div>`;
-      renderPagination("kb-pagination", 0, 1, 1, () => {}, {
-        pageSize: kbPageSize, sizeOptions: [10, 20],
-        onSizeChange: (s) => { kbPageSize = s; kbPage = 1; renderKbGrid(); },
-      });
+      renderPagination("kb-pagination", 0, 1, 1, () => {});
       return;
     }
 
-    grid.innerHTML = pageRows.map((b) => `
+    grid.innerHTML = kbCache.map((b) => `
       <div class="kb-card" data-open="${b.id}">
         <div class="kb-card-head">
           <div class="kb-name">${Common.escapeHtml(b.name)}</div>
@@ -170,21 +174,15 @@ const KnowledgeView = (() => {
         if (base) removeBase(base);
       }));
 
-    renderPagination("kb-pagination", kbCache.length, totalPages, kbPage, (p) => {
-      kbPage = p; renderKbGrid();
-    }, {
-      pageSize: kbPageSize, sizeOptions: [10, 20],
-      onSizeChange: (s) => { kbPageSize = s; kbPage = 1; renderKbGrid(); },
+    renderPagination("kb-pagination", kbTotal, totalPages, kbPage, (p) => {
+      kbPage = p; loadBases();
     });
   }
 
-  /* 分页组件（与管理端一致）：共 N 条 + 每页条数 + 页码 */
-  function renderPagination(elId, total, totalPages, current, onChange, opts) {
+  /* 分页组件：共 N 条 + 页码（知识库固定每页 12 条，不再带每页条数下拉） */
+  function renderPagination(elId, total, totalPages, current, onChange) {
     const el = document.getElementById(elId);
     if (!el) return;
-    opts = opts || {};
-    const sizeOptions = opts.sizeOptions && opts.sizeOptions.length ? opts.sizeOptions : [10];
-    const pageSize = opts.pageSize || sizeOptions[0];
 
     let pages = "";
     for (let p = 1; p <= totalPages; p++) {
@@ -192,9 +190,6 @@ const KnowledgeView = (() => {
     }
     el.innerHTML = `
       <span class="total">共 ${total} 条</span>
-      <select class="page-size">
-        ${sizeOptions.map((s) => `<option value="${s}" ${s === pageSize ? "selected" : ""}>${s}条/页</option>`).join("")}
-      </select>
       <button class="page-btn" data-page="${current - 1}" ${current <= 1 ? "disabled" : ""}>‹</button>
       ${pages}
       <button class="page-btn" data-page="${current + 1}" ${current >= totalPages ? "disabled" : ""}>›</button>`;
@@ -205,11 +200,6 @@ const KnowledgeView = (() => {
         if (p >= 1 && p <= totalPages && p !== current) onChange(p);
       });
     });
-
-    const sizeSel = el.querySelector(".page-size");
-    if (sizeSel && typeof opts.onSizeChange === "function") {
-      sizeSel.addEventListener("change", () => opts.onSizeChange(Number(sizeSel.value)));
-    }
   }
 
   function openBase(id) {
@@ -217,6 +207,7 @@ const KnowledgeView = (() => {
       const base = bases.find((x) => Number(x.id) === Number(id));
       if (!base) { Common.toast("知识库不存在", "error"); return; }
       currentBase = base;
+      kpPage = 1;
       renderDetail(document.getElementById("main-content"));
     }).catch((err) => Common.toast(err.message, "error"));
   }
@@ -255,6 +246,7 @@ const KnowledgeView = (() => {
           else created = await API.request("POST", "/api/knowledge/bases", { name, description });
           Common.toast("保存成功", "success");
           Common.closeModal();
+          if (!isEdit) kbPage = 1;
           loadBases();
           // 新建完成后直接接着传资料，不用再进详情页找上传
           if (created) setTimeout(() => showKpUploadModal(created), 120);
@@ -284,14 +276,20 @@ const KnowledgeView = (() => {
   function renderDetail(container) {
     const base = currentBase;
     container.innerHTML = `
-      <div class="kb-detail-head" style="position:relative">
-        <button class="btn" id="kb-back" style="position:absolute;left:0;top:50%;transform:translateY(-50%)">返回</button>
+      <div class="kb-detail-head">
         <h2 class="kb-detail-title">${Common.escapeHtml(base.name)}</h2>
       </div>
-      <div class="page-toolbar justify-end">
-        <button class="btn btn-primary" id="kp-upload"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>上传文档</button>
+      <div class="page-toolbar">
+        <div class="toolbar-left" style="gap:10px">
+          <button class="btn" id="kb-back">返回</button>
+          ${searchBoxHtml("kp-search", "搜索知识点")}
+        </div>
+        <div class="toolbar-right">
+          <button class="btn btn-primary" id="kp-upload"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>上传文档</button>
+        </div>
       </div>
-      <div class="kp-grid" id="kp-grid"><div style="grid-column:1/-1;text-align:center;padding:40px"><span class="loading-spinner"></span></div></div>`;
+      <div class="kp-grid" id="kp-grid"><div style="grid-column:1/-1;text-align:center;padding:40px"><span class="loading-spinner"></span></div></div>
+      <div class="pagination pagination-fixed" id="kp-pagination"></div>`;
 
     document.getElementById("kb-back").addEventListener("click", () => {
       currentBase = null;
@@ -299,6 +297,19 @@ const KnowledgeView = (() => {
     });
 
     document.getElementById("kp-upload").addEventListener("click", openKpUploadModal);
+
+    const kpSearch = document.getElementById("kp-search");
+    const kpWrap = document.getElementById("kp-search-box");
+    const syncKpClear = () => kpWrap.classList.toggle("has-value", kpSearch.value.length > 0);
+    const doKpSearch = () => { syncKpClear(); kpPage = 1; loadPoints(); };
+    kpSearch.addEventListener("input", syncKpClear);
+    kpSearch.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); doKpSearch(); }
+    });
+    Common.attachSearchButton(kpWrap, doKpSearch);
+    document.getElementById("kp-search-clear").addEventListener("click", () => {
+      kpSearch.value = ""; syncKpClear(); doKpSearch(); kpSearch.focus();
+    });
     loadPoints();
   }
 
@@ -320,7 +331,7 @@ const KnowledgeView = (() => {
           <button type="button" class="btn" id="up-pick">选择文件</button>
         </div>
         <input type="file" id="up-file-input" accept=".pdf,.txt,.md,.markdown,.csv" multiple style="display:none">
-        <div class="muted" style="margin-top:8px;font-size:12.5px">上传到「${Common.escapeHtml(target.name)}」，支持 pdf、txt、md、csv 格式，最大 20MB</div>
+        <div class="form-hint">上传到「${Common.escapeHtml(target.name)}」，支持 pdf、txt、md、csv 格式，最大 20MB</div>
       </div>
       <div class="modal-footer">
         <button class="btn" data-close>取消</button>
@@ -371,50 +382,76 @@ const KnowledgeView = (() => {
   async function loadPoints() {
     const grid = document.getElementById("kp-grid");
     if (!grid || !currentBase) return;
+    const keyword = document.getElementById("kp-search")?.value.trim() || "";
     try {
-      const params = new URLSearchParams();
-      params.set("course", currentBase.name);
-      const points = await API.request("GET", "/api/knowledge/points?" + params.toString());
-      if (!points || points.length === 0) {
-        grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1">
+      const params = new URLSearchParams({
+        course: currentBase.name,
+        limit: String(kpPageSize),
+        offset: String((kpPage - 1) * kpPageSize),
+      });
+      if (keyword) params.set("keyword", keyword);
+      const data = await API.request("GET", "/api/knowledge/points/page?" + params.toString());
+      kpRows = data.items || [];
+      kpTotal = data.total || 0;
+      const totalPages = Math.max(1, Math.ceil(kpTotal / kpPageSize));
+      if (kpPage > totalPages) { kpPage = totalPages; return loadPoints(); }
+      renderPoints(keyword);
+    } catch (err) {
+      grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1"><p>${Common.escapeHtml(err.message)}</p></div>`;
+    }
+  }
+
+  function renderPoints(keyword) {
+    const grid = document.getElementById("kp-grid");
+    if (!grid) return;
+    const totalPages = Math.max(1, Math.ceil(kpTotal / kpPageSize));
+
+    if (!kpRows.length) {
+      grid.innerHTML = keyword
+        ? `<div class="empty-state" style="grid-column:1/-1"><p>没搜到相关的知识点，换个关键词试试</p></div>`
+        : `<div class="empty-state" style="grid-column:1/-1">
           <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#8b867d" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
           <p>这个知识库还没有知识点</p>
           <p class="mt-8">点击右上角「上传文档」添加课程资料</p>
         </div>`;
-        return;
-      }
-      grid.innerHTML = points.map((p) => `
-        <div class="kp-card">
-          <div class="kp-head">
-            <div class="kp-title">${Common.escapeHtml(p.title)}</div>
-          </div>
-          <div class="kp-content">${Common.escapeHtml(p.content)}</div>
-          <div class="kp-foot">
-            <div class="kp-tags">
-              ${(p.tags || "").split(",").filter(Boolean).map((t) => `<span class="kp-tag">${Common.escapeHtml(t)}</span>`).join("")}
-            </div>
-          </div>
-          <div class="kp-ops-row">
-            ${canManage(p.created_by) ? `<button class="btn btn-sm" data-edit="${p.id}">编辑</button>
-            <button class="btn btn-sm btn-danger" data-del="${p.id}">删除</button>` : ""}
-          </div>
-        </div>`).join("");
-
-      grid.querySelectorAll("[data-edit]").forEach((b) => {
-        b.addEventListener("click", () => {
-          const point = points.find((x) => Number(x.id) === Number(b.dataset.edit));
-          if (point) openPointEditor(point);
-        });
-      });
-      grid.querySelectorAll("[data-del]").forEach((b) => {
-        b.addEventListener("click", () => {
-          const point = points.find((x) => Number(x.id) === Number(b.dataset.del));
-          if (point) removePoint(point);
-        });
-      });
-    } catch (err) {
-      grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1"><p>${Common.escapeHtml(err.message)}</p></div>`;
+      renderPagination("kp-pagination", 0, 1, 1, () => {});
+      return;
     }
+
+    grid.innerHTML = kpRows.map((p) => `
+      <div class="kp-card">
+        <div class="kp-head">
+          <div class="kp-title">${Common.escapeHtml(p.title)}</div>
+        </div>
+        <div class="kp-content">${Common.escapeHtml(p.content)}</div>
+        <div class="kp-foot">
+          <div class="kp-tags">
+            ${(p.tags || "").split(",").filter(Boolean).map((t) => `<span class="kp-tag">${Common.escapeHtml(t)}</span>`).join("")}
+          </div>
+          ${p.updater_name ? `<div class="muted" style="font-size:12px;flex:none" title="最后一次修改">改：${Common.escapeHtml(p.updater_name)} · ${Common.fmtTime(p.updated_at)}</div>` : ""}
+        </div>
+        <div class="kp-ops-row">
+          ${canManage(p.created_by) ? `<button class="btn btn-sm" data-edit="${p.id}">编辑</button>
+          <button class="btn btn-sm btn-danger" data-del="${p.id}">删除</button>` : ""}
+        </div>
+      </div>`).join("");
+
+    grid.querySelectorAll("[data-edit]").forEach((b) => {
+      b.addEventListener("click", () => {
+        const point = kpRows.find((x) => Number(x.id) === Number(b.dataset.edit));
+        if (point) openPointEditor(point);
+      });
+    });
+    grid.querySelectorAll("[data-del]").forEach((b) => {
+      b.addEventListener("click", () => {
+        const point = kpRows.find((x) => Number(x.id) === Number(b.dataset.del));
+        if (point) removePoint(point);
+      });
+    });
+
+    renderPagination("kp-pagination", kpTotal, totalPages, kpPage, (p) => {
+      kpPage = p; loadPoints();
+    });
   }
 
   /* ---------- 知识点 新增 / 编辑 ---------- */

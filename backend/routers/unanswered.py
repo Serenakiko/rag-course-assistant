@@ -1,7 +1,11 @@
 """未命中问题路由：管理员查看 / 重新生成回答 / 统计 / 标记 / 删除知识库未覆盖的问题记录。"""
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
+import math
+import re
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,9 +15,11 @@ from sqlalchemy.orm import Session, joinedload
 from ..config import settings
 from ..database import get_db
 from ..deps import require_role
-from ..models import UnansweredQuestion, User
+from ..models import QuestionVector, UnansweredQuestion, User
+from ..services.embedding_service import get_embeddings
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _to_dict(q: UnansweredQuestion) -> dict:
@@ -40,7 +46,8 @@ def _to_dict(q: UnansweredQuestion) -> dict:
 @router.get("", summary="未命中问题列表（管理员）")
 def list_unanswered(
     status: str | None = None,
-    limit: int = 200,
+    limit: int = 20,
+    offset: int = 0,
     admin: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -50,7 +57,8 @@ def list_unanswered(
     前端拿它当总数展示就会少算。creator 用 joinedload 一次查出来，
     避免逐行懒加载用户表。
     """
-    limit = min(max(limit, 1), 500)
+    limit = min(max(limit, 1), 200)
+    offset = max(offset, 0)
     query = (
         select(UnansweredQuestion)
         .options(joinedload(UnansweredQuestion.creator))
@@ -61,8 +69,142 @@ def list_unanswered(
         query = query.where(UnansweredQuestion.status == status)
         count_query = count_query.where(UnansweredQuestion.status == status)
     total = db.scalar(count_query) or 0
-    rows = db.execute(query.limit(limit)).scalars().all()
+    rows = db.execute(query.limit(limit).offset(offset)).scalars().all()
     return {"items": [_to_dict(q) for q in rows], "total": total}
+
+
+def _bigrams(text: str) -> set[str]:
+    """问句的字符二元组：中文不用分词，向量模型不可用时靠这个兜底。"""
+    s = re.sub(r"[\s，。？！、；：,.?!;:\"'“”‘’()（）\[\]【】<>《》/\\]+", "", text or "")
+    return {s[i : i + 2] for i in range(len(s) - 1)} or ({s} if s else set())
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+def _question_vectors(db: Session, texts: list[str]) -> dict[str, list[float]]:
+    """问题向量：先查缓存，缺的现算并入库；模型不可用返回空，调用方退回字符相似。"""
+    unique = list(dict.fromkeys(t.strip() for t in texts if t and t.strip()))
+    if not unique:
+        return {}
+    hashes = {t: hashlib.sha1(t.encode("utf-8")).hexdigest() for t in unique}
+    cached = {
+        row.text_hash: json.loads(row.vector)
+        for row in db.scalars(
+            select(QuestionVector).where(QuestionVector.text_hash.in_(list(hashes.values())))
+        )
+    }
+    out = {t: cached[h] for t, h in hashes.items() if h in cached}
+    missing = [t for t in unique if t not in out]
+    if not missing:
+        return out
+    try:
+        vectors = get_embeddings().embed_documents(missing)
+    except Exception:  # noqa: BLE001
+        logger.warning("聚类：问题向量化失败，退回字符相似度")
+        return {}
+    for text, vec in zip(missing, vectors):
+        vector = [float(x) for x in vec]
+        out[text] = vector
+        db.add(QuestionVector(text_hash=hashes[text], text=text, vector=json.dumps(vector)))
+    try:
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        logger.warning("聚类：问题向量缓存写入失败（不影响本次结果）")
+    return out
+
+
+def _group_rows(rows: list, same) -> list[dict]:
+    """贪心聚类：和组内代表相似度达标就并进去。"""
+    groups: list[dict] = []
+    for q in rows:
+        for g in groups:
+            if same(g, q):
+                g["items"].append(q)
+                break
+        else:
+            groups.append({"items": [q]})
+    return groups
+
+
+@router.get("/clusters", summary="未命中问题聚类（管理员）")
+def cluster_unanswered(
+    status: str | None = "pending",
+    threshold: float | None = None,
+    limit: int = 200,
+    admin: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+) -> dict:
+    """把问法不同、意思相近的问题并成一组，按组内人数从多到少排。
+
+    优先用向量相似度（bge-m3 余弦，默认 0.78），能合并「红黑树怎么插入」
+    和「红黑树的插入过程」这类换说法；向量模型不可用时退回字符二元组
+    Jaccard（默认 0.55）。问题向量带缓存表，同一句话只算一次。
+    """
+    limit = min(max(limit, 1), 500)
+    stmt = select(UnansweredQuestion).options(joinedload(UnansweredQuestion.creator))
+    if status in ("pending", "resolved"):
+        stmt = stmt.where(UnansweredQuestion.status == status)
+    rows = list(db.scalars(stmt.order_by(UnansweredQuestion.id.desc()).limit(limit)))
+
+    if not rows:
+        return {"total_questions": 0, "group_count": 0, "items": [], "method": "none"}
+
+    vectors = _question_vectors(db, [q.question or "" for q in rows])
+    if vectors:
+        method = "vector"
+        cut = 0.78 if threshold is None else min(max(threshold, 0.5), 0.98)
+
+        def same(g: dict, q) -> bool:
+            a = vectors.get((g["items"][0].question or "").strip())
+            b = vectors.get((q.question or "").strip())
+            return a is not None and b is not None and _cosine(a, b) >= cut
+
+    else:
+        method = "bigram"
+        cut = 0.55 if threshold is None else min(max(threshold, 0.2), 0.95)
+
+        def same(g: dict, q) -> bool:
+            ga, gb = _bigrams(g["items"][0].question), _bigrams(q.question)
+            union = len(ga | gb)
+            return bool(union) and len(ga & gb) / union >= cut
+
+    groups = _group_rows(rows, same)
+
+    out: list[dict] = []
+    for g in groups:
+        items = g["items"]
+        out.append(
+            {
+                "count": len(items),
+                "question": items[0].question,
+                "course": next((x.course for x in items if x.course), ""),
+                "status": items[0].status,
+                "ids": [x.id for x in items],
+                "variants": [x.question for x in items[:8]],
+                "creators": sorted({x.creator_name for x in items if x.creator_name}),
+                "latest_at": max(
+                    (x.created_at for x in items if x.created_at), default=None
+                ),
+            }
+        )
+    out.sort(
+        key=lambda x: (
+            -x["count"],
+            -(x["latest_at"].timestamp() if x["latest_at"] else 0),
+        )
+    )
+    return {
+        "total_questions": len(rows),
+        "group_count": len(out),
+        "items": out,
+        "method": method,
+    }
 
 
 @router.get("/stats", summary="未命中问题统计（管理员）")
@@ -138,6 +280,14 @@ async def regenerate_answer(
     # 检索会跨到别人的私有知识库，把那里的内容写进这个学生的反馈里。
     scope = allowed_course_names(q.creator, db) if q.creator is not None else None
     result = await generate_answer(q.question, courses=scope)
+    if result.get("error"):
+        # 生成失败（超时 / 空回答）不能写成“已解决”，也不覆盖之前可用的答案
+        message = (
+            "生成超时了，这次没有保存回答，稍后再试"
+            if result["error"] == "timeout"
+            else "这次没生成出有效回答，检查模型服务后再试"
+        )
+        return {"ok": False, "answer": "", "resolved": False, "message": message}
     if result["recommended"]:
         q.related_points = json.dumps(result["recommended"], ensure_ascii=False)
     if result["matched"]:

@@ -29,6 +29,7 @@ from ..schemas import (
 )
 from ..services.chunker import split_text
 from ..services.document_parser import parse_file
+from ..services.recycle import snapshot_base
 from ..services.kb_scope import (
     admin_user_ids as _admin_user_ids,
     all_course_names,
@@ -61,6 +62,100 @@ def can_manage(user: User, creator_id: int | None) -> bool:
 
 
 # ==================== 知识库 ====================
+
+@router.get("/bases/page", summary="知识库列表（分页 + 服务端搜索）")
+def page_bases(
+    keyword: str = Query(default="", max_length=100),
+    field: str = Query(default="name", max_length=16),
+    sort: str = Query(default="updated", max_length=16),
+    limit: int = 10,
+    offset: int = 0,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """列表页用：只返回当前页，前端不再全量拉回再过滤。"""
+    if field not in ("name", "description", "creator"):
+        raise HTTPException(status_code=400, detail="field 仅支持 name / description / creator")
+    if sort not in ("updated", "id"):
+        raise HTTPException(status_code=400, detail="sort 仅支持 updated / id")
+    limit = min(max(limit, 1), 100)
+    offset = max(offset, 0)
+
+    conditions = []
+    if user.role != "admin":
+        conditions.append(
+            or_(
+                KnowledgeBase.created_by == user.id,
+                KnowledgeBase.created_by.in_(_admin_user_ids()),
+            )
+        )
+    kw = keyword.strip()
+    if kw:
+        like = f"%{kw}%"
+        if field == "description":
+            conditions.append(KnowledgeBase.description.like(like))
+        elif field == "creator":
+            conditions.append(or_(User.real_name.like(like), User.username.like(like)))
+        else:
+            conditions.append(KnowledgeBase.name.like(like))
+
+    join = select(KnowledgeBase).select_from(KnowledgeBase).outerjoin(
+        User, KnowledgeBase.created_by == User.id
+    )
+    count_query = select(func.count(KnowledgeBase.id)).select_from(KnowledgeBase).outerjoin(
+        User, KnowledgeBase.created_by == User.id
+    )
+    if conditions:
+        join = join.where(*conditions)
+        count_query = count_query.where(*conditions)
+    total = db.scalar(count_query) or 0
+
+    if sort == "id":
+        join = join.order_by(KnowledgeBase.id.asc())
+    else:
+        join = join.order_by(KnowledgeBase.updated_at.desc(), KnowledgeBase.id.desc())
+    bases = list(
+        db.scalars(
+            join.options(joinedload(KnowledgeBase.creator)).limit(limit).offset(offset)
+        )
+    )
+    names = [b.name for b in bases]
+    counts = (
+        dict(
+            db.execute(
+                select(KnowledgePoint.course, func.count(KnowledgePoint.id))
+                .where(KnowledgePoint.course.in_(names))
+                .group_by(KnowledgePoint.course)
+            ).all()
+        )
+        if names
+        else {}
+    )
+    # 文档条数与分块总数：一次 group by 查完，不做逐库统计
+    doc_stats: dict[str, tuple[int, int]] = {}
+    if names:
+        for course, doc_count, chunk_total in db.execute(
+            select(
+                Document.course,
+                func.count(Document.id),
+                func.coalesce(func.sum(Document.chunk_count), 0),
+            )
+            .where(Document.course.in_(names))
+            .group_by(Document.course)
+        ).all():
+            doc_stats[course] = (int(doc_count or 0), int(chunk_total or 0))
+
+    items: list[KnowledgeBaseSummary] = []
+    for b in bases:
+        summary = KnowledgeBaseSummary.model_validate(b)
+        summary.point_count = counts.get(b.name, 0)
+        summary.document_count, summary.chunk_count = doc_stats.get(b.name, (0, 0))
+        summary.creator_name = (
+            b.creator.real_name or b.creator.username if b.creator else ""
+        )
+        items.append(summary)
+    return {"total": total, "items": items}
+
 
 @router.get("/bases", response_model=list[KnowledgeBaseSummary], summary="知识库列表（含统计）")
 def list_bases(
@@ -189,6 +284,9 @@ def remove_base(
         raise HTTPException(status_code=404, detail="知识库不存在")
     if not can_manage(user, base.created_by):
         raise HTTPException(status_code=403, detail="只能删除自己创建的知识库")
+    # 先落一份回收站快照（库 + 知识点 + 文档，源文件移到 trash 目录），
+    # 再照常删除；30 天内误删可恢复
+    snapshot_base(db, base, user.id)
     # 先删向量，再删记录
     points = list(
         db.scalars(select(KnowledgePoint).where(KnowledgePoint.course == base.name))
@@ -210,6 +308,55 @@ def remove_base(
 
 
 # ==================== 知识点 ====================
+
+@router.get("/points/page", summary="知识点列表（分页 + 服务端搜索）")
+def page_points(
+    keyword: str = Query(default="", max_length=100),
+    course: str = Query(default=""),
+    limit: int = 12,
+    offset: int = 0,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """知识点列表页用：服务端过滤课程与关键词，只返回当前页。"""
+    limit = min(max(limit, 1), 100)
+    offset = max(offset, 0)
+
+    conditions: list = []
+    scope = point_scope_condition(user, db)
+    if scope:
+        conditions.extend(scope)
+    if course.strip():
+        conditions.append(KnowledgePoint.course == course.strip())
+    if keyword.strip():
+        like = f"%{keyword.strip()}%"
+        conditions.append(
+            or_(
+                KnowledgePoint.title.like(like),
+                KnowledgePoint.content.like(like),
+                KnowledgePoint.tags.like(like),
+            )
+        )
+
+    count_query = select(func.count(KnowledgePoint.id))
+    stmt = (
+        select(KnowledgePoint)
+        .options(
+            joinedload(KnowledgePoint.creator),
+            joinedload(KnowledgePoint.updater),
+        )
+        .order_by(KnowledgePoint.updated_at.desc(), KnowledgePoint.id.desc())
+    )
+    if conditions:
+        count_query = count_query.where(*conditions)
+        stmt = stmt.where(*conditions)
+    total = db.scalar(count_query) or 0
+    rows = list(db.scalars(stmt.limit(limit).offset(offset)))
+    return {
+        "total": total,
+        "items": [KnowledgePointOut.model_validate(p) for p in rows],
+    }
+
 
 @router.get("/points", response_model=list[KnowledgePointOut], summary="知识点列表")
 def list_points(
@@ -319,6 +466,10 @@ def update_point(
             detail="向量库更新失败，请确认大模型服务已启动",
         )
     point.title, point.content, point.course, point.tags = new_values
+    # 改过内容就不再是“自动生成”的展示记录，重建时要重新入库
+    point.is_auto = 0
+    # 留痕：谁改的，前端知识点卡片上直接显示
+    point.updated_by = user.id
     try:
         db.commit()
     except Exception:  # noqa: BLE001
@@ -381,12 +532,3 @@ def _find_auto_doc(db: Session, point: KnowledgePoint) -> Document | None:
         if not text or text[:2000] == (point.content or ""):
             return d
     return None
-
-
-@router.get("/stats/count", summary="知识点总数")
-def point_count(
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> dict:
-    count = db.scalar(select(func.count(KnowledgePoint.id))) or 0
-    return {"count": count}

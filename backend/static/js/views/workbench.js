@@ -73,19 +73,35 @@ const WorkbenchView = (() => {
       card.addEventListener("click", () => App.navigate(card.dataset.go));
     });
 
+    wireRefresh();
     loadStats();
+  }
+
+  /* 回到本页 / 窗口重新获得焦点时重拉一次：提问完切回来，数字要跟着变 */
+  let refreshWired = false;
+  function wireRefresh() {
+    if (refreshWired) return;
+    refreshWired = true;
+    const refresh = () => {
+      if (document.getElementById("wb-stat-grid")) loadStats();
+    };
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+    window.addEventListener("focus", refresh);
   }
 
   async function loadStats() {
     // 我的反馈：与管理员数据概览反馈区块同款行式列表（状态徽标 + 问题 + 时间），点击进入反馈页
     try {
-      const items = await API.request("GET", "/api/chat/unanswered/mine");
+      // 按提交时间倒序：id 顺序跟演示数据的时间不一致，直接切片会取错「最近」几条
+      const items = (await API.request("GET", "/api/chat/unanswered/mine") || [])
+        .slice()
+        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
       const listEl = document.getElementById("wb-resolved-list");
       if (listEl) {
         if (!items || !items.length) {
           listEl.innerHTML = `<div class="wb-fb-empty">还没有提交过反馈。提问时如果知识库里没有相关内容，会自动记到这里；管理员补完资料后，你能在这里看到回答。</div>`;
         } else {
-          listEl.innerHTML = items.slice(0, 5).map((r) => `
+          listEl.innerHTML = items.slice(0, 4).map((r) => `
             <div class="fb-row" data-fb="${r.id}">
               <span class="fb-status">${r.status === "resolved" ? "已解决" : "处理中"}</span>
               <span class="fb-q" style="flex:1;min-width:0">${Common.escapeHtml(r.question)}</span>
@@ -101,18 +117,23 @@ const WorkbenchView = (() => {
     }
 
     try {
-      const s = await API.request("GET", "/api/stats/me");
+      // 四张卡都是学生自己的东西；加时间戳避免浏览器拿缓存里的旧数字
+      const s = await API.request("GET", "/api/stats/me?_=" + Date.now());
+      // ?? 0 兜底：后端字段还没更新时也显示 0，不出现 undefined
       const cards = [
-        { icon: S.chat, num: s.conversations, label: "我的会话", cls: "blue" },
-        { icon: S.send, num: s.messages, label: "提问消息", cls: "green" },
-        { icon: S.book, num: s.knowledge_points, label: "知识库知识点", cls: "orange" },
-        { icon: S.file, num: s.documents_ready, label: "已入库课程文档", cls: "red" },
+        { icon: S.chat, num: s.conversations ?? 0, label: "我的会话", cls: "blue", go: "history" },
+        { icon: S.send, num: s.questions ?? 0, label: "提问消息", cls: "green", go: "chat" },
+        { icon: S.file, num: s.my_documents ?? 0, label: "我的文档", cls: "orange", go: "documents" },
+        { icon: S.book, num: s.knowledge_bases ?? 0, label: "知识库", cls: "red", go: "knowledge" },
       ];
-      document.getElementById("wb-stat-grid").innerHTML = cards.map((c) => `
-        <div class="stat-card">
+      const grid = document.getElementById("wb-stat-grid");
+      grid.innerHTML = cards.map((c) => `
+        <div class="stat-card clickable" data-go="${c.go}" title="点击查看${c.label}">
           <div class="stat-icon ${c.cls}">${c.icon}</div>
           <div class="stat-info"><div class="stat-num">${c.num}</div><div class="stat-label">${c.label}</div></div>
         </div>`).join("");
+      grid.querySelectorAll(".stat-card[data-go]").forEach((card) =>
+        card.addEventListener("click", () => App.navigate(card.dataset.go)));
     } catch (err) {
       document.getElementById("wb-stat-grid").innerHTML =
         `<div class="empty-state" style="grid-column:1/-1"><p>${Common.escapeHtml(err.message)}</p></div>`;

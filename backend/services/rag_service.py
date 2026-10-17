@@ -290,8 +290,9 @@ async def can_answer(question: str, docs: list[tuple[Document, float]], timeout:
 async def generate_answer(question: str, courses: list[str] | None = None) -> dict:
     """非流式生成一次完整回答（供管理员补充资料后"重新生成回答"使用）。
 
-    返回：{"answer", "recommended", "matched"}
+    返回：{"answer", "recommended", "matched", "error"}
       - matched=False 表示仍未命中知识库（空库 / 距离门控），answer 为拒答文案
+      - error="timeout"/"empty" 表示生成失败，answer 为空，调用方不能当已解决写入
     """
     # 向量化 + Chroma 查询是同步 IO，放到线程里跑，避免阻塞事件循环
     docs = await asyncio.to_thread(
@@ -324,6 +325,7 @@ async def generate_answer(question: str, courses: list[str] | None = None) -> di
     chain = prompt | get_llm()
 
     answer_parts: list[str] = []
+    timed_out = False
     try:
         async for chunk in _astream_with_deadline(
             chain,
@@ -334,8 +336,13 @@ async def generate_answer(question: str, courses: list[str] | None = None) -> di
             if isinstance(content, str) and content:
                 answer_parts.append(content)
     except asyncio.TimeoutError:
-        answer_parts.append("（回答生成超时了，稍后再试）")
-    answer = "".join(answer_parts).strip() or "这次没生成出有效回答，检查一下模型服务，或者稍后再试。"
+        timed_out = True
+    if timed_out:
+        # 超时提示不是答案，不能混进 answer 里被当成正常回答
+        return {"answer": "", "recommended": [], "matched": False, "error": "timeout"}
+    answer = "".join(answer_parts).strip()
+    if not answer:
+        return {"answer": "", "recommended": [], "matched": False, "error": "empty"}
 
     # 模型判定未收录时同样追加推荐与反馈提示
     if is_unmatched_answer(answer):

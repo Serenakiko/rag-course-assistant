@@ -92,3 +92,17 @@ def init_db() -> None:
         conv_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(conversations)"))]
         if "knowledge_bases" not in conv_cols:
             conn.execute(text("ALTER TABLE conversations ADD COLUMN knowledge_bases TEXT DEFAULT '[]'"))
+        if "last_knowledge_bases" not in conv_cols:
+            conn.execute(
+                text("ALTER TABLE conversations ADD COLUMN last_knowledge_bases TEXT DEFAULT '[]'")
+            )
+        # messages 增量迁移：标记生成中断时保存的半截回答
+        msg_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(messages)"))]
+        if "interrupted" not in msg_cols:
+            conn.execute(text("ALTER TABLE messages ADD COLUMN interrupted INTEGER DEFAULT 0"))
+        # knowledge_points 增量迁移：文档自动生成的知识点标记
+        kp_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(knowledge_points)"))]
+        if "is_auto" not in kp_cols:
+            conn.execute(text("ALTER TABLE knowledge_points ADD COLUMN is_auto INTEGER DEFAULT 0"))
+        if "updated_by" not in kp_cols:
+            conn.execute(text("ALTER TABLE knowledge_points ADD COLUMN updated_by INTEGER"))

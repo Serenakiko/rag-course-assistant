@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """头像接口端到端验证脚本（仅用标准库）。"""
 import json
+import os
 import urllib.request
 import uuid
 from pathlib import Path
 
 BASE = "http://127.0.0.1:8000"
 BASE_DIR = Path(__file__).resolve().parent.parent
+TEST_USER = os.getenv("RAG_TEST_USER", "")
+TEST_PASSWORD = os.getenv("RAG_TEST_PASSWORD", "")
 
 
 def http(method, path, token=None, data=None, raw=None, ctype=None):
@@ -46,7 +49,13 @@ def multipart(token, file_path):
 
 
 # 1. 登录
-status, content = http("POST", "/api/auth/login", data={"username": "23040107", "password": "111111"})
+if not TEST_USER or not TEST_PASSWORD:
+    raise SystemExit("请先设置 RAG_TEST_USER / RAG_TEST_PASSWORD 环境变量")
+status, content = http(
+    "POST",
+    "/api/auth/login",
+    data={"username": TEST_USER, "password": TEST_PASSWORD},
+)
 assert status == 200, f"login failed: {status} {content}"
 login = json.loads(content)
 token = login["token"]

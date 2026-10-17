@@ -107,7 +107,6 @@ const FeedbackView = (() => {
       item.read = true;
       renderStats();
       renderList();
-      App.refreshFeedbackBadge();
     } catch { /* 忽略：下次再点 */ }
   }
 

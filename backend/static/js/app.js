@@ -11,28 +11,49 @@ const App = (() => {
     settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
     overview: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>',
     users: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+    trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
     unanswered: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>',
     user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
   };
 
+  // 侧边栏顺序：高频核心动作在前，账号类（个人中心）放在最后一组，不要单独沉底。
+  // 学生：首页 → 学习（问答/历史/反馈）→ 资料（知识库/我的文档）
+  // 管理员：概览 → 内容（知识库与文档/自测问答）→ 运营（反馈/历史）→ 系统（用户）
   const NAV = [
-    { group: "学习", roles: ["student"], items: [
+    { group: "", roles: ["student"], items: [
       { key: "workbench", icon: ICON.home, label: "首页" },
-      { key: "knowledge", icon: ICON.knowledge, label: "知识库" },
-      { key: "chat", icon: ICON.chat, label: "智能问答" },
-      { key: "feedback", icon: ICON.history, label: "我的反馈" },
-      { key: "settings", icon: ICON.user, label: "个人中心" },
     ]},
-    { group: "管理台", roles: ["admin"], items: [
-      { key: "overview", icon: ICON.overview, label: "数据概览" },
-      { key: "kb", icon: ICON.knowledge, label: "知识库管理" },
-      { key: "documents", icon: ICON.documents, label: "文档管理" },
+    { group: "学习", roles: ["student"], items: [
       { key: "chat", icon: ICON.chat, label: "智能问答" },
+      { key: "history", icon: ICON.history, label: "对话历史" },
+      { key: "feedback", icon: ICON.unanswered, label: "我的反馈" },
+    ]},
+    { group: "资料", roles: ["student"], items: [
+      { key: "knowledge", icon: ICON.knowledge, label: "知识库" },
+      { key: "documents", icon: ICON.documents, label: "我的文档" },
+    ]},
+    { group: "", roles: ["admin"], items: [
+      { key: "overview", icon: ICON.overview, label: "数据概览" },
+    ]},
+    { group: "内容", roles: ["admin"], items: [
+      { key: "content", icon: ICON.knowledge, label: "知识库与文档" },
+      { key: "chat", icon: ICON.chat, label: "智能问答" },
+    ]},
+    { group: "运营", roles: ["admin"], items: [
       { key: "unanswered", icon: ICON.unanswered, label: "问题反馈" },
       { key: "history", icon: ICON.history, label: "对话历史" },
+    ]},
+    { group: "系统", roles: ["admin"], items: [
       { key: "users", icon: ICON.users, label: "用户管理" },
+      { key: "recycle", icon: ICON.trash, label: "回收站" },
+    ]},
+    // 账号类和其他组连在一起，不要再沉到底部留一大块空白
+    { group: "账号", roles: ["student", "admin"], items: [
+      { key: "settings", icon: ICON.user, label: "个人中心" },
     ]},
   ];
+
+
 
   const TITLES = {
     workbench: "首页",
@@ -44,6 +65,8 @@ const App = (() => {
     users: "用户管理",
     kb: "知识库管理",
     documents: "文档管理",
+    content: "知识库与文档",
+    recycle: "回收站",
     unanswered: "问题反馈",
     feedback: "我的反馈",
   };
@@ -108,7 +131,6 @@ const App = (() => {
       ProfileView.openAvatarModal();
     });
     navigate(API.getUser().role === "admin" ? "overview" : "workbench");
-    startFeedbackPolling();  // 学生端：未读红点 + 新反馈 toast
   }
 
   function refreshUserInfo() {
@@ -119,32 +141,42 @@ const App = (() => {
     if (roleEl) roleEl.style.display = "none";  // 侧边栏用户区不显示角色小字
   }
 
+  function navItemHtml(it) {
+    return `
+        <button class="nav-item" data-key="${it.key}">
+          <span class="nav-icon">${it.icon}</span><span>${it.label}</span>
+        </button>`;
+  }
+
   function renderNav() {
     const nav = document.getElementById("sidebar-nav");
     const role = API.getUser().role;
     nav.innerHTML = NAV.map((group) => {
       const items = group.items.filter((it) => !group.roles || group.roles.includes(role));
       if (!items.length) return "";
-      return items.map((it) => `
-        <button class="nav-item" data-key="${it.key}">
-          <span class="nav-icon">${it.icon}</span><span>${it.label}</span>
-          ${it.key === "feedback" ? `<span class="nav-badge" data-badge="feedback" style="display:none"></span>` : ""}
-        </button>`).join("");
+      const head = group.group ? `<div class="nav-group-title">${group.group}</div>` : "";
+      return head + items.map(navItemHtml).join("");
     }).join("");
 
-    nav.querySelectorAll(".nav-item").forEach((btn) => {
+    document.querySelectorAll(".nav-item").forEach((btn) => {
       btn.addEventListener("click", () => navigate(btn.dataset.key));
     });
   }
 
-  function navigate(key) {
+  function navigate(key, opts) {
     // 销毁旧视图
     if (currentView === "chat") ChatView.destroy();
-    if (currentView === "documents" || currentView === "kb") DocumentsView.destroy();
+    if (currentView === "content" || currentView === "documents" || currentView === "kb") {
+      ContentView.destroy();
+    }
 
+    const role = API.getUser().role;
+    // 兼容旧入口：管理员的 kb / documents 都落在「知识库与文档」上，高亮同一项
+    const activeKey = role === "admin" && (key === "kb" || key === "documents") ? "content" : key;
     document.querySelectorAll(".nav-item").forEach((b) =>
-      b.classList.toggle("active", b.dataset.key === key));
-    document.getElementById("page-title").textContent = TITLES[key] || "智答系统";
+      b.classList.toggle("active", b.dataset.key === activeKey));
+    document.getElementById("page-title").textContent =
+      key === "documents" && role === "student" ? "我的文档" : (TITLES[key] || "智答系统");
     const container = document.getElementById("main-content");
     container.innerHTML = "";
 
@@ -153,13 +185,19 @@ const App = (() => {
       case "knowledge": KnowledgeView.render(container); break;
       case "chat": ChatView.render(container); break;
       case "settings": ProfileView.render(container); break;
+      case "content": ContentView.render(container); break;
       case "kb":
-        // 管理员的“知识库管理”走表格视图；学生端“知识库”走卡片视图
-        if (API.getUser().role === "admin") AdminView.render(container, "kb_table");
+        // 旧入口兜底：管理员的“知识库管理”并进「知识库与文档」的知识库 tab
+        if (API.getUser().role === "admin") ContentView.render(container, { tab: "kb" });
         else KnowledgeView.render(container);
         break;
-      case "documents": DocumentsView.render(container); break;
+      case "documents":
+        // 学生看自己的文档；管理员的文档并进「知识库与文档」的文档 tab
+        if (API.getUser().role === "admin") ContentView.render(container, { tab: "docs" });
+        else DocumentsView.render(container);
+        break;
       case "overview": AdminView.render(container, "overview"); break;
+      case "recycle": RecycleView.render(container); break;
       case "users": AdminView.render(container, "users"); break;
       case "unanswered": AdminView.render(container, "unanswered"); break;
       case "feedback":
@@ -167,7 +205,7 @@ const App = (() => {
         else AdminView.render(container, "unanswered");
         break;
       case "history":
-        if (API.getUser().role === "admin") AdminView.render(container, "conversations");
+        if (API.getUser().role === "admin") AdminView.render(container, "conversations", opts);
         else HistoryView.render(container);
         break;
       default: container.innerHTML = `<div class="empty-state"><p>页面不存在</p></div>`;
@@ -175,30 +213,7 @@ const App = (() => {
     currentView = key;
   }
 
-  /* ---------- 学生端反馈通知：轮询未读角标 ---------- */
-  let feedbackTimer = null;
-  let lastUnread = 0;
-  async function refreshFeedbackBadge() {
-    if (API.getUser()?.role !== "student") return;
-    try {
-      const items = await API.request("GET", "/api/chat/unanswered/mine");
-      const unread = items.filter((it) => it.status === "resolved" && !it.read).length;
-      const badge = document.querySelector('[data-badge="feedback"]');
-      if (badge) {
-        badge.textContent = unread > 0 ? String(unread) : "";
-        badge.style.display = unread > 0 ? "inline-flex" : "none";
-      }
-      if (unread > lastUnread && unread > 0 && !document.hidden) {
-        Common.toast(`你有 ${unread} 条反馈已解决，点击「我的反馈」查看`, "success");
-      }
-      lastUnread = unread;
-    } catch { /* 网络异常静默，下个周期重试 */ }
-  }
-  function startFeedbackPolling() {
-    refreshFeedbackBadge();
-    feedbackTimer = setInterval(refreshFeedbackBadge, 60_000);
-  }
-
+  // 侧边栏不再显示反馈角标：新回答直接在「我的反馈」列表里标「新回答」
   /* ---------- 窄屏抽屉导航（≤640px） ---------- */
   function setupMobileNav() {
     const toggle = document.getElementById("nav-toggle");
@@ -235,7 +250,7 @@ const App = (() => {
     });
   }
 
-  return { init, refreshUserInfo, navigate, refreshFeedbackBadge };
+  return { init, refreshUserInfo, navigate };
 })();
 
 document.addEventListener("DOMContentLoaded", () => App.init());

@@ -11,11 +11,12 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import settings
-from .database import init_db
+from .database import SessionLocal, init_db
 from .deps import get_current_user
 from .models import User
-from .routers import auth, chat, documents, knowledge, stats, unanswered, users
+from .routers import auth, chat, documents, knowledge, recycle, stats, unanswered, users
 from .seed import init_seed
+from .services.recycle import purge_expired
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,6 +49,11 @@ def _warn_default_admin() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    # 回收站超过保留期的内容顺手清掉（含 data/trash 下的源文件）
+    with SessionLocal() as _db:
+        removed = purge_expired(_db)
+    if removed:
+        logger.info("回收站清理：%s 条超过保留期", removed)
     init_seed()
     _warn_default_admin()
     logger.info("数据库初始化完成：%s", settings.DB_PATH)
@@ -77,6 +83,7 @@ app.include_router(documents.router, prefix="/api/documents", tags=["文档"])
 app.include_router(users.router, prefix="/api", tags=["用户管理"])
 app.include_router(stats.router, prefix="/api/stats", tags=["统计"])
 app.include_router(unanswered.router, prefix="/api/admin/unanswered", tags=["未命中问题"])
+app.include_router(recycle.router, prefix="/api/admin/recycle", tags=["回收站"])
 
 
 @app.get("/api/health", tags=["系统"], summary="健康检查")

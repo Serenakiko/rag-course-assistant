@@ -1,5 +1,12 @@
-/* ============ 视图：对话历史（学生自己的会话） ============ */
+/* ============ 视图：对话历史（学生自己的会话） ============
+ * ID 列显示 1..n（按当前排序，不是数据库主键），删掉一条会重新编号；
+ * 底部固定分页：共 N 条 + 10/20 条每页 + 页码。
+ */
 const HistoryView = (() => {
+  let rows = [];       // 全量会话，按 id 升序
+  let page = 1;
+  let pageSize = 10;
+
   function render(container) {
     container.innerHTML = `
       <div class="card">
@@ -16,43 +23,84 @@ const HistoryView = (() => {
             <tbody id="history-tbody"><tr><td colspan="5" style="text-align:center;padding:36px"><span class="loading-spinner"></span></td></tr></tbody>
           </table>
         </div>
+        <div class="pagination pagination-fixed" id="history-pagination"></div>
       </div>`;
 
     document.getElementById("history-new").addEventListener("click", () => App.navigate("chat"));
-    document.getElementById("history-refresh").addEventListener("click", loadHistory);
-    loadHistory();
+    document.getElementById("history-refresh").addEventListener("click", () => {
+      load(true).then((ok) =>
+        Common.toast(ok ? "已刷新" : "刷新失败，检查一下网络", ok ? "success" : "error"));
+    });
+    load(false);
   }
 
-  async function loadHistory() {
+  /* keepPage=true：刷新时保留当前页（页码超界会自动回退到第 1 页） */
+  async function load(keepPage) {
     const tbody = document.getElementById("history-tbody");
     if (!tbody) return;
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:36px"><span class="loading-spinner"></span></td></tr>`;
     try {
-      const sessions = await API.request("GET", "/api/chat/sessions");
-      if (!sessions.length) {
-        tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:36px;color:var(--text-3)">暂无会话，点击「发起新问答」开始第一次提问</td></tr>`;
-        return;
-      }
-      tbody.innerHTML = sessions.map((c) => `
-        <tr>
-          <td>${c.id}</td>
-          <td title="${Common.escapeHtml(c.title)}" style="max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Common.escapeHtml(c.title)}</td>
-          <td class="muted">查看详情</td>
-          <td class="muted">${Common.fmtTime(c.created_at)}</td>
-          <td>
-            <div class="ops">
-              <button class="btn btn-sm" data-view="${c.id}">查看</button>
-              <button class="btn btn-sm btn-danger" data-del="${c.id}">删除</button>
-            </div>
-          </td>
-        </tr>`).join("");
-
-      tbody.querySelectorAll("[data-view]").forEach((b) =>
-        b.addEventListener("click", () => viewSession(Number(b.dataset.view))));
-      tbody.querySelectorAll("[data-del]").forEach((b) =>
-        b.addEventListener("click", () => removeSession(Number(b.dataset.del), sessions.find((c) => c.id === Number(b.dataset.del)))));
+      const list = await API.request("GET", "/api/chat/sessions");
+      rows = (list || []).slice().sort((a, b) => Number(a.id) - Number(b.id));
+      if (!keepPage) page = 1;
+      renderRows();
+      return true;
     } catch (err) {
       tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:36px;color:var(--danger)">${Common.escapeHtml(err.message)}</td></tr>`;
+      Common.renderPagination("history-pagination", 0, 1, pageSize, () => {}, {});
+      return false;
     }
+  }
+
+  function renderRows() {
+    const tbody = document.getElementById("history-tbody");
+    if (!tbody) return;
+    const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+    if (page > totalPages) page = totalPages;   // 删掉最后一页的最后一条时往回退
+
+    if (!rows.length) {
+      tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:36px;color:var(--text-3)">暂无会话，点击「发起新问答」开始第一次提问</td></tr>`;
+      Common.renderPagination("history-pagination", 0, 1, pageSize, () => {}, {
+        sizeOptions: [10, 20],
+        onSizeChange: (s) => { pageSize = s; page = 1; renderRows(); },
+      });
+      return;
+    }
+
+    const start = (page - 1) * pageSize;
+    const pageRows = rows.slice(start, start + pageSize);
+
+    // 编号 = 当前位置（不是数据库 id）：删掉一条后重新拉取即自动重排
+    tbody.innerHTML = pageRows.map((c, i) => `
+      <tr>
+        <td>${start + i + 1}</td>
+        <td title="${Common.escapeHtml(c.title)}" style="max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Common.escapeHtml(c.title)}</td>
+        <td class="muted">${c.message_count || 0}</td>
+        <td class="muted">${Common.fmtTime(c.created_at)}</td>
+        <td>
+          <div class="ops">
+            <button class="btn btn-sm" data-view="${c.id}">查看</button>
+            <button class="btn btn-sm btn-danger" data-del="${c.id}">删除</button>
+          </div>
+        </td>
+      </tr>`).join("");
+
+    tbody.querySelectorAll("[data-view]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const idx = pageRows.findIndex((c) => c.id === Number(b.dataset.view));
+        viewSession(Number(b.dataset.view), start + idx + 1);
+      }));
+    tbody.querySelectorAll("[data-del]").forEach((b) =>
+      b.addEventListener("click", () =>
+        removeSession(Number(b.dataset.del), pageRows.find((c) => c.id === Number(b.dataset.del)))));
+
+    Common.renderPagination("history-pagination", rows.length, page, pageSize, (p) => {
+      page = p;
+      renderRows();
+    }, {
+      sizeOptions: [10, 20],
+      onSizeChange: (s) => { pageSize = s; page = 1; renderRows(); },
+    });
   }
 
   // 兼容数组 / JSON 字符串两种来源格式
@@ -70,13 +118,12 @@ const HistoryView = (() => {
     return titles.length ? `<div class="msg-src-mini">参考：${titles.join("、")}</div>` : "";
   }
 
-  async function viewSession(id) {
+  async function viewSession(id, no) {
     try {
       const msgs = await API.request("GET", `/api/chat/sessions/${id}/messages`);
-      const title = msgs.length ? (msgs[0].role === "user" ? msgs[0].content : "") : "";
       Common.openModal(`
         <div class="modal-header">
-          <h3>会话 #${id} · 共 ${msgs.length} 条消息</h3>
+          <h3>会话 #${no} · 共 ${msgs.length} 条消息</h3>
           <button class="modal-close" data-close>×</button>
         </div>
         <div style="max-height:56vh;overflow-y:auto;display:flex;flex-direction:column;gap:10px">
@@ -105,7 +152,7 @@ const HistoryView = (() => {
     try {
       await API.request("DELETE", `/api/chat/sessions/${id}`);
       Common.toast("已删除", "success");
-      loadHistory();
+      load(true);   // 重新拉取后编号会自动重排
     } catch (err) { Common.toast(err.message, "error"); }
   }
 

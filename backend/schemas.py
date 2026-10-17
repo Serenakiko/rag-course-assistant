@@ -59,6 +59,8 @@ class ConversationOut(BaseModel):
     id: int
     title: str
     created_at: datetime
+    # 会话里的消息条数：学生端「对话历史」直接显示，不用点进去才知道
+    message_count: int = 0
 
 
 class MessageOut(BaseModel):
@@ -69,6 +71,7 @@ class MessageOut(BaseModel):
     role: str
     content: str
     sources: list = Field(default_factory=list)
+    interrupted: bool = False
     created_at: datetime
 
     @field_validator("sources", mode="before")
@@ -116,7 +119,9 @@ class KnowledgePointOut(BaseModel):
     created_by: int | None
     created_at: datetime
     updated_at: datetime
+    updated_by: int | None = None
     creator_name: str = ""
+    updater_name: str = ""
 
 
 # ---------- 知识库 ----------
@@ -137,9 +142,11 @@ class KnowledgeBaseOut(BaseModel):
 
 
 class KnowledgeBaseSummary(KnowledgeBaseOut):
-    """知识库列表项：附带知识点数量与创建者姓名。"""
+    """知识库列表项：附带知识点 / 文档 / 分块数量与创建者姓名。"""
 
     point_count: int = 0
+    document_count: int = 0   # 该库下的文档条数
+    chunk_count: int = 0      # 该库所有文档的分块总数
     creator_name: str = ""
 
 

@@ -26,10 +26,7 @@
 .nav-item.active { background: var(--primary-light); color: var(--primary); font-weight: 600; }
 .nav-item .nav-icon { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .nav-item .nav-icon svg { width: 18px; height: 18px; display: block; }
-.nav-item .nav-badge {
-  margin-left: auto; background: var(--primary); color: #fff; font-size: 12px;
-  padding: 1px 7px; border-radius: 999px;
-}
+/* 侧边栏不再有未读角标（按需求去掉），这条样式一并删除 */
 
 /* ---------- 侧边栏角色主题（白色底，统一靛蓝点缀，学生/管理员不区分） ---------- */
 body.role-student .nav-group-title,

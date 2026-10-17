@@ -3,12 +3,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import get_current_user, require_role
-from ..models import KnowledgeBase, User
+from ..models import Conversation, KnowledgeBase, Message, User
 from ..schemas import AdminUserUpdate, UserOut
 from ..security import hash_password
 
@@ -23,12 +23,75 @@ class AdminUserCreate(BaseModel):
     role: str = Field(default="student", pattern=r"^(student|admin)$")
 
 
-@router.get("/admin/users", response_model=list[UserOut], summary="全部用户（管理员）")
+@router.get("/admin/users", summary="用户列表（管理员，分页）")
 def admin_list_users(
+    q: str = "",
+    field: str = "account",
+    limit: int = 20,
+    offset: int = 0,
     user: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
-) -> list[User]:
-    return list(db.scalars(select(User).order_by(User.id)))
+) -> dict:
+    """服务端搜索 + 分页，列表页不再把全部用户拉回前端过滤。"""
+    if field not in ("account", "name", "role"):
+        raise HTTPException(status_code=400, detail="field 仅支持 account / name / role")
+    limit = min(max(limit, 1), 200)
+    offset = max(offset, 0)
+
+    conditions = []
+    keyword = q.strip()
+    if keyword:
+        like = f"%{keyword}%"
+        if field == "name":
+            conditions.append(User.real_name.like(like))
+        elif field == "role":
+            # 支持“学生 / student / 管理员 / admin”，也支持只输入一个字
+            key = keyword.lower()
+            role_conds = []
+            if "学" in keyword or "student" in key:
+                role_conds.append(User.role == "student")
+            if "管" in keyword or "admin" in key:
+                role_conds.append(User.role == "admin")
+            conditions.append(or_(*role_conds) if role_conds else User.id < 0)
+        else:
+            conditions.append(User.username.like(like))
+
+    total = db.scalar(select(func.count(User.id)).where(*conditions)) or 0
+    rows = db.scalars(
+        select(User).where(*conditions).order_by(User.id).limit(limit).offset(offset)
+    ).all()
+
+    # 提问数：这一页用户各自的 user 消息条数（一次 group by，不逐行 count）
+    ids = [u.id for u in rows]
+    counts: dict[int, int] = {}
+    if ids:
+        counts = dict(
+            db.execute(
+                select(Conversation.user_id, func.count(Message.id))
+                .join(Message, Message.conversation_id == Conversation.id)
+                .where(Conversation.user_id.in_(ids), Message.role == "user")
+                .group_by(Conversation.user_id)
+            ).all()
+        )
+    items = []
+    for u in rows:
+        data = UserOut.model_validate(u).model_dump()
+        data["question_count"] = int(counts.get(u.id, 0))
+        items.append(data)
+    return {"total": total, "items": items}
+
+
+@router.get("/admin/users/options", summary="用户下拉选项（管理员）")
+def admin_user_options(
+    user: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """转移知识库等场景只需要 id / 名字 / 角色，不必拉整张用户表。"""
+    rows = db.scalars(select(User).order_by(User.id)).all()
+    return [
+        {"id": u.id, "username": u.username, "real_name": u.real_name, "role": u.role}
+        for u in rows
+    ]
 
 
 @router.post("/admin/users", response_model=UserOut, summary="新增用户（管理员）")

@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..deps import get_current_user, require_role
-from ..services.kb_scope import visible_course_names
 from ..models import Conversation, Document, KnowledgeBase, KnowledgePoint, Message, UnansweredQuestion, User
+from ..services.kb_scope import visible_base_names
 from ..schemas import StatsOut
 
 router = APIRouter()
@@ -25,43 +25,25 @@ def my_stats(
     conversations = (
         db.scalar(select(func.count(Conversation.id)).where(Conversation.user_id == user.id)) or 0
     )
-    messages = (
+    # 提问数只算学生自己发的 user 消息（回答不算提问）
+    questions = (
         db.scalar(
             select(func.count(Message.id))
             .join(Conversation, Message.conversation_id == Conversation.id)
-            .where(Conversation.user_id == user.id)
+            .where(Conversation.user_id == user.id, Message.role == "user")
         )
         or 0
     )
-    # 个人统计只算自己看得见的内容；以前直接 count 全表，
-    # 学生看到的是所有人（含别人私有库）的规模。
-    visible = visible_course_names(user, db)
-    if visible is None:
-        knowledge_points = db.scalar(select(func.count(KnowledgePoint.id))) or 0
-        documents_ready = (
-            db.scalar(select(func.count(Document.id)).where(Document.status == "ready")) or 0
-        )
-    elif visible:
-        knowledge_points = (
-            db.scalar(
-                select(func.count(KnowledgePoint.id)).where(
-                    KnowledgePoint.course.in_(visible)
-                )
-            )
-            or 0
-        )
-        documents_ready = (
-            db.scalar(
-                select(func.count(Document.id)).where(
-                    Document.status == "ready",
-                    Document.course.in_(visible),
-                )
-            )
-            or 0
-        )
-    else:
-        knowledge_points = 0
-        documents_ready = 0
+    # 后两张卡换成学生自己有的东西：自己传的文档、自己看得到的知识库
+    my_documents = (
+        db.scalar(select(func.count(Document.id)).where(Document.uploaded_by == user.id)) or 0
+    )
+    base_names = visible_base_names(user, db)
+    knowledge_bases = (
+        (db.scalar(select(func.count(KnowledgeBase.id))) or 0)
+        if base_names is None
+        else len(base_names)
+    )
 
     # 最近 5 个会话（含消息数）
     recent_rows = db.execute(
@@ -84,9 +66,9 @@ def my_stats(
 
     return {
         "conversations": conversations,
-        "messages": messages,
-        "knowledge_points": knowledge_points,
-        "documents_ready": documents_ready,
+        "questions": questions,
+        "my_documents": my_documents,
+        "knowledge_bases": knowledge_bases,
         "recent_conversations": recent,
     }
 
@@ -134,16 +116,16 @@ def admin_stats(
     today_key = today_local.strftime("%Y-%m-%d")
     today_conversations = daily_map.get(today_key, 0)
 
-    # 各知识库文档数分布（用知识点数近似，因为文档表无 course 外键）
+    # 各知识库文档数分布：文档表本身带 course，直接按文档计数（和内容管理里的「文档数」同口径）
     kb_rows = db.execute(
-        select(KnowledgeBase.name, func.count(KnowledgePoint.id))
-        .outerjoin(KnowledgePoint, KnowledgePoint.course == KnowledgeBase.name)
+        select(KnowledgeBase.name, func.count(Document.id))
+        .outerjoin(Document, Document.course == KnowledgeBase.name)
         .group_by(KnowledgeBase.id)
         .order_by(KnowledgeBase.id)
     ).all()
     kb_doc_distribution = [{"name": name, "count": count or 0} for name, count in kb_rows]
 
-    # 反馈：待处理 / 已解答 + 最近 5 条
+    # 反馈：待处理 / 已解答 + 最近 4 条
     unanswered_pending = (
         db.scalar(
             select(func.count(UnansweredQuestion.id)).where(UnansweredQuestion.status == "pending")
@@ -165,7 +147,7 @@ def admin_stats(
             "answered_at": u.answered_at,
         }
         for u in db.execute(
-            select(UnansweredQuestion).order_by(UnansweredQuestion.id.desc()).limit(5)
+            select(UnansweredQuestion).order_by(UnansweredQuestion.created_at.desc()).limit(4)
         ).scalars()
     ]
 

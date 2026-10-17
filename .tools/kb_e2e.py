@@ -1,6 +1,12 @@
-import httpx, json, sys
+import json
+import os
+import sys
+
+import httpx
 
 base = "http://127.0.0.1:8000"
+TEST_USER = os.getenv("RAG_TEST_USER", "")
+TEST_PASSWORD = os.getenv("RAG_TEST_PASSWORD", "")
 
 def sse_collect(resp):
     """收集 SSE data 行文本。"""
@@ -12,7 +18,13 @@ def sse_collect(resp):
 
 def main():
     # 1. 登录管理员
-    r = httpx.post(f"{base}/api/auth/login", json={"username": "23040107", "password": "111111"}, timeout=10)
+    if not TEST_USER or not TEST_PASSWORD:
+        sys.exit("请先设置 RAG_TEST_USER / RAG_TEST_PASSWORD 环境变量")
+    r = httpx.post(
+        f"{base}/api/auth/login",
+        json={"username": TEST_USER, "password": TEST_PASSWORD},
+        timeout=10,
+    )
     r.raise_for_status()
     token = r.json()["token"]
     h = {"Authorization": f"Bearer {token}"}

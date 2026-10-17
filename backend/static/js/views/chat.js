@@ -12,11 +12,7 @@ const ChatView = (() => {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             <span>新对话</span>
           </button>
-          <div style="padding:0 14px 8px">
-            <select class="form-control" id="chat-kb-select" style="width:100%;padding:7px 10px;font-size:13px">
-              <option value="">全部知识库</option>
-            </select>
-          </div>
+          <div class="nav-group-title" style="padding:10px 14px 6px">会话记录</div>
           <div class="chat-sessions" id="chat-sessions"></div>
         </aside>
         <section class="chat-main">
@@ -82,41 +78,26 @@ const ChatView = (() => {
     });
 
     loadSessions();
-    // 知识库下拉：加载已有知识库选项；切换后按对应库刷新历史会话
-    API.request("GET", "/api/knowledge/courses").then((courses) => {
-      const sel = document.getElementById("chat-kb-select");
-      if (!sel) return;
-      (courses || []).forEach((c) => {
-        const opt = document.createElement("option");
-        opt.value = c; opt.textContent = c;
-        sel.appendChild(opt);
-      });
-    }).catch(() => {});
-    document.getElementById("chat-kb-select").addEventListener("change", () => {
-      if (abortController) {
-        pendingConvId = currentConvId;
-        abortController.abort();
-      }
-      currentConvId = null;
-      loadSessions();
-    });
   }
 
+  /* 左侧会话列表：没有会话显示欢迎页（带示例问题），有会话默认打开最近一个 */
   async function loadSessions(opts) {
     const listEl = document.getElementById("chat-sessions");
     if (!listEl) return;
     const keepCurrent = !!(opts && opts.keepCurrent);  // 提问后刷新：不覆盖当前对话界面
-    const kbSel = document.getElementById("chat-kb-select");
-    const kb = kbSel && kbSel.value ? kbSel.value : "";
     let sessions = [];
     try {
-      sessions = await API.request("GET", "/api/chat/sessions" + (kb ? `?kb=${encodeURIComponent(kb)}` : ""));
+      sessions = await API.request("GET", "/api/chat/sessions");
     } catch { /* 静默 */ }
     renderSessionList(sessions);
-    if (sessions.length === 0) {
-      if (!keepCurrent) showWelcome();
-    } else if (!currentConvId || !sessions.some((s) => s.id === currentConvId)) {
-      if (!keepCurrent) openSession(sessions[0].id);
+    if (keepCurrent) return;  // 提问后只刷新列表，不动当前对话界面
+
+    // 进入页面停在欢迎页（带示例问题）；只有你刚打开过的会话才自动恢复
+    if (currentConvId && sessions.some((s) => s.id === currentConvId)) {
+      openSession(currentConvId);
+    } else {
+      currentConvId = null;
+      showWelcome();
     }
   }
 
@@ -168,7 +149,7 @@ const ChatView = (() => {
     try {
       const msgs = await API.request("GET", `/api/chat/sessions/${id}/messages`);
       messagesEl.innerHTML = "";
-      msgs.forEach((m) => renderMessage(m.role, m.content, m.sources));
+      msgs.forEach((m) => renderMessage(m.role, m.content, m.sources, m.interrupted));
       scrollBottom();
       // 返回“生成未完成”的会话：补生成。带 regenerate，后端不再重复落一条提问。
       if (id === pendingConvId) {
@@ -284,7 +265,7 @@ const ChatView = (() => {
     bodyEl.appendChild(wrap);
   }
 
-  function renderMessage(role, content, sources) {
+  function renderMessage(role, content, sources, interrupted) {
     const messagesEl = document.getElementById("chat-messages");
     if (!messagesEl) return;
     const div = document.createElement("div");
@@ -297,6 +278,12 @@ const ChatView = (() => {
     messagesEl.appendChild(div);
     if (role === "assistant") {
       renderSources(div.querySelector(".msg-body"), sources);
+      if (interrupted) {
+        const note = document.createElement("div");
+        note.className = "msg-note";
+        note.textContent = "这条回答生成时被中断了，内容可能不完整";
+        div.querySelector(".msg-body").appendChild(note);
+      }
     }
     return div;
   }
@@ -392,9 +379,6 @@ const ChatView = (() => {
     sendBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
 
     try {
-      // 按当前选择的知识库检索回答（不选则为全部知识库）
-      const kbSel = document.getElementById("chat-kb-select");
-      const knowledgeBases = kbSel && kbSel.value ? [kbSel.value] : [];
       abortController = await API.streamAsk(convId, text, {
         onToken: (t) => {
           if (seq !== streamSeq) return;  // 已切换到其他会话，忽略旧生成
@@ -438,7 +422,7 @@ const ChatView = (() => {
           // 出错且已有部分内容时，保留 onError 中“部分内容 + 错误提示”的渲染结果
           scrollBottom();
         },
-      }, { knowledgeBases, regenerate });
+      }, { regenerate });
     } catch (err) {
       if (seq !== streamSeq) return;
       hadError = true;

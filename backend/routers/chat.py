@@ -1,8 +1,10 @@
 """对话路由：会话管理 + SSE 流式问答。"""
 from __future__ import annotations
 
+import itertools
 import json
 import logging
+from bisect import bisect_right
 from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -29,9 +31,51 @@ from ..services.rag_service import is_unmatched_answer
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+# 每个会话的生成序号：新请求一进来就顶掉旧序号，旧事件流收尾时不再落库
+_gen_counter = itertools.count(1)
+_gen_seq: dict[int, int] = {}
+
 
 def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _save_answer(
+    conversation_id: int,
+    turn_user_id: int | None,
+    content: str,
+    sources: str,
+    interrupted: int,
+) -> int | None:
+    """把一轮回答落库并返回 message.id。
+
+    顺序保护：这一轮之后已经来了新消息就不再落库，否则会话里会出现两条答案、
+    顺序错乱。失败只记日志，不影响已经推给前端的流。
+    """
+    session = SessionLocal()
+    try:
+        latest = session.scalar(
+            select(func.max(Message.id)).where(Message.conversation_id == conversation_id)
+        )
+        if turn_user_id is not None and latest is not None and latest > turn_user_id:
+            logger.info("会话 %s 已进入下一轮，丢弃上一轮回答", conversation_id)
+            return None
+        msg = Message(
+            conversation_id=conversation_id,
+            role="assistant",
+            content=content,
+            sources=sources,
+            interrupted=interrupted,
+        )
+        session.add(msg)
+        session.commit()
+        return msg.id
+    except Exception:  # noqa: BLE001
+        logger.exception("保存回答失败 conversation_id=%s", conversation_id)
+        session.rollback()
+        return None
+    finally:
+        session.close()
 
 
 def _load_history(db: Session, conversation_id: int, limit: int) -> list[tuple[str, str]]:
@@ -132,13 +176,29 @@ def list_sessions(
     kb: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> list[Conversation]:
-    """会话列表；传 kb 时只返回使用过该知识库的会话（空/不传返回全部）。"""
-    stmt = select(Conversation).where(Conversation.user_id == user.id)
+) -> list[ConversationOut]:
+    """会话列表；传 kb 时只返回使用过该知识库的会话（空/不传返回全部）。
+
+    消息条数用一次 group by 一起查出来，不逐会话 count；
+    学生端「对话历史」直接显示条数，不用点进去才知道。
+    """
+    stmt = (
+        select(Conversation, func.count(Message.id))
+        .outerjoin(Message, Message.conversation_id == Conversation.id)
+        .where(Conversation.user_id == user.id)
+    )
     if kb:
         stmt = stmt.where(Conversation.knowledge_bases.like(f'%"{kb}"%'))
-    stmt = stmt.order_by(Conversation.id.desc())
-    return list(db.scalars(stmt))
+    stmt = stmt.group_by(Conversation.id).order_by(Conversation.id.desc())
+    return [
+        ConversationOut(
+            id=conv.id,
+            title=conv.title,
+            created_at=conv.created_at,
+            message_count=count or 0,
+        )
+        for conv, count in db.execute(stmt).all()
+    ]
 
 
 @router.patch("/sessions/{conv_id}", response_model=ConversationOut, summary="重命名会话")
@@ -166,6 +226,7 @@ def delete_session(
     conv = db.get(Conversation, conv_id)
     if conv is None or conv.user_id != user.id:
         raise HTTPException(status_code=404, detail="会话不存在")
+    _gen_seq.pop(conv_id, None)
     db.delete(conv)
     db.commit()
     return {"ok": True}
@@ -180,22 +241,52 @@ def list_messages(
     conv = db.get(Conversation, conv_id)
     if conv is None or conv.user_id != user.id:
         raise HTTPException(status_code=404, detail="会话不存在")
-    return list(db.scalars(select(Message).where(Message.conversation_id == conv_id)))
+    return list(
+        db.scalars(
+            select(Message).where(Message.conversation_id == conv_id).order_by(Message.id)
+        )
+    )
+
+
 
 
 # ---------- 对话管理（管理员） ----------
 
 @router.get("/admin/conversations", summary="全部会话（管理员，分页）")
 def admin_list_conversations(
-    limit: int = 50,
+    q: str = "",
+    field: str = "title",
+    limit: int = 10,
     offset: int = 0,
     admin: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
 ) -> dict:
-    """分页返回会话列表；数据量大的时候不再整表塞给前端。"""
+    """分页返回会话列表（带提问者与消息数），支持按会话标题 / 提问者搜索。
+
+    和学生端一样按 id 升序，前端把编号显示成 1..n。
+    """
+    if field not in ("title", "user"):
+        raise HTTPException(status_code=400, detail="field 仅支持 title / user")
     limit = min(max(limit, 1), 200)
     offset = max(offset, 0)
-    total = db.scalar(select(func.count(Conversation.id))) or 0
+
+    keyword = q.strip()
+    conditions = []
+    if keyword:
+        like = f"%{keyword}%"
+        if field == "user":
+            conditions.append(or_(User.username.like(like), User.real_name.like(like)))
+        else:
+            conditions.append(Conversation.title.like(like))
+
+    total = (
+        db.scalar(
+            select(func.count(Conversation.id))
+            .join(User, Conversation.user_id == User.id)
+            .where(*conditions)
+        )
+        or 0
+    )
     rows = db.execute(
         select(
             Conversation,
@@ -205,8 +296,9 @@ def admin_list_conversations(
         )
         .join(User, Conversation.user_id == User.id)
         .outerjoin(Message, Message.conversation_id == Conversation.id)
+        .where(*conditions)
         .group_by(Conversation.id)
-        .order_by(Conversation.id.desc())
+        .order_by(Conversation.id.asc())
         .limit(limit)
         .offset(offset)
     ).all()
@@ -249,6 +341,7 @@ def admin_delete_conversation(
     conv = db.get(Conversation, conv_id)
     if conv is None:
         raise HTTPException(status_code=404, detail="会话不存在")
+    _gen_seq.pop(conv_id, None)
     db.delete(conv)
     db.commit()
     return {"ok": True}
@@ -328,27 +421,44 @@ def admin_qa_pairs(
         base.order_by(Message.id.asc()).limit(limit).offset(offset)
     ).all()
 
+    # 一次性取出本页涉及会话的助手消息，按会话分组；每条提问用二分找
+    # 之后的第一条回答，避免逐行查库（N+1）。
+    answers: dict[int, list[tuple[int, str, str]]] = {}
+    if rows:
+        conv_ids = {r.conversation_id for r in rows}
+        min_id = min(r.id for r in rows)
+        ans_rows = db.execute(
+            select(
+                Message.id,
+                Message.conversation_id,
+                Message.content,
+                Message.sources,
+            )
+            .where(
+                Message.conversation_id.in_(conv_ids),
+                Message.role == "assistant",
+                Message.id > min_id,
+            )
+            .order_by(Message.conversation_id, Message.id)
+        ).all()
+        for aid, cid, content, sources in ans_rows:
+            answers.setdefault(cid, []).append((aid, content, sources))
+    answer_ids = {cid: [a[0] for a in arr] for cid, arr in answers.items()}
+
     items: list[dict] = []
     for r in rows:
-        ans = db.execute(
-            select(Message.content, Message.sources)
-            .where(
-                Message.conversation_id == r.conversation_id,
-                Message.role == "assistant",
-                Message.id > r.id,
-            )
-            .order_by(Message.id.asc())
-            .limit(1)
-        ).first()
+        arr = answers.get(r.conversation_id, [])
+        pos = bisect_right(answer_ids.get(r.conversation_id, []), r.id)
+        ans = arr[pos] if pos < len(arr) else None
         try:
-            sources = json.loads(ans[1] or "[]") if ans else []
+            sources = json.loads(ans[2] or "[]") if ans else []
         except ValueError:
             sources = []
         items.append(
             {
                 "id": r.id,
                 "question": r.content,
-                "answer": ans[0] if ans else "",
+                "answer": ans[1] if ans else "",
                 "knowledge_base": _kb_from_conv(r.knowledge_bases),
                 "sources": sources if isinstance(sources, list) else [],
                 "conversation_id": r.conversation_id,
@@ -380,16 +490,26 @@ async def ask(
         if conv is None or conv.user_id != user.id:
             raise HTTPException(status_code=404, detail="会话不存在")
 
+    gen_token = next(_gen_counter)
+    _gen_seq[conversation_id] = gen_token
+
     selected = [c for c in payload.knowledge_bases if c]
 
-    # 会话记录用过的知识库（并集）：历史按库筛选时要能找到每个用过的库，
-    # 只存最后一次选择会让更早用过的库筛不到这个会话。
+    # 本轮实际检索范围：补生成沿用上一轮自己的范围，不能用历史并集，
+    # 否则早期选过的库会把范围放大。knowledge_bases 仍存并集，只供历史筛选。
+    if payload.regenerate:
+        if selected:
+            conv.last_knowledge_bases = json.dumps(selected, ensure_ascii=False)
+        else:
+            selected = _kb_list(conv.last_knowledge_bases)
+    else:
+        conv.last_knowledge_bases = json.dumps(selected, ensure_ascii=False)
     if selected:
         known = _kb_list(conv.knowledge_bases)
         merged = list(dict.fromkeys(known + selected))
         if merged != known:
             conv.knowledge_bases = json.dumps(merged, ensure_ascii=False)
-            db.commit()
+    db.commit()
 
     # 2. 保存用户消息；重新生成模式不重复落库提问，并删除上一条待替换的回答
     if payload.regenerate:
@@ -417,8 +537,6 @@ async def ask(
         ):
             db.delete(last_assistant)
             db.commit()
-        if not selected:
-            selected = _kb_list(conv.knowledge_bases)
     history = _load_history(db, conversation_id, settings.HISTORY_LIMIT)
     # 重新生成时当前提问已经作为最后一条用户消息存在历史里，stream_answer 还会
     # 再拼一次 question；不剔掉的话模型会看到同一个问题两遍。
@@ -432,6 +550,12 @@ async def ask(
     if not payload.regenerate:
         db.add(Message(conversation_id=conversation_id, role="user", content=payload.message))
         db.commit()
+    turn_user_id = db.scalar(
+        select(func.max(Message.id)).where(
+            Message.conversation_id == conversation_id,
+            Message.role == "user",
+        )
+    )
 
     # 检索范围：学生只能在自己可见的知识库里检索。
     # 不做这一步的话，"列表里看不到的知识库"照样能被提问捞出来。
@@ -450,6 +574,8 @@ async def ask(
         sources_json: str = "[]"
         unmatched: dict | None = None
         failed = False
+        completed = False
+        saved = False   # 正常路径已经落过库，finally 里不再重复保存
         try:
             async for event in rag_service.stream_answer(
                 payload.message,
@@ -468,6 +594,7 @@ async def ask(
                     yield _sse(event)
                     break
                 yield _sse(event)
+            completed = not failed
             if failed:
                 return
             # 记录“未命中问题”：距离门控拦截（unmatched 事件）或模型判定知识库未收录（未收录特征短语）
@@ -510,29 +637,37 @@ async def ask(
                     session.commit()
                 finally:
                     session.close()
+
+            # 正常结束：先落库拿到 id，再把 id 告诉前端（评价按钮要用它）
+            partial = "".join(answer_parts).strip()
+            if partial:
+                saved_id = _save_answer(
+                    conversation_id, turn_user_id, partial, sources_json, 0
+                )
+                if saved_id:
+                    saved = True
+                    yield _sse({"type": "saved", "message_id": saved_id})
         except Exception as exc:  # noqa: BLE001
             yield _sse({"type": "error", "message": f"服务异常：{exc}"})
         finally:
-            # 正常结束、超时、异常、客户端断开（切换会话/停止生成）都会走到这里：
-            # 把已经生成的半截回答存下来。不存的话，切回会话触发补生成时
-            # 提问会被再落一条，出现重复提问，半截内容也直接丢了。
-            partial = "".join(answer_parts).strip()
-            if partial:
-                session = SessionLocal()
-                try:
-                    session.add(
-                        Message(
-                            conversation_id=conversation_id,
-                            role="assistant",
-                            content=partial,
-                            sources=sources_json,
+            if _gen_seq.get(conversation_id) != gen_token:
+                # 已经有更新的提问/重生成顶掉了这一轮，旧流不能落库，
+                # 否则会出现两条答案、顺序错乱
+                logger.info("会话 %s 的生成已被新请求取代，丢弃旧的部分回答", conversation_id)
+            else:
+                _gen_seq.pop(conversation_id, None)
+
+                # 超时、异常、客户端断开（切换会话/停止生成）走到这里：
+                # 把已经生成的半截回答存下来，并标记是否中断。
+                if not saved:
+                    partial = "".join(answer_parts).strip()
+                    if partial:
+                        _save_answer(
+                            conversation_id,
+                            turn_user_id,
+                            partial,
+                            sources_json,
+                            0 if completed else 1,
                         )
-                    )
-                    session.commit()
-                except Exception:  # noqa: BLE001
-                    logger.exception("保存中断的部分回答失败 conversation_id=%s", conversation_id)
-                    session.rollback()
-                finally:
-                    session.close()
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")

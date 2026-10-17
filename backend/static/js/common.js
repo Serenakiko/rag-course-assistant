@@ -127,6 +127,39 @@ const Common = (() => {
     return btn;
   }
 
+  /* 列表页分页条：共 N 条 + 每页条数 + 页码（配合 .pagination-fixed 底部居中） */
+  function renderPagination(elId, total, current, pageSize, onPage, opts) {
+    const el = typeof elId === "string" ? document.getElementById(elId) : elId;
+    if (!el) return;
+    opts = opts || {};
+    const sizeOptions = opts.sizeOptions && opts.sizeOptions.length ? opts.sizeOptions : [10, 20];
+    const totalPages = Math.max(1, Math.ceil((total || 0) / pageSize));
+
+    let pages = "";
+    for (let p = 1; p <= totalPages; p++) {
+      pages += `<button class="page-btn ${p === current ? "active" : ""}" data-page="${p}">${p}</button>`;
+    }
+    el.innerHTML = `
+      <span class="total">共 ${total || 0} 条</span>
+      <select class="page-size">
+        ${sizeOptions.map((s) => `<option value="${s}" ${s === pageSize ? "selected" : ""}>${s}条/页</option>`).join("")}
+      </select>
+      <button class="page-btn" data-page="${current - 1}" ${current <= 1 ? "disabled" : ""}>‹</button>
+      ${pages}
+      <button class="page-btn" data-page="${current + 1}" ${current >= totalPages ? "disabled" : ""}>›</button>`;
+
+    el.querySelectorAll("[data-page]").forEach((b) => {
+      b.addEventListener("click", () => {
+        const p = Number(b.dataset.page);
+        if (p >= 1 && p <= totalPages && p !== current) onPage(p);
+      });
+    });
+    const sel = el.querySelector(".page-size");
+    if (sel && typeof opts.onSizeChange === "function") {
+      sel.addEventListener("change", () => opts.onSizeChange(Number(sel.value)));
+    }
+  }
+
   function roleBadge(role) {
     const map = { student: "学生", admin: "管理员" };
     return `<span class="badge badge-${role}">${map[role] || role}</span>`;
@@ -145,5 +178,5 @@ const Common = (() => {
     return `<div class="avatar" style="width:${size}px;height:${size}px;font-size:${Math.max(13, Math.round(size * 0.42))}px;border-radius:${Math.round(size / 2)}px">${avatarContent(user)}</div>`;
   }
 
-  return { toast, escapeHtml, fmtTime, fmtSize, openModal, closeModal, alertDialog, confirmDialog, attachSearchButton, roleBadge, avatarContent, avatarHtml };
+  return { toast, escapeHtml, fmtTime, fmtSize, openModal, closeModal, alertDialog, confirmDialog, attachSearchButton, renderPagination, roleBadge, avatarContent, avatarHtml };
 })();

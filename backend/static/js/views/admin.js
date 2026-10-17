@@ -70,7 +70,7 @@ const AdminView = (() => {
     const listEl = document.getElementById("fb-list");
     if (!box || !listEl) return;
     box.style.display = "";
-    const recent = s.recent_unanswered || [];
+    const recent = (s.recent_unanswered || []).slice(0, 4);
 
     const rows = recent.length
       ? recent.map((r) => `
@@ -141,15 +141,27 @@ const AdminView = (() => {
   }
 
   /* 环形图（带右侧图例） */
+  /* 环形图：只画文档数最多的前 3 个库，其余合并成「其他」，图例不会撑爆卡片 */
   function renderDonut(dist) {
     const el = document.getElementById("chart-donut");
     if (!el) return;
-    // 空知识库（0 个知识点）不占图例，否则会出现 0% 的无效扇区
-    dist = (dist || []).filter((d) => d.count > 0);
+    dist = (dist || []).filter((d) => d.count > 0).sort((a, b) => b.count - a.count);
     if (!dist.length) {
       el.innerHTML = `<div class="empty-state"><p>暂无数据</p></div>`;
       return;
     }
+
+    const MAX_SLICES = 3;
+    let slices = dist;
+    if (dist.length > MAX_SLICES) {
+      const head = dist.slice(0, MAX_SLICES);
+      const rest = dist.slice(MAX_SLICES);
+      slices = head.concat([{
+        name: `其他 ${rest.length} 个库`,
+        count: rest.reduce((a, d) => a + d.count, 0),
+      }]);
+    }
+
     const colors = ["#17505e", "#b0762c", "#5d7a52", "#8a5a4a", "#4a6b8a", "#7a6a8a", "#6b675f"];
     // 除颜色外再叠一层纹理：色觉障碍用户靠纹理也能区分扇区
     const patterns = ["", "p-hatch", "p-dots", "p-cross", "p-hline", "p-vline", "p-diag"];
@@ -173,14 +185,13 @@ const AdminView = (() => {
         <line x1="0" y1="0" x2="0" y2="9" stroke="rgba(0,0,0,.22)" stroke-width="3.5"/>
       </pattern>
     </defs>`;
-    const total = Math.max(1, dist.reduce((a, d) => a + d.count, 0));
+    const total = Math.max(1, slices.reduce((a, d) => a + d.count, 0));
     const cx = 90, cy = 90, r = 70, innerR = 44;
 
     let startAngle = -Math.PI / 2;
     let arcs = "";
-    dist.forEach((d, i) => {
-      const frac = d.count / total;
-      const angle = frac * Math.PI * 2;
+    slices.forEach((d, i) => {
+      const angle = (d.count / total) * Math.PI * 2;
       const endAngle = startAngle + angle;
       const largeArc = angle > Math.PI ? 1 : 0;
       const x1 = cx + r * Math.cos(startAngle);
@@ -193,13 +204,13 @@ const AdminView = (() => {
       const y4 = cy + innerR * Math.sin(startAngle);
       const color = colors[i % colors.length];
       const arcPath = `M${x1.toFixed(1)},${y1.toFixed(1)} A${r},${r} 0 ${largeArc} 1 ${x2.toFixed(1)},${y2.toFixed(1)} L${x3.toFixed(1)},${y3.toFixed(1)} A${innerR},${innerR} 0 ${largeArc} 0 ${x4.toFixed(1)},${y4.toFixed(1)} Z`;
-      arcs += `<path d="${arcPath}" fill="${color}"><title>${d.name}：${d.count}</title></path>`;
+      arcs += `<path d="${arcPath}" fill="${color}"><title>${Common.escapeHtml(d.name)}：${d.count}</title></path>`;
       const pat = patterns[i % patterns.length];
       if (pat) arcs += `<path d="${arcPath}" fill="url(#${pat})" pointer-events="none"/>`;
       startAngle = endAngle;
     });
 
-    const legend = dist.map((d, i) => {
+    const legend = slices.map((d, i) => {
       const pat = patterns[i % patterns.length];
       return `
       <div class="donut-legend-item">
@@ -215,15 +226,14 @@ const AdminView = (() => {
     el.innerHTML = `<div class="donut-wrap">
       <svg viewBox="0 0 180 180" style="width:160px;height:160px" role="img" aria-label="各知识库知识点占比">
         ${donutDefs}${arcs}
-        <text x="90" y="88" text-anchor="middle" font-size="24" font-weight="600" fill="#1d1b18">${total}</text>
-        <text x="90" y="106" text-anchor="middle" font-size="11" fill="#6f6a61">个知识点</text>
       </svg>
       <div class="donut-legend" style="flex:1">${legend}</div>
     </div>`;
   }
 
   /* ==================== 用户管理 ==================== */
-  let usersCache = [];
+  let usersRows = [];      // 当前页
+  let usersTotal = 0;
   let usersPage = 1;
   let usersPageSize = 10;   // 可在 10 / 20 之间切换
 
@@ -250,8 +260,8 @@ const AdminView = (() => {
       <div class="card">
         <div class="table-wrap">
           <table class="table">
-            <thead><tr><th>ID</th><th>账号</th><th>用户名</th><th>角色</th><th>创建时间</th><th>操作</th></tr></thead>
-            <tbody id="users-tbody"><tr><td colspan="6" style="text-align:center;padding:36px"><span class="loading-spinner"></span></td></tr></tbody>
+            <thead><tr><th>ID</th><th>账号</th><th>用户名</th><th>角色</th><th>提问数</th><th>创建时间</th><th>操作</th></tr></thead>
+            <tbody id="users-tbody"><tr><td colspan="7" style="text-align:center;padding:36px"><span class="loading-spinner"></span></td></tr></tbody>
           </table>
         </div>
         <div class="pagination pagination-fixed" id="users-pagination"></div>
@@ -260,7 +270,7 @@ const AdminView = (() => {
     document.getElementById("user-add").addEventListener("click", () => openUserEditor(null));
     const input = document.getElementById("users-search");
     const syncClear = () => document.getElementById("users-search-box").classList.toggle("has-value", input.value.length > 0);
-    const doUserSearch = () => { usersPage = 1; renderUsersTable(); };
+    const doUserSearch = () => { usersPage = 1; loadUsers(); };
     input.addEventListener("input", syncClear);
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); doUserSearch(); }
@@ -274,49 +284,52 @@ const AdminView = (() => {
       input.placeholder = userPlaceholders[e.target.value] || "搜索…";
       doUserSearch();
     });
+    usersPage = 1;
     loadUsers();
   }
 
   async function loadUsers() {
     const tbody = document.getElementById("users-tbody");
     if (!tbody) return;
+    const keyword = (document.getElementById("users-search")?.value || "").trim();
+    const field = document.getElementById("users-field")?.value || "account";
     try {
-      usersCache = (await API.request("GET", "/api/admin/users") || []).slice().sort((a, b) => Number(a.id) - Number(b.id));
+      const params = new URLSearchParams({
+        field,
+        limit: String(usersPageSize),
+        offset: String((usersPage - 1) * usersPageSize),
+      });
+      if (keyword) params.set("q", keyword);
+      const data = await API.request("GET", "/api/admin/users?" + params.toString());
+      usersRows = data.items || [];
+      usersTotal = data.total || 0;
+      const totalPages = Math.max(1, Math.ceil(usersTotal / usersPageSize));
+      if (usersPage > totalPages) { usersPage = totalPages; return loadUsers(); }
       renderUsersTable();
     } catch (err) {
-      tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:36px;color:var(--danger)">${Common.escapeHtml(err.message)}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:36px;color:var(--danger)">${Common.escapeHtml(err.message)}</td></tr>`;
     }
   }
 
   function renderUsersTable() {
     const tbody = document.getElementById("users-tbody");
     if (!tbody) return;
-    const keyword = (document.getElementById("users-search")?.value || "").trim().toLowerCase();
-    const field = document.getElementById("users-field")?.value || "account";
-    const roleText = (u) => (u.role === "admin" ? "管理员" : "学生");
-    const filtered = usersCache.filter((u) => {
-      if (!keyword) return true;
-      if (field === "name") return (u.real_name || "").toLowerCase().includes(keyword);
-      if (field === "role") return roleText(u).includes(keyword) || u.role.includes(keyword);
-      return u.username.toLowerCase().includes(keyword);
-    });
+    const keyword = (document.getElementById("users-search")?.value || "").trim();
     const countEl = document.getElementById("users-count");
-    if (countEl) countEl.textContent = keyword ? `匹配 ${filtered.length} 条` : "";
-    const totalPages = Math.max(1, Math.ceil(filtered.length / usersPageSize));
-    if (usersPage > totalPages) usersPage = totalPages;
-    const start = (usersPage - 1) * usersPageSize;
-    const pageRows = filtered.slice(start, start + usersPageSize);
+    if (countEl) countEl.textContent = keyword ? `匹配 ${usersTotal} 条` : "";
+    const totalPages = Math.max(1, Math.ceil(usersTotal / usersPageSize));
     const me = API.getUser();
 
-    if (!pageRows.length) {
-      tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:36px;color:var(--text-3)">${keyword ? "没有匹配的用户" : "暂无用户"}</td></tr>`;
+    if (!usersRows.length) {
+      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:36px;color:var(--text-3)">${keyword ? "没有匹配的用户" : "暂无用户"}</td></tr>`;
     } else {
-      tbody.innerHTML = pageRows.map((u) => `
+      tbody.innerHTML = usersRows.map((u, i) => `
         <tr>
-          <td>${u.id}</td>
+          <td>${(usersPage - 1) * usersPageSize + i + 1}</td>
           <td>${Common.escapeHtml(u.username)}${u.id === me.id ? ' <span class="badge" style="background:#e7eff1;color:#17505e">我</span>' : ""}</td>
           <td>${Common.escapeHtml(u.real_name || "-")}</td>
           <td><span class="role-badge ${u.role}">${u.role === "admin" ? "管理员" : "学生"}</span></td>
+          <td class="muted">${u.question_count || 0}</td>
           <td class="muted">${Common.fmtTime(u.created_at)}</td>
           <td>
             <button class="ops-link edit" data-edit="${u.id}">编辑</button>
@@ -326,16 +339,16 @@ const AdminView = (() => {
     }
 
     tbody.querySelectorAll("[data-edit]").forEach((b) =>
-      b.addEventListener("click", () => openUserEditor(usersCache.find((u) => u.id === Number(b.dataset.edit)))));
+      b.addEventListener("click", () => openUserEditor(usersRows.find((u) => u.id === Number(b.dataset.edit)))));
     tbody.querySelectorAll("[data-del]").forEach((b) =>
-      b.addEventListener("click", () => removeUser(usersCache.find((u) => u.id === Number(b.dataset.del)))));
+      b.addEventListener("click", () => removeUser(usersRows.find((u) => u.id === Number(b.dataset.del)))));
 
-    renderPagination("users-pagination", filtered.length, totalPages, usersPage, (p) => {
-      usersPage = p; renderUsersTable();
+    renderPagination("users-pagination", usersTotal, totalPages, usersPage, (p) => {
+      usersPage = p; loadUsers();
     }, {
       pageSize: usersPageSize,
       sizeOptions: [10, 20],
-      onSizeChange: (s) => { usersPageSize = s; usersPage = 1; renderUsersTable(); },
+      onSizeChange: (s) => { usersPageSize = s; usersPage = 1; loadUsers(); },
     });
   }
 
@@ -392,6 +405,7 @@ const AdminView = (() => {
           }
           Common.toast(isEdit ? "已保存" : "已创建", "success");
           Common.closeModal();
+          if (!isEdit) usersPage = 1;
           loadUsers();
         } catch (err) { Common.toast(err.message, "error"); }
       });
@@ -407,7 +421,7 @@ const AdminView = (() => {
       owned = (bases || []).filter((b) => Number(b.created_by) === Number(user.id));
     } catch { /* 查询失败按无库处理，后端还会再拦一次 */ }
     if (owned.length) {
-      openTransferModal(user, owned);
+      await openTransferModal(user, owned);
       return;
     }
     const ok = await Common.confirmDialog({
@@ -423,8 +437,19 @@ const AdminView = (() => {
     } catch (err) { Common.toast(err.message, "error"); }
   }
 
-  function openTransferModal(user, owned) {
-    const others = usersCache.filter((u) => Number(u.id) !== Number(user.id));
+  async function openTransferModal(user, owned) {
+    let others = [];
+    try {
+      others = await API.request("GET", "/api/admin/users/options");
+    } catch (err) {
+      Common.toast("加载接收人失败：" + err.message, "error");
+      return;
+    }
+    others = (others || []).filter((u) => Number(u.id) !== Number(user.id));
+    if (!others.length) {
+      Common.toast("没有可接收知识库的其他用户", "error");
+      return;
+    }
     const me = API.getUser();
     const defaultTo = others.find((u) => me && Number(u.id) === Number(me.id)) || others[0];
     const options = others.map((u) => `
@@ -472,7 +497,8 @@ const AdminView = (() => {
   }
 
   /* ==================== 知识库管理（表格） ==================== */
-  let kbCache = [];
+  let kbRows = [];     // 当前页
+  let kbTotal = 0;
   let kbPage = 1;
   let kbPageSize = 10;   // 可在 10 / 20 之间切换
   let kbTimer = null;    // 30s 静默刷新：感知学生端/他端对知识库与知识点的增删，保持两端同步
@@ -481,10 +507,26 @@ const AdminView = (() => {
     if (kbTimer) { clearInterval(kbTimer); kbTimer = null; }
   }
 
+  function kbQueryParams() {
+    const keyword = (document.getElementById("kb-search")?.value || "").trim();
+    const field = document.getElementById("kb-field")?.value || "name";
+    const params = new URLSearchParams({
+      field,
+      sort: "id",
+      limit: String(kbPageSize),
+      offset: String((kbPage - 1) * kbPageSize),
+    });
+    if (keyword) params.set("keyword", keyword);
+    return params.toString();
+  }
+
   async function silentRefreshKb() {
     try {
-      const bases = await API.request("GET", "/api/knowledge/bases");
-      kbCache = (bases || []).slice().sort((a, b) => Number(a.id) - Number(b.id));
+      const data = await API.request("GET", "/api/knowledge/bases/page?" + kbQueryParams());
+      kbRows = data.items || [];
+      kbTotal = data.total || 0;
+      const totalPages = Math.max(1, Math.ceil(kbTotal / kbPageSize));
+      if (kbPage > totalPages) { kbPage = totalPages; return loadKbTable(); }
       renderKbTableRows();   // 保留当前搜索词与页码，静默更新
     } catch { /* 静默：网络异常不影响当前页面 */ }
   }
@@ -512,8 +554,8 @@ const AdminView = (() => {
       <div class="card">
         <div class="table-wrap">
           <table class="table">
-            <thead><tr><th>ID</th><th>知识库名称</th><th>描述</th><th>文档数</th><th>创建者</th><th>创建时间</th><th>操作</th></tr></thead>
-            <tbody id="kb-tbody"><tr><td colspan="7" style="text-align:center;padding:36px"><span class="loading-spinner"></span></td></tr></tbody>
+            <thead><tr><th>ID</th><th>知识库名称</th><th>描述</th><th>文档数</th><th>分块数</th><th>创建者</th><th>创建时间</th><th>操作</th></tr></thead>
+            <tbody id="kb-tbody"><tr><td colspan="8" style="text-align:center;padding:36px"><span class="loading-spinner"></span></td></tr></tbody>
           </table>
         </div>
         <div class="pagination pagination-fixed" id="kb-pagination"></div>
@@ -523,7 +565,7 @@ const AdminView = (() => {
     const input = document.getElementById("kb-search");
     const box = document.getElementById("kb-search-box");
     const syncClear = () => box.classList.toggle("has-value", input.value.length > 0);
-    const doKbSearch = () => { kbPage = 1; renderKbTableRows(); };
+    const doKbSearch = () => { kbPage = 1; loadKbTable(); };
     input.addEventListener("input", syncClear);
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); doKbSearch(); }
@@ -537,6 +579,7 @@ const AdminView = (() => {
       input.placeholder = kbPlaceholders[e.target.value] || "搜索…";
       doKbSearch();
     });
+    kbPage = 1;
     loadKbTable();
     // 启动 30s 静默同步（仅在停留在本页时运行）
     kbTimer = setInterval(silentRefreshKb, 30000);
@@ -546,66 +589,57 @@ const AdminView = (() => {
     const tbody = document.getElementById("kb-tbody");
     if (!tbody) return;
     try {
-      const bases = await API.request("GET", "/api/knowledge/bases");
-      // 按 ID 升序（1 → n）
-      kbCache = (bases || []).slice().sort((a, b) => Number(a.id) - Number(b.id));
+      const data = await API.request("GET", "/api/knowledge/bases/page?" + kbQueryParams());
+      kbRows = data.items || [];
+      kbTotal = data.total || 0;
+      const totalPages = Math.max(1, Math.ceil(kbTotal / kbPageSize));
+      if (kbPage > totalPages) { kbPage = totalPages; return loadKbTable(); }
       renderKbTableRows();
     } catch (err) {
-      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:36px;color:var(--danger)">${Common.escapeHtml(err.message)}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:36px;color:var(--danger)">${Common.escapeHtml(err.message)}</td></tr>`;
     }
   }
 
   function renderKbTableRows() {
     const tbody = document.getElementById("kb-tbody");
     if (!tbody) return;
-    const keyword = (document.getElementById("kb-search")?.value || "").trim().toLowerCase();
-    const field = document.getElementById("kb-field")?.value || "name";
-    const filtered = kbCache.filter((b) => {
-      if (!keyword) return true;
-      if (field === "description") return (b.description || "").toLowerCase().includes(keyword);
-      if (field === "creator") return (b.creator_name || "").toLowerCase().includes(keyword);
-      return b.name.toLowerCase().includes(keyword);
-    });
-    const totalPages = Math.max(1, Math.ceil(filtered.length / kbPageSize));
-    if (kbPage > totalPages) kbPage = totalPages;
-    const start = (kbPage - 1) * kbPageSize;
-    const pageRows = filtered.slice(start, start + kbPageSize);
+    const keyword = (document.getElementById("kb-search")?.value || "").trim();
+    const totalPages = Math.max(1, Math.ceil(kbTotal / kbPageSize));
 
-    if (!pageRows.length) {
-      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:36px;color:var(--text-3)">${keyword ? "没有匹配的知识库" : "暂无知识库"}</td></tr>`;
+    if (!kbRows.length) {
+      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:36px;color:var(--text-3)">${keyword ? "没有匹配的知识库" : "暂无知识库"}</td></tr>`;
     } else {
-      tbody.innerHTML = pageRows.map((b) => `
+      tbody.innerHTML = kbRows.map((b, i) => `
         <tr>
-          <td>${b.id}</td>
+          <td>${(kbPage - 1) * kbPageSize + i + 1}</td>
           <td>${Common.escapeHtml(b.name)}</td>
           <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${Common.escapeHtml(b.description || "")}">${Common.escapeHtml(b.description || "-")}</td>
-          <td>${b.point_count}</td>
+          <td>${b.document_count || 0}</td>
+          <td>${b.chunk_count || 0}</td>
           <td>${Common.escapeHtml(b.creator_name || "-")}</td>
           <td class="muted">${Common.fmtTime(b.created_at)}</td>
           <td>
-            <button class="ops-link up" data-up="${b.id}">上传资料</button>
             <button class="ops-link edit" data-edit="${b.id}">编辑</button>
             <button class="ops-link del" data-del="${b.id}">删除</button>
           </td>
         </tr>`).join("");
     }
 
-    tbody.querySelectorAll("[data-up]").forEach((b) =>
-      b.addEventListener("click", () => openKbUpload(kbCache.find((x) => x.id === Number(b.dataset.up)))));
     tbody.querySelectorAll("[data-edit]").forEach((b) =>
-      b.addEventListener("click", () => openKbEditor(kbCache.find((x) => x.id === Number(b.dataset.edit)))));
+      b.addEventListener("click", () => openKbEditor(kbRows.find((x) => x.id === Number(b.dataset.edit)))));
     tbody.querySelectorAll("[data-del]").forEach((b) =>
-      b.addEventListener("click", () => removeKb(kbCache.find((x) => x.id === Number(b.dataset.del)))));
+      b.addEventListener("click", () => removeKb(kbRows.find((x) => x.id === Number(b.dataset.del)))));
 
-    renderPagination("kb-pagination", filtered.length, totalPages, kbPage, (p) => {
-      kbPage = p; renderKbTableRows();
+    renderPagination("kb-pagination", kbTotal, totalPages, kbPage, (p) => {
+      kbPage = p; loadKbTable();
     }, {
       pageSize: kbPageSize,
       sizeOptions: [10, 20],
-      onSizeChange: (s) => { kbPageSize = s; kbPage = 1; renderKbTableRows(); },
+      onSizeChange: (s) => { kbPageSize = s; kbPage = 1; loadKbTable(); },
     });
   }
 
+  /* 新增/编辑知识库：编辑态里直接能上传文档（原来的「上传资料」按钮并进来了） */
   function openKbEditor(base) {
     const isEdit = !!base;
     Common.openModal(`
@@ -621,16 +655,59 @@ const AdminView = (() => {
         <label>描述</label>
         <textarea class="form-control" id="kb-desc" rows="3" maxlength="1000" placeholder="简要说明该知识库涵盖的内容…">${isEdit ? Common.escapeHtml(base.description || "") : ""}</textarea>
       </div>
+      ${isEdit ? `
+      <div class="p-divider"></div>
+      <div class="form-group">
+        <label>上传文档 <span class="muted">（pdf / txt / md / csv，单个 20MB 以内）</span></label>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <button type="button" class="btn" id="kb-up-pick">选择文件</button>
+          <button type="button" class="btn" id="kb-up-submit" disabled>上传文档</button>
+          <span class="muted" id="kb-up-files" style="font-size:13px">未选择文件</span>
+        </div>
+        <input type="file" id="kb-up-input" accept=".pdf,.txt,.md,.markdown,.csv" multiple style="display:none">
+        <div class="form-hint">上传后自动解析入库，并生成对应的展示知识点。</div>
+      </div>` : ""}
       <div class="modal-footer">
         <button class="btn" data-close>取消</button>
         <button class="btn btn-primary" id="kb-save">${isEdit ? "保存" : "创建"}</button>
       </div>
     `, { onOpen: (box) => {
       box.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", Common.closeModal));
+
+      // 编辑态：文件选择 + 上传
+      if (isEdit) {
+        const input = box.querySelector("#kb-up-input");
+        const label = box.querySelector("#kb-up-files");
+        const submit = box.querySelector("#kb-up-submit");
+        box.querySelector("#kb-up-pick").addEventListener("click", () => input.click());
+        input.addEventListener("change", () => {
+          const files = Array.from(input.files || []);
+          label.textContent = files.length
+            ? `已选 ${files.length} 个：${files.map((f) => f.name).join("、")}`
+            : "未选择文件";
+          submit.disabled = files.length === 0;
+        });
+        submit.addEventListener("click", async () => {
+          const files = Array.from(input.files || []);
+          if (!files.length) return;
+          // 用了改名但还没保存时，按输入框里的名字归档
+          const courseName = box.querySelector("#kb-name").value.trim() || base.name;
+          const ok = await uploadDocsToBase({ ...base, name: courseName }, files, submit);
+          if (ok) {
+            Common.closeModal();
+            loadKbTable();
+            setTimeout(silentRefreshKb, 1500);
+          }
+        });
+      }
+
       box.querySelector("#kb-save").addEventListener("click", async () => {
         const name = box.querySelector("#kb-name").value.trim();
         if (!name) return Common.toast("请输入知识库名称", "error");
         const description = box.querySelector("#kb-desc").value.trim();
+        const btn = box.querySelector("#kb-save");
+        btn.disabled = true;
+        btn.textContent = isEdit ? "保存中…" : "创建中…";
         try {
           if (isEdit) {
             await API.request("PUT", `/api/knowledge/bases/${base.id}`, { name, description });
@@ -640,83 +717,51 @@ const AdminView = (() => {
             return;
           }
           const created = await API.request("POST", "/api/knowledge/bases", { name, description });
-          Common.toast("已创建，接着上传资料", "success");
+          Common.toast("已创建，可以接着上传文档", "success");
           Common.closeModal();
+          kbPage = 1;
           loadKbTable();
-          // 新建完直接进入上传，不用再跑去文档管理页
-          setTimeout(() => openKbUpload(created), 120);
-        } catch (err) { Common.toast(err.message, "error"); }
+          // 直接打开刚建好的库，接着上传文档
+          setTimeout(() => openKbEditor(created), 120);
+        } catch (err) {
+          Common.toast(err.message, "error");
+          btn.disabled = false;
+          btn.textContent = isEdit ? "保存" : "创建";
+        }
       });
     }});
   }
 
-  /* 上传资料到指定知识库：管理员建完库就地传，不再跳文档管理 */
-  function openKbUpload(base) {
-    if (!base) return;
-    Common.openModal(`
-      <div class="modal-header">
-        <h3>上传资料到「${Common.escapeHtml(base.name)}」</h3>
-        <button class="modal-close" data-close>×</button>
-      </div>
-      <div class="form-group">
-        <label>选择文件</label>
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-          <button type="button" class="btn" id="kb-up-pick">选择文件</button>
-          <span class="muted" id="kb-up-files" style="font-size:13px"></span>
-        </div>
-        <input type="file" id="kb-up-input" accept=".pdf,.txt,.md,.markdown,.csv" multiple style="display:none">
-        <div class="muted" style="margin-top:8px;font-size:12.5px">支持 pdf、txt、md、csv，单个 20MB 以内；解析完会自动生成知识点。</div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn" data-close>关闭</button>
-        <button class="btn btn-primary" id="kb-up-submit" disabled>上传</button>
-      </div>
-    `, { onOpen: (box) => {
-      const input = box.querySelector("#kb-up-input");
-      const filesEl = box.querySelector("#kb-up-files");
-      const submit = box.querySelector("#kb-up-submit");
-      box.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", Common.closeModal));
-      box.querySelector("#kb-up-pick").addEventListener("click", () => input.click());
-      input.addEventListener("change", () => {
-        const files = Array.from(input.files || []);
-        filesEl.textContent = files.length
-          ? `已选 ${files.length} 个文件：${files.map((f) => f.name).join("、")}`
-          : "";
-        submit.disabled = files.length === 0;
-      });
-      submit.addEventListener("click", async () => {
-        const files = Array.from(input.files || []);
-        if (!files.length) return;
-        submit.disabled = true;
-        submit.textContent = "上传中…";
-        let okCount = 0;
-        for (const file of files) {
-          if (!/\.(pdf|txt|md|markdown|csv)$/i.test(file.name)) {
-            Common.toast(`跳过不支持的文件：${file.name}`, "error");
-            continue;
-          }
-          const form = new FormData();
-          form.append("file", file);
-          form.append("course", base.name);
-          try {
-            await API.request("POST", "/api/documents/upload", form, { form: true });
-            okCount += 1;
-          } catch (err) {
-            Common.toast(`${file.name}：${err.message}`, "error");
-          }
-        }
-        if (okCount) Common.toast(`已提交 ${okCount} 个文件，正在解析入库…`, "success");
-        Common.closeModal();
-        setTimeout(silentRefreshKb, 2000);
-      });
-    }});
+  /* 往某个知识库上传文档（编辑弹窗里的「上传文档」用它） */
+  async function uploadDocsToBase(base, files, btn) {
+    const list = files.filter((f) => /\.(pdf|txt|md|markdown|csv)$/i.test(f.name));
+    if (!list.length) {
+      Common.toast("请选择 pdf / txt / md / csv 文件", "error");
+      return 0;
+    }
+    if (btn) { btn.disabled = true; btn.textContent = "上传中…"; }
+    let ok = 0;
+    for (const file of list) {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("course", base.name);
+      try {
+        await API.request("POST", "/api/documents/upload", form, { form: true });
+        ok += 1;
+      } catch (err) {
+        Common.toast(`${file.name}：${err.message}`, "error");
+      }
+    }
+    if (btn) { btn.disabled = false; btn.textContent = "上传文档"; }
+    if (ok) Common.toast(`已提交 ${ok} 个文件，正在解析入库…`, "success");
+    return ok;
   }
 
   async function removeKb(base) {
     if (!base) return;
     const ok = await Common.confirmDialog({
       title: "删除知识库",
-      message: `将删除知识库「${Common.escapeHtml(base.name)}」及其下 ${base.point_count} 个知识点与向量索引，删除后不可恢复。确认？`,
+      message: `将删除知识库「${Common.escapeHtml(base.name)}」及其下 ${base.document_count || 0} 个文档、${base.point_count || 0} 个知识点与向量索引，删除后不可恢复。确认？`,
       okText: "删除",
     });
     if (!ok) return;
@@ -727,152 +772,188 @@ const AdminView = (() => {
     } catch (err) { Common.toast(err.message, "error"); }
   }
 
-  /* ==================== 对话历史（问答对表格） ==================== */
-  let msgCache = [];
-  let msgTotal = 0;
-  let msgPage = 1;
-  let msgPageSize = 10;   // 可在 10 / 20 之间切换
+  /* ==================== 对话历史（全部会话） ==================== */
+  let convRows = [];      // 当前页
+  let convTotal = 0;
+  let convPage = 1;
+  let convPageSize = 10;   // 可在 10 / 20 之间切换
 
-  function renderMessages(container) {
+  function renderMessages(container, opts) {
     container.innerHTML = `
       <div class="page-toolbar">
         <div class="toolbar-left" style="gap:10px">
-          <select class="form-control" id="msg-field" style="width:110px" aria-label="搜索范围">
-            <option value="question">问题</option>
-            <option value="answer">回答</option>
-            <option value="user">提问人</option>
+          <select class="form-control" id="conv-field" style="width:110px" aria-label="搜索范围">
+            <option value="title">会话标题</option>
+            <option value="user">提问者</option>
           </select>
-          <div class="search-box" id="msg-search-box">
+          <div class="search-box" id="conv-search-box">
             <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6f6a61" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-            <input class="form-control" id="msg-search" placeholder="搜索问题">
-            <button type="button" class="search-clear" id="msg-search-clear" title="清空"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+            <input class="form-control" id="conv-search" placeholder="搜索会话标题">
+            <button type="button" class="search-clear" id="conv-search-clear" title="清空"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
           </div>
         </div>
       </div>
       <div class="card">
+        <div class="row-between mb-16">
+          <b>问答会话</b>
+          <button class="btn btn-sm" id="conv-refresh"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 6"/><path d="M20 4v7h-7"/></svg>刷新</button>
+        </div>
         <div class="table-wrap">
           <table class="table">
-            <thead><tr><th>ID</th><th>问题</th><th>知识库</th><th>提问者</th><th>时间</th><th>操作</th></tr></thead>
-            <tbody id="msg-tbody"><tr><td colspan="6" style="text-align:center;padding:36px"><span class="loading-spinner"></span></td></tr></tbody>
+            <thead><tr><th>ID</th><th>会话标题</th><th>消息数</th><th>提问者</th><th>创建时间</th><th>操作</th></tr></thead>
+            <tbody id="conv-tbody"><tr><td colspan="6" style="text-align:center;padding:36px"><span class="loading-spinner"></span></td></tr></tbody>
           </table>
         </div>
-        <div class="pagination pagination-fixed" id="msg-pagination"></div>
+        <div class="pagination pagination-fixed" id="conv-pagination"></div>
       </div>`;
 
-    const input = document.getElementById("msg-search");
-    const box = document.getElementById("msg-search-box");
+    const input = document.getElementById("conv-search");
+    const box = document.getElementById("conv-search-box");
     const syncClear = () => box.classList.toggle("has-value", input.value.length > 0);
-    const rerun = () => { msgPage = 1; loadMessages(); };
+    const rerun = () => { convPage = 1; loadConversations(false); };
     input.addEventListener("input", syncClear);
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); rerun(); }
     });
     Common.attachSearchButton(box, rerun);
-    document.getElementById("msg-search-clear").addEventListener("click", () => {
+    document.getElementById("conv-search-clear").addEventListener("click", () => {
       input.value = ""; syncClear(); rerun(); input.focus();
     });
-    const msgPlaceholders = { question: "搜索问题", answer: "搜索回答", user: "搜索提问人" };
-    document.getElementById("msg-field").addEventListener("change", (e) => {
-      input.placeholder = msgPlaceholders[e.target.value] || "搜索…";
+    const placeholders = { title: "搜索会话标题", user: "搜索提问者" };
+    document.getElementById("conv-field").addEventListener("change", (e) => {
+      input.placeholder = placeholders[e.target.value] || "搜索…";
       rerun();
     });
+    document.getElementById("conv-refresh").addEventListener("click", () => {
+      loadConversations(true).then((ok) =>
+        Common.toast(ok ? "已刷新" : "刷新失败，检查一下网络", ok ? "success" : "error"));
+    });
 
-    loadMessages();
+    // 从「用户管理」点“看提问”跳过来时，带上搜索条件
+    if (opts && opts.search) {
+      const fieldSel = document.getElementById("conv-field");
+      if (opts.field) fieldSel.value = opts.field;
+      input.value = opts.search;
+      input.placeholder = placeholders[fieldSel.value] || "搜索…";
+      syncClear();
+      convPage = 1;
+    }
+
+    loadConversations(false);
   }
 
-  async function loadMessages() {
-    const tbody = document.getElementById("msg-tbody");
+  /* keepPage=true：刷新/翻页时保留当前页；换了搜索条件则回到第 1 页 */
+  async function loadConversations(keepPage) {
+    const tbody = document.getElementById("conv-tbody");
     if (!tbody) return;
-    // 服务端分页 + 服务端搜索：只取当前页，问答再多也不会把整张表拉进浏览器
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:36px"><span class="loading-spinner"></span></td></tr>`;
+    if (!keepPage) convPage = 1;
     const params = new URLSearchParams({
-      limit: String(msgPageSize),
-      offset: String((msgPage - 1) * msgPageSize),
+      limit: String(convPageSize),
+      offset: String((convPage - 1) * convPageSize),
+      field: document.getElementById("conv-field")?.value || "title",
     });
-    const keyword = (document.getElementById("msg-search")?.value || "").trim();
-    if (keyword) {
-      params.set("q", keyword);
-      params.set("field", document.getElementById("msg-field")?.value || "question");
-    }
+    const keyword = (document.getElementById("conv-search")?.value || "").trim();
+    if (keyword) params.set("q", keyword);
     try {
-      const data = await API.request("GET", `/api/chat/admin/messages?${params.toString()}`);
-      msgCache = data.items || [];
-      msgTotal = data.total || 0;
-      const totalPages = Math.max(1, Math.ceil(msgTotal / msgPageSize));
-      if (msgPage > totalPages) {
-        msgPage = totalPages;
-        await loadMessages();
-        return;
-      }
-      renderMsgTable();
+      const data = await API.request("GET", `/api/chat/admin/conversations?${params.toString()}`);
+      convRows = data.items || [];
+      convTotal = data.total || 0;
+      renderConvTable();
+      return true;
     } catch (err) {
       tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:36px;color:var(--danger)">${Common.escapeHtml(err.message)}</td></tr>`;
+      Common.renderPagination("conv-pagination", 0, 1, convPageSize, () => {}, {});
+      return false;
     }
   }
 
-  function renderMsgTable() {
-    const tbody = document.getElementById("msg-tbody");
+  function renderConvTable() {
+    const tbody = document.getElementById("conv-tbody");
     if (!tbody) return;
-    const start = (msgPage - 1) * msgPageSize;
+    const totalPages = Math.max(1, Math.ceil(convTotal / convPageSize));
+    if (convPage > totalPages) { convPage = totalPages; return loadConversations(true); }
+    const start = (convPage - 1) * convPageSize;
+    const keyword = (document.getElementById("conv-search")?.value || "").trim();
 
-    if (!msgCache.length) {
-      tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:36px;color:var(--text-3)">暂无对话记录</td></tr>`;
+    if (!convRows.length) {
+      tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:36px;color:var(--text-3)">${keyword ? "没有匹配的会话" : "暂无会话"}</td></tr>`;
     } else {
-      tbody.innerHTML = msgCache.map((m, i) => `
+      // 编号 = 当前位置（不是数据库 id）：删掉一条后重新拉取即自动重排
+      tbody.innerHTML = convRows.map((c, i) => `
         <tr>
           <td>${start + i + 1}</td>
-          <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${Common.escapeHtml(m.question)}">${Common.escapeHtml(m.question)}</td>
-          <td>${Common.escapeHtml(m.knowledge_base || "全部知识库")}</td>
-          <td>${Common.escapeHtml(m.real_name || m.username)}</td>
-          <td class="muted">${Common.fmtTime(m.created_at)}</td>
-          <td><button class="ops-link edit" data-detail="${m.id}">详情</button></td>
+          <td title="${Common.escapeHtml(c.title)}" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Common.escapeHtml(c.title)}</td>
+          <td class="muted">${c.message_count || 0}</td>
+          <td>${Common.escapeHtml(c.real_name || c.username || "-")}</td>
+          <td class="muted">${Common.fmtTime(c.created_at)}</td>
+          <td>
+            <button class="ops-link edit" data-view="${c.id}">查看</button>
+            <button class="ops-link del" data-del="${c.id}">删除</button>
+          </td>
         </tr>`).join("");
     }
 
-    tbody.querySelectorAll("[data-detail]").forEach((b) =>
-      b.addEventListener("click", () => viewMsgDetail(msgCache.find((m) => m.id === Number(b.dataset.detail)))));
+    tbody.querySelectorAll("[data-view]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const idx = convRows.findIndex((c) => c.id === Number(b.dataset.view));
+        viewConversation(Number(b.dataset.view), start + idx + 1);
+      }));
+    tbody.querySelectorAll("[data-del]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const row = convRows.find((c) => c.id === Number(b.dataset.del));
+        removeConversation(Number(b.dataset.del), row ? row.title : "");
+      }));
 
-    renderPagination("msg-pagination", msgTotal, Math.max(1, Math.ceil(msgTotal / msgPageSize)), msgPage, (p) => {
-      msgPage = p; loadMessages();
+    Common.renderPagination("conv-pagination", convTotal, convPage, convPageSize, (p) => {
+      convPage = p;
+      loadConversations(true);
     }, {
-      pageSize: msgPageSize,
       sizeOptions: [10, 20],
-      onSizeChange: (s) => { msgPageSize = s; msgPage = 1; loadMessages(); },
+      onSizeChange: (s) => { convPageSize = s; convPage = 1; loadConversations(false); },
     });
   }
 
-  function viewMsgDetail(m) {
-    if (!m) return;
-    Common.openModal(`
-      <div class="modal-header">
-        <h3>对话详情</h3>
-        <button class="modal-close" data-close>×</button>
-      </div>
-      <div style="display:flex;flex-direction:column;gap:14px">
-        <div>
-          <div class="muted mb-8" style="font-weight:600">提问</div>
-          <div style="padding:12px 14px;background:#faf9f7;border-radius:10px;line-height:1.7">${Common.escapeHtml(m.question)}</div>
+  async function viewConversation(id, no) {
+    try {
+      const msgs = await API.request("GET", `/api/chat/admin/conversations/${id}/messages`);
+      Common.openModal(`
+        <div class="modal-header">
+          <h3>会话 #${no} · 共 ${msgs.length} 条消息</h3>
+          <button class="modal-close" data-close>×</button>
         </div>
-        <div>
-          <div class="muted mb-8" style="font-weight:600">回答</div>
-          <div class="md-body" style="padding:12px 14px;background:#e7eff1;border-radius:10px;line-height:1.7">${Markdown.render(m.answer || "-")}</div>
+        <div style="max-height:56vh;overflow-y:auto;display:flex;flex-direction:column;gap:10px">
+          ${msgs.length ? msgs.map((m) => `
+            <div class="msg-row ${m.role === "user" ? "" : "msg-assistant"}">
+              <div class="msg-role">${m.role === "user" ? "提问" : "助教"}</div>
+              <div class="${m.role === "assistant" ? "msg-content md-body" : "msg-content"}">${m.role === "assistant" ? Markdown.render(m.content) : Common.escapeHtml(m.content)}</div>
+              <div class="muted" style="font-size:12px;margin-top:6px">${Common.fmtTime(m.created_at)}${m.interrupted ? " · 生成被中断" : ""}</div>
+            </div>`).join("") : `<div class="empty-state"><p>该会话暂无消息</p></div>`}
         </div>
-        <div>
-          <div class="muted mb-8" style="font-weight:600">知识库</div>
-          <div style="font-size:13px">${Common.escapeHtml(m.knowledge_base || "全部知识库")}</div>
-        </div>
-        <div>
-          <div class="muted mb-8" style="font-weight:600">时间</div>
-          <div style="font-size:13px">${Common.fmtTime(m.created_at)}</div>
-        </div>
-      </div>
-      <div class="modal-footer"><button class="btn" data-close>关闭</button></div>
-    `, { size: "modal-lg", onOpen: (box) => {
-      box.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", Common.closeModal));
-    }});
+        <div class="modal-footer"><button class="btn" data-close>关闭</button></div>
+      `, { size: "modal-lg", onOpen: (box) => {
+        box.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", Common.closeModal));
+      }});
+    } catch (err) { Common.toast(err.message, "error"); }
+  }
+
+  async function removeConversation(id, title) {
+    const ok = await Common.confirmDialog({
+      title: "删除会话",
+      message: `将删除会话「${Common.escapeHtml(title || "#" + id)}」及其全部消息，不可恢复。确认？`,
+      okText: "删除",
+    });
+    if (!ok) return;
+    try {
+      await API.request("DELETE", `/api/chat/admin/conversations/${id}`);
+      Common.toast("已删除", "success");
+      loadConversations(true);
+    } catch (err) { Common.toast(err.message, "error"); }
   }
 
   /* ==================== 反馈（学生提问未答上的问题） ==================== */
-  let uqCache = [];
+  let uqRows = [];      // 当前页
+  let uqTotal = 0;
   let uqPage = 1;
   let uqPageSize = 10;   // 可在 10 / 20 之间切换
   let uqStatus = "";
@@ -884,6 +965,7 @@ const AdminView = (() => {
         <button class="fb-tab active" data-tab="">全部</button>
         <button class="fb-tab" data-tab="pending">处理中</button>
         <button class="fb-tab" data-tab="resolved">已解决</button>
+        <button class="fb-tab" data-tab="clusters">按问题聚类</button>
       </div>
       <div id="uq-list"><div class="fb-loading"><span class="loading-spinner"></span></div></div>
       <div class="pagination pagination-fixed" id="uq-pagination"></div>`;
@@ -895,8 +977,10 @@ const AdminView = (() => {
       uqPage = 1;
       document.querySelectorAll(".fb-tab").forEach((b) =>
         b.classList.toggle("active", b === btn));
-      loadUnanswered();
+      if (uqStatus === "clusters") loadClusters();
+      else loadUnanswered();
     });
+    uqPage = 1;
     loadUnanswered();
   }
 
@@ -905,14 +989,59 @@ const AdminView = (() => {
     if (!list) return;
     list.innerHTML = `<div class="fb-loading"><span class="loading-spinner"></span></div>`;
     try {
-      const query = uqStatus ? `?status=${encodeURIComponent(uqStatus)}` : "";
+      const params = new URLSearchParams({
+        limit: String(uqPageSize),
+        offset: String((uqPage - 1) * uqPageSize),
+      });
+      if (uqStatus) params.set("status", uqStatus);
       const [data, stats] = await Promise.all([
-        API.request("GET", `/api/admin/unanswered${query}`),
+        API.request("GET", `/api/admin/unanswered?${params.toString()}`),
         API.request("GET", "/api/admin/unanswered/stats").catch(() => null),
       ]);
-      uqCache = (data.items || []).slice();
+      uqRows = data.items || [];
+      uqTotal = data.total || 0;
+      const totalPages = Math.max(1, Math.ceil(uqTotal / uqPageSize));
+      if (uqPage > totalPages) { uqPage = totalPages; return loadUnanswered(); }
       renderUqStats(stats);
       renderUqList();
+    } catch (err) {
+      list.innerHTML = `<div class="fb-empty"><p style="color:var(--danger)">${Common.escapeHtml(err.message)}</p></div>`;
+    }
+  }
+
+  /* 聚类视图：问法不同但意思相近的问题并成一组，按人数排 */
+  async function loadClusters() {
+    const list = document.getElementById("uq-list");
+    if (!list) return;
+    list.innerHTML = `<div class="fb-loading"><span class="loading-spinner"></span></div>`;
+    const pag = document.getElementById("uq-pagination");
+    if (pag) pag.innerHTML = "";
+    try {
+      const [data, stats] = await Promise.all([
+        API.request("GET", "/api/admin/unanswered/clusters?status=pending"),
+        API.request("GET", "/api/admin/unanswered/stats").catch(() => null),
+      ]);
+      renderUqStats(stats);
+      const items = data.items || [];
+      if (!items.length) {
+        list.innerHTML = `<div class="fb-empty"><p>没有待处理的问题，聚类里暂时没东西可看</p></div>`;
+        return;
+      }
+      list.innerHTML = items.map((g) => `
+        <div class="fb-item">
+          <div class="fb-head">
+            <span class="fb-badge" style="background:#e7eff1;color:#17505e">${g.count} 人问过</span>
+            <b class="fb-q" title="${Common.escapeHtml(g.question)}">${Common.escapeHtml(g.question)}</b>
+            <span class="fb-time">${Common.fmtTime(g.latest_at)}</span>
+          </div>
+          <div class="fb-meta">
+            ${g.course ? `知识库：${Common.escapeHtml(g.course)}` : "未关联知识库"}
+            ${g.creators && g.creators.length ? ` · 提问者：${g.creators.map((c) => Common.escapeHtml(c)).join("、")}` : ""}
+          </div>
+          ${g.count > 1
+            ? `<div class="fb-answer" style="background:#faf9f7;line-height:1.9">${g.variants.map((v) => `<div style="font-size:13px">· ${Common.escapeHtml(v)}</div>`).join("")}</div>`
+            : `<div class="fb-wait-tip"><span>只有一个人问过</span></div>`}
+        </div>`).join("");
     } catch (err) {
       list.innerHTML = `<div class="fb-empty"><p style="color:var(--danger)">${Common.escapeHtml(err.message)}</p></div>`;
     }
@@ -924,10 +1053,10 @@ const AdminView = (() => {
     if (!el) return;
     const pending = stats && stats.pending != null
       ? stats.pending
-      : uqCache.filter((x) => x.status === "pending").length;
+      : 0;
     const resolved = stats && stats.resolved != null
       ? stats.resolved
-      : uqCache.filter((x) => x.status === "resolved").length;
+      : 0;
     const ICONS = {
       clock: `<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>`,
       check: `<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>`,
@@ -947,12 +1076,9 @@ const AdminView = (() => {
   function renderUqList() {
     const list = document.getElementById("uq-list");
     if (!list) return;
-    const totalPages = Math.max(1, Math.ceil(uqCache.length / uqPageSize));
-    if (uqPage > totalPages) uqPage = totalPages;
-    const start = (uqPage - 1) * uqPageSize;
-    const pageRows = uqCache.slice(start, start + uqPageSize);
+    const totalPages = Math.max(1, Math.ceil(uqTotal / uqPageSize));
 
-    if (!pageRows.length) {
+    if (!uqRows.length) {
       list.innerHTML = `<div class="fb-empty">
         <div class="fb-empty-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
         <p>${uqStatus === "pending"
@@ -963,11 +1089,11 @@ const AdminView = (() => {
       </div>`;
       renderPagination("uq-pagination", 0, 1, 1, () => {}, {
         pageSize: uqPageSize, sizeOptions: [10, 20],
-        onSizeChange: (s) => { uqPageSize = s; uqPage = 1; renderUqList(); },
+        onSizeChange: (s) => { uqPageSize = s; uqPage = 1; loadUnanswered(); },
       });
       return;
     }
-    list.innerHTML = pageRows.map((q) => `
+    list.innerHTML = uqRows.map((q) => `
       <div class="fb-item">
         <div class="fb-head">
           ${q.status === "resolved" ? `<span class="fb-badge fb-badge-done">已解决</span>` : ""}
@@ -985,16 +1111,16 @@ const AdminView = (() => {
       </div>`).join("");
 
     list.querySelectorAll("[data-gen]").forEach((b) =>
-      b.addEventListener("click", () => openGenerateGuide(uqCache.find((x) => x.id === Number(b.dataset.gen)))));
+      b.addEventListener("click", () => openGenerateGuide(uqRows.find((x) => x.id === Number(b.dataset.gen)))));
     list.querySelectorAll("[data-del]").forEach((b) =>
-      b.addEventListener("click", () => removeUq(uqCache.find((x) => x.id === Number(b.dataset.del)))));
+      b.addEventListener("click", () => removeUq(uqRows.find((x) => x.id === Number(b.dataset.del)))));
 
-    renderPagination("uq-pagination", uqCache.length, totalPages, uqPage, (p) => {
-      uqPage = p; renderUqList();
+    renderPagination("uq-pagination", uqTotal, totalPages, uqPage, (p) => {
+      uqPage = p; loadUnanswered();
     }, {
       pageSize: uqPageSize,
       sizeOptions: [10, 20],
-      onSizeChange: (s) => { uqPageSize = s; uqPage = 1; renderUqList(); },
+      onSizeChange: (s) => { uqPageSize = s; uqPage = 1; loadUnanswered(); },
     });
   }
 
@@ -1006,7 +1132,7 @@ const AdminView = (() => {
         <h3 style="font-size:17px;margin:0">生成回答</h3>
         <button class="modal-close" data-close>×</button>
       </div>
-      <div style="background:#faf9f7;border:1px solid #e6e3dc;border-radius:10px;padding:14px 16px;font-size:15px;line-height:1.75;color:#1d1b18">${Common.escapeHtml(q.question)}</div>
+      <div style="background:#faf9f7;border:1px solid #e6e3dc;border-radius:10px;padding:14px 16px;font-size:15px;line-height:1.75">${Common.escapeHtml(q.question)}</div>
       <div class="modal-footer" style="margin-top:20px;justify-content:flex-end;gap:10px">
         <button class="btn" data-go-doc>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
@@ -1090,14 +1216,14 @@ const AdminView = (() => {
   }
 
   /* ==================== 分派 ==================== */
-  function render(container, sub) {
+  function render(container, sub, opts) {
     stopKbTimer();   // 离开知识库管理即停止轮询
     if (sub === "users") renderUsers(container);
     else if (sub === "overview") renderOverview(container);
     else if (sub === "kb_table") renderKbTable(container);
-    else if (sub === "conversations") renderMessages(container);
+    else if (sub === "conversations") renderMessages(container, opts);
     else if (sub === "unanswered") renderUnanswered(container);
   }
 
-  return { render };
+  return { render, destroy: stopKbTimer };
 })();

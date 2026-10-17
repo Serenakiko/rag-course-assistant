@@ -23,14 +23,20 @@ const DocumentsView = (() => {
             </button>
           </div>
         </div>
+        ${API.getUser()?.role === "admin" ? `
+        <div class="toolbar-right">
+          <button class="btn btn-primary" id="doc-upload">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>上传文档
+          </button>
+        </div>` : ""}
       </div>
       <div class="card">
         <div class="table-wrap">
           <table class="table">
             <thead>
-              <tr><th>ID</th><th>文件名</th><th>所属知识库</th><th>类型</th><th>大小</th><th>分块数</th><th>上传时间</th><th>操作</th></tr>
+              <tr><th>ID</th><th>文件名</th><th>所属知识库</th><th>类型</th><th>大小</th><th>上传时间</th><th>操作</th></tr>
             </thead>
-            <tbody id="doc-tbody"><tr><td colspan="8" style="text-align:center;padding:36px"><span class="loading-spinner"></span></td></tr></tbody>
+            <tbody id="doc-tbody"><tr><td colspan="7" style="text-align:center;padding:36px"><span class="loading-spinner"></span></td></tr></tbody>
           </table>
         </div>
         <div class="pagination pagination-fixed" id="doc-pagination"></div>
@@ -54,7 +60,103 @@ const DocumentsView = (() => {
       doDocSearch();
     });
 
+    const upBtn = document.getElementById("doc-upload");
+    if (upBtn) upBtn.addEventListener("click", openDocUpload);
+
     loadDocuments();
+  }
+
+  /* 上传文档：先选知识库，再选文件（学生端的弹窗 + 一个库下拉） */
+  async function openDocUpload() {
+    let bases = [];
+    try {
+      bases = await API.request("GET", "/api/knowledge/bases");
+    } catch (err) {
+      Common.toast(err.message, "error");
+      return;
+    }
+    const list = bases || [];
+    const onlyNew = list.length === 0;   // 一个库都没有时，直接停在「新建」上
+    const options = list
+      .map((b) => `<option value="${Common.escapeHtml(b.name)}">${Common.escapeHtml(b.name)}</option>`)
+      .join("");
+    Common.openModal(`
+      <div class="modal-header">
+        <h3>上传文档</h3>
+        <button class="modal-close" data-close>×</button>
+      </div>
+      <div class="form-group">
+        <label>上传到知识库</label>
+        <select class="form-control" id="doc-up-course" style="max-width:240px">${options}<option value="__new__"${onlyNew ? " selected" : ""}>＋ 新建知识库…</option></select>
+        <input class="form-control${onlyNew ? "" : " hidden"}" id="doc-up-newname" maxlength="128" placeholder="输入新知识库名称" style="margin-top:8px;max-width:240px">
+        <div class="form-hint">选「＋ 新建知识库」时，会上传前先建好这个库。</div>
+      </div>
+      <div class="form-group">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <button type="button" class="btn" id="doc-up-pick">选择文件</button>
+          <span class="muted" id="doc-up-files">未选择文件</span>
+        </div>
+        <input type="file" id="doc-up-input" accept=".pdf,.txt,.md,.markdown,.csv" multiple style="display:none">
+        <div class="form-hint">支持 pdf、txt、md、csv 格式，单个文件最大 20MB</div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" data-close>取消</button>
+        <button class="btn btn-primary" id="doc-up-submit" disabled>上传</button>
+      </div>
+    `, { onOpen: (box) => {
+      const input = box.querySelector("#doc-up-input");
+      const label = box.querySelector("#doc-up-files");
+      const submit = box.querySelector("#doc-up-submit");
+      const courseSel = box.querySelector("#doc-up-course");
+      const newName = box.querySelector("#doc-up-newname");
+      const syncNewName = () => {
+        const isNew = courseSel.value === "__new__";
+        newName.classList.toggle("hidden", !isNew);
+        if (isNew) newName.focus();
+      };
+      syncNewName();
+      courseSel.addEventListener("change", syncNewName);
+      box.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", Common.closeModal));
+      box.querySelector("#doc-up-pick").addEventListener("click", () => input.click());
+      input.addEventListener("change", () => {
+        const files = Array.from(input.files || []);
+        label.textContent = files.length
+          ? `已选 ${files.length} 个：${files.map((f) => f.name).join("、")}`
+          : "未选择文件";
+        submit.disabled = files.length === 0;
+      });
+      submit.addEventListener("click", async () => {
+        const files = Array.from(input.files || []);
+        if (!files.length) return;
+        let course = courseSel.value;
+        if (course === "__new__") {
+          course = newName.value.trim();
+          if (!course) return Common.toast("请输入新知识库名称", "error");
+          try {
+            await API.request("POST", "/api/knowledge/bases", { name: course, description: "" });
+          } catch (err) {
+            return Common.toast(`建库失败：${err.message}`, "error");
+          }
+        }
+        submit.disabled = true;
+        submit.textContent = "上传中…";
+        let ok = 0;
+        for (const file of files.filter((f) => /\.(pdf|txt|md|markdown|csv)$/i.test(f.name))) {
+          const form = new FormData();
+          form.append("file", file);
+          form.append("course", course);
+          try {
+            await API.request("POST", "/api/documents/upload", form, { form: true });
+            ok += 1;
+          } catch (err) {
+            Common.toast(`${file.name}：${err.message}`, "error");
+          }
+        }
+        if (ok) Common.toast(`已提交 ${ok} 个文件，正在解析入库…`, "success");
+        Common.closeModal();
+        loadDocuments();
+      });
+    }});
   }
 
   async function loadDocuments() {
@@ -66,7 +168,7 @@ const DocumentsView = (() => {
       if (docCache.some((d) => d.status === "processing")) startPolling();
       else stopPolling();
     } catch (err) {
-      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:36px;color:var(--danger)">${Common.escapeHtml(err.message)}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:36px;color:var(--danger)">${Common.escapeHtml(err.message)}</td></tr>`;
     }
   }
 
@@ -92,23 +194,27 @@ const DocumentsView = (() => {
     const pageRows = filtered.slice(start, start + docPageSize);
 
     if (!pageRows.length) {
-      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:36px;color:var(--text-3)">${keyword ? "没有匹配的文档" : "暂无文档"}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:36px;color:var(--text-3)">${keyword ? "没有匹配的文档" : "暂无文档"}</td></tr>`;
     } else {
       tbody.innerHTML = pageRows.map((d, i) => `
         <tr>
           <td>${start + i + 1}</td>
-          <td title="${Common.escapeHtml(d.error || "")}" style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Common.escapeHtml(d.filename)}</td>
+          <td title="${Common.escapeHtml(d.error || "")}" style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Common.escapeHtml(d.filename)}${d.status === "failed" ? ' <span class="file-type-badge" style="background:#f7ebe8;color:#a4442f">解析失败</span>' : d.status === "processing" ? ' <span class="file-type-badge">解析中</span>' : ""}</td>
           <td>${Common.escapeHtml(d.course || "-")}</td>
           <td><span class="file-type-badge">${Common.escapeHtml(d.file_type.toUpperCase())}</span></td>
           <td>${Common.fmtSize(d.file_size)}</td>
-          <td>${d.chunk_count || "-"}</td>
           <td class="muted">${Common.fmtTime(d.created_at)}</td>
-          <td><button class="ops-link del" data-del="${d.id}">删除</button></td>
+          <td>
+            ${d.status === "failed" ? `<button class="ops-link" data-retry="${d.id}">重新解析</button>` : ""}
+            <button class="ops-link del" data-del="${d.id}">删除</button>
+          </td>
         </tr>`).join("");
     }
 
     tbody.querySelectorAll("[data-del]").forEach((b) =>
       b.addEventListener("click", () => removeDoc(Number(b.dataset.del))));
+    tbody.querySelectorAll("[data-retry]").forEach((b) =>
+      b.addEventListener("click", () => retryDoc(Number(b.dataset.retry))));
 
     // 分页
     const pagEl = document.getElementById("doc-pagination");
@@ -140,6 +246,14 @@ const DocumentsView = (() => {
         });
       }
     }
+  }
+
+  async function retryDoc(id) {
+    try {
+      await API.request("POST", `/api/documents/${id}/reparse`);
+      Common.toast("已重新提交解析", "success");
+      loadDocuments();
+    } catch (err) { Common.toast(err.message, "error"); }
   }
 
   async function removeDoc(id) {
