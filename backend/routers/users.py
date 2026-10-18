@@ -11,6 +11,7 @@ from ..deps import get_current_user, require_role
 from ..models import Conversation, KnowledgeBase, Message, User
 from ..schemas import AdminUserUpdate, UserOut
 from ..security import hash_password
+from ..services.like import contains
 
 router = APIRouter()
 
@@ -41,9 +42,8 @@ def admin_list_users(
     conditions = []
     keyword = q.strip()
     if keyword:
-        like = f"%{keyword}%"
         if field == "name":
-            conditions.append(User.real_name.like(like))
+            conditions.append(contains(User.real_name, keyword))
         elif field == "role":
             # 支持“学生 / student / 管理员 / admin”，也支持只输入一个字
             key = keyword.lower()
@@ -54,7 +54,7 @@ def admin_list_users(
                 role_conds.append(User.role == "admin")
             conditions.append(or_(*role_conds) if role_conds else User.id < 0)
         else:
-            conditions.append(User.username.like(like))
+            conditions.append(contains(User.username, keyword))
 
     total = db.scalar(select(func.count(User.id)).where(*conditions)) or 0
     rows = db.scalars(

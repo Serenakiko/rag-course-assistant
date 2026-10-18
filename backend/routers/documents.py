@@ -5,8 +5,17 @@ import logging
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
-from sqlalchemy import select
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+)
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -17,6 +26,7 @@ from ..schemas import DocumentDetailOut, DocumentOut
 from ..services.chunker import split_text
 from ..services.document_parser import is_supported, parse_file
 from ..services.kb_scope import assert_writable_course
+from ..services.like import LIKE_ESCAPE, contains, escape_like
 from ..services.vector_store import (
     add_document_chunks,
     delete_document,
@@ -138,16 +148,61 @@ def process_document(doc_id: int, course: str) -> None:
         session.close()
 
 
-@router.get("", response_model=list[DocumentOut], summary="文档列表")
+@router.get("", summary="文档列表（分页 + 搜索）")
 def list_documents(
+    keyword: str = Query(default="", max_length=100),
+    field: str = Query(default="filename", max_length=16),
+    limit: int = 10,
+    offset: int = 0,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> list[Document]:
-    """管理员看全部；学生只看自己上传的，避免“能传却看不到/删不掉”。"""
-    stmt = select(Document)
+) -> dict:
+    """管理员看全部；学生只看自己上传的，避免“能传却看不到/删不掉”。
+
+    和其他列表页统一走服务端分页 + 服务端搜索。以前是整张表拉回前端再切片，
+    资料一多首屏就要传全量 JSON。processing 一起返回，前端据此决定要不要轮询
+    （只看当前页的话，进度条会漏掉别的页上正在解析的文档）。它按可见范围的**全量**
+    统计，不受当前搜索词影响——否则搜着别的词就以为解析完了。
+    """
+    if field not in ("filename", "course", "type"):
+        raise HTTPException(status_code=400, detail="field 仅支持 filename / course / type")
+    limit = min(max(limit, 1), 100)
+    offset = max(offset, 0)
+
+    # scope = 可见范围（学生只看自己上传的）；搜索条件只影响分页和 total，
+    # 不能算进 processing：那个数是「还有多少文档在解析」，跟搜什么无关。
+    scope: list = []
     if user.role != "admin":
-        stmt = stmt.where(Document.uploaded_by == user.id)
-    return list(db.scalars(stmt.order_by(Document.id.asc())))
+        scope.append(Document.uploaded_by == user.id)
+    conditions = list(scope)
+    kw = keyword.strip()
+    if kw:
+        column = {"course": Document.course, "type": Document.file_type}.get(
+            field, Document.filename
+        )
+        conditions.append(contains(column, kw))
+
+    total = db.scalar(select(func.count(Document.id)).where(*conditions)) or 0
+    processing = (
+        db.scalar(
+            select(func.count(Document.id)).where(
+                *scope, Document.status == "processing"
+            )
+        )
+        or 0
+    )
+    rows = db.scalars(
+        select(Document)
+        .where(*conditions)
+        .order_by(Document.id.asc())
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    return {
+        "total": total,
+        "processing": processing,
+        "items": [DocumentOut.model_validate(d) for d in rows],
+    }
 
 
 @router.post("/{doc_id}/reparse", summary="重新解析失败的文档（管理员 / 上传者本人）")
@@ -273,7 +328,9 @@ def remove_document(
             select(UnansweredQuestion).where(
                 UnansweredQuestion.course == doc.course,
                 UnansweredQuestion.status == "resolved",
-                UnansweredQuestion.related_points.like(f"%{stem}%"),
+                UnansweredQuestion.related_points.like(
+                    f"%{escape_like(stem)}%", escape=LIKE_ESCAPE
+                ),
             )
         ).all()
         for q in resolved_rows:

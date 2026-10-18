@@ -183,10 +183,11 @@ class Conversation(Base):
         Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     title: Mapped[str] = mapped_column(String(255), default="新会话")
-    # 会话用过的全部知识库（并集，JSON 数组），用于历史会话按知识库筛选
+    # 遗留列：以前用于「这次只在这几个知识库里检索」，前端从来没做过入口，
+    # 逻辑已从 /api/chat/ask 里删掉。列保留是为了不破坏已有数据库（NOT NULL
+    # 没服务器端默认值，删字段会让老库的 INSERT 直接失败）。新代码不再读写。
     knowledge_bases: Mapped[str] = mapped_column(Text, default="[]")
-    # 最近一轮实际选用的知识库（JSON 数组，空=全部）；补生成只按这个范围检索，
-    # 用并集会把早期选过的库也带进来，范围越补越大
+    # 遗留列，同上（补生成曾按它限定范围），现在不再使用
     last_knowledge_bases: Mapped[str] = mapped_column(
         Text, default="[]", server_default="[]"
     )

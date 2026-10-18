@@ -25,8 +25,16 @@ logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
-def _warn_default_admin() -> None:
-    """默认管理员还在用 111111 时提醒一次（本地课程项目，不改默认密码但要提示）。"""
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def _guard_default_admin() -> None:
+    """默认管理员还在用 111111 时的处理。
+
+    只监听本机（默认配置）时记一条警告就够了——这是本地课程项目的取舍。
+    一旦把 HOST 放开到 0.0.0.0 让局域网访问，一个已知密码的管理员账号就是
+    后门（登录限流只拦暴力破解，不拦已知密码），这种情况直接拒绝启动。
+    """
     from .database import SessionLocal
     from .models import User
     from .security import verify_password
@@ -38,10 +46,20 @@ def _warn_default_admin() -> None:
             .order_by(User.id)
             .first()
         )
-    if admin is not None and verify_password("111111", admin.password_hash):
-        logger.warning(
-            "管理员账号 %s 仍在使用默认密码 111111，请立即登录后修改", admin.username
+    if admin is None or not verify_password("111111", admin.password_hash):
+        return
+    if settings.HOST not in LOOPBACK_HOSTS:
+        raise RuntimeError(
+            f"管理员账号 {admin.username} 仍在使用默认密码 111111，而 HOST={settings.HOST} "
+            "允许局域网访问，服务拒绝启动。\n"
+            "先改密码再放开监听：\n"
+            "  1) 把 .env 里的 HOST 改回 127.0.0.1 并启动服务；\n"
+            "  2) 用 23040107 / 111111 登录，在「个人中心」改掉密码；\n"
+            "  3) 再把 HOST 改成 0.0.0.0 启动。"
         )
+    logger.warning(
+        "管理员账号 %s 仍在使用默认密码 111111，请立即登录后修改", admin.username
+    )
 
 
 @asynccontextmanager
@@ -53,7 +71,7 @@ async def lifespan(_app: FastAPI):
     if removed:
         logger.info("回收站清理：%s 条超过保留期", removed)
     init_seed()
-    _warn_default_admin()
+    _guard_default_admin()
     logger.info("数据库初始化完成：%s", settings.DB_PATH)
     yield
 

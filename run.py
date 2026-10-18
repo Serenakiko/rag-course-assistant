@@ -8,8 +8,9 @@ from __future__ import annotations
 import argparse
 import socket
 import sys
+import time
 import webbrowser
-from threading import Timer
+from threading import Thread
 
 # 用代码里真正 import 的模块名：requirements.txt 装的是 langchain-core / -chroma，
 # 没有 langchain 这个总包，之前拿它自检会让干净的虚拟环境直接启动不了
@@ -45,6 +46,24 @@ def _port_in_use(host: str, port: int) -> bool:
         return sock.connect_ex((target, port)) == 0
 
 
+def _open_browser_when_listening(url: str, host: str, port: int, timeout: float = 30.0) -> None:
+    """等端口真的开始监听再打开浏览器。
+
+    以前是固定 1.5 秒后直接开：模型还没加载完、或者启动直接失败（默认管理员密码
+    没改又把 HOST 放开到 0.0.0.0），用户先看到一个打不开的页面，还得回头翻报错。
+    服务起不来的话，这个线程自己超时退出，不会开出一个废页面。
+    """
+    target = "127.0.0.1" if host in ("", "0.0.0.0", "::") else host
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.3)
+            if sock.connect_ex((target, port)) == 0:
+                webbrowser.open(url)
+                return
+        time.sleep(0.4)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="智答系统（基于 RAG 大模型的智能问答）")
     parser.add_argument("--reload", action="store_true", help="开发模式：代码修改后自动重启")
@@ -77,15 +96,35 @@ def main() -> None:
     print()
 
     if not args.no_browser:
-        Timer(1.5, lambda: webbrowser.open(url)).start()
+        Thread(
+            target=_open_browser_when_listening,
+            args=(url, settings.HOST, port),
+            daemon=True,
+        ).start()
 
-    uvicorn.run(
-        "backend.main:app",
-        host=settings.HOST,
-        port=port,
-        reload=args.reload,
-        log_level="info",
-    )
+    # 必须是单进程：会话的「新请求顶掉旧请求」靠进程内字典（chat._gen_seq），
+    # 多 worker 时每个 worker 各记一份，会退化成两条答案、顺序错乱。
+    try:
+        uvicorn.run(
+            "backend.main:app",
+            host=settings.HOST,
+            port=port,
+            reload=args.reload,
+            log_level="info",
+        )
+    except SystemExit as exc:
+        # 启动失败（典型：默认管理员密码没改又把 HOST 放开到 0.0.0.0）时，
+        # uvicorn 打印完原因就 sys.exit(3)。如果服务是被隐藏窗口拉起来的
+        # （计划任务 / 自己的自启脚本），那段报错没人看得见，这里补一条能照着做的提示。
+        if exc.code:
+            print()
+            print("=" * 64)
+            print("  服务没能启动，具体原因见上面的报错。")
+            print("  如果是「管理员仍在使用默认密码 111111」：")
+            print("    1) 把 .env 里的 HOST 改回 127.0.0.1，启动并登录  23040107 / 111111")
+            print("    2) 在「个人中心」改掉密码，再把 HOST 改成 0.0.0.0")
+            print("=" * 64)
+        raise
 
 
 if __name__ == "__main__":

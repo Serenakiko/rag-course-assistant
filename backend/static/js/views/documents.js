@@ -2,7 +2,9 @@
 const DocumentsView = (() => {
   let pollTimer = null;
   let pollCount = 0;   // 轮询次数上限：解析卡住时别让页面无限请求
-  let docCache = [];
+  let docRows = [];       // 当前这一页（服务端已切好）
+  let docTotal = 0;       // 匹配总数
+  let docProcessing = 0;  // 全量里正在解析的条数：决定要不要轮询
   let docPage = 1;
   let docPageSize = 10;
 
@@ -45,7 +47,7 @@ const DocumentsView = (() => {
     const input = document.getElementById("doc-search");
     const box = document.getElementById("doc-search-box");
     const syncClear = () => box.classList.toggle("has-value", input.value.length > 0);
-    const doDocSearch = () => { docPage = 1; renderDocTableRows(); };
+    const doDocSearch = () => { docPage = 1; loadDocuments(); };
     input.addEventListener("input", syncClear);
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); doDocSearch(); }
@@ -154,49 +156,56 @@ const DocumentsView = (() => {
         }
         if (ok) Common.toast(`已提交 ${ok} 个文件，正在解析入库…`, "success");
         Common.closeModal();
+        // 新文档按 id 排在最末页，而且当前搜索词通常也匹配不上它：既回第一页、
+        // 又清掉搜索，否则刚传完还是「没有匹配的文档」，看着像没传成功
+        docPage = 1;
+        const searchEl = document.getElementById("doc-search");
+        if (searchEl) searchEl.value = "";
+        const searchBox = document.getElementById("doc-search-box");
+        if (searchBox) searchBox.classList.remove("has-value");
         loadDocuments();
       });
     }});
   }
 
+  /* 文档列表走服务端分页 + 服务端搜索，和知识库/会话保持一致 */
   async function loadDocuments() {
     const tbody = document.getElementById("doc-tbody");
     if (!tbody) return;
+    const keyword = (document.getElementById("doc-search")?.value || "").trim();
+    const field = document.getElementById("doc-field")?.value || "filename";
+    const params = new URLSearchParams({
+      field,
+      limit: String(docPageSize),
+      offset: String((docPage - 1) * docPageSize),
+    });
+    if (keyword) params.set("keyword", keyword);
     try {
-      docCache = await API.request("GET", "/api/documents");
+      const data = await API.request("GET", `/api/documents?${params.toString()}`);
+      docRows = (data && data.items) || [];
+      docTotal = (data && data.total) || 0;
+      docProcessing = (data && data.processing) || 0;
+      const totalPages = Math.max(1, Math.ceil(docTotal / docPageSize));
+      if (docPage > totalPages) { docPage = totalPages; return loadDocuments(); }
       renderDocTableRows();
-      if (docCache.some((d) => d.status === "processing")) startPolling();
+      // 轮询看全量的 processing 数：正在解析的文档可能落在别的页上
+      if (docProcessing > 0) startPolling();
       else stopPolling();
     } catch (err) {
       tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:36px;color:var(--danger)">${Common.escapeHtml(err.message)}</td></tr>`;
     }
   }
 
-  function filteredDocs() {
-    const keyword = (document.getElementById("doc-search")?.value || "").trim().toLowerCase();
-    if (!keyword) return docCache;
-    const field = document.getElementById("doc-field")?.value || "filename";
-    return docCache.filter((d) => {
-      if (field === "course") return (d.course || "").toLowerCase().includes(keyword);
-      if (field === "type") return (d.file_type || "").toLowerCase().includes(keyword);
-      return (d.filename || "").toLowerCase().includes(keyword);
-    });
-  }
-
   function renderDocTableRows() {
     const tbody = document.getElementById("doc-tbody");
     if (!tbody) return;
     const keyword = (document.getElementById("doc-search")?.value || "").trim();
-    const filtered = filteredDocs();
-    const totalPages = Math.max(1, Math.ceil(filtered.length / docPageSize));
-    if (docPage > totalPages) docPage = totalPages;
-    const start = (docPage - 1) * docPageSize;
-    const pageRows = filtered.slice(start, start + docPageSize);
+    const start = (docPage - 1) * docPageSize;   // 服务端已经切好页，这里只算行号
 
-    if (!pageRows.length) {
+    if (!docRows.length) {
       tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:36px;color:var(--text-3)">${keyword ? "没有匹配的文档" : "暂无文档"}</td></tr>`;
     } else {
-      tbody.innerHTML = pageRows.map((d, i) => `
+      tbody.innerHTML = docRows.map((d, i) => `
         <tr>
           <td>${start + i + 1}</td>
           <td title="${Common.escapeHtml(d.error || "")}" style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Common.escapeHtml(d.filename)}${d.status === "failed" ? ' <span class="file-type-badge" style="background:#f7ebe8;color:#a4442f">解析失败</span>' : d.status === "processing" ? ' <span class="file-type-badge">解析中</span>' : ""}</td>
@@ -219,13 +228,14 @@ const DocumentsView = (() => {
     tbody.querySelectorAll("[data-retry]").forEach((b) =>
       b.addEventListener("click", () => retryDoc(Number(b.dataset.retry))));
 
-    // 分页：和全站一致，只显示当前这一个页码
-    Common.renderPagination("doc-pagination", filtered.length, docPage, docPageSize, (p) => {
+    // 分页：和全站一致，只显示当前这一个页码，也不显示「第 x/y 页」
+    Common.renderPagination("doc-pagination", docTotal, docPage, docPageSize, (p) => {
       docPage = p;
-      renderDocTableRows();
+      loadDocuments();
     }, {
       sizeOptions: [10, 20],
-      onSizeChange: (s) => { docPageSize = s; docPage = 1; renderDocTableRows(); },
+      hidePageInfo: true,
+      onSizeChange: (s) => { docPageSize = s; docPage = 1; loadDocuments(); },
     });
   }
 

@@ -811,17 +811,14 @@ body.nav-open .nav-backdrop { display: block; }
   align-content: start; margin-bottom: 0; padding-right: 4px;
 }
 
-/* ---------- 智能问答侧边栏：会话列表滚动条常显，最后一条不再被硬切断 ---------- */
+/* ---------- 智能问答侧边栏：会话列表可滚（滚动条已全局隐藏），最后一条不再被硬切断 ---------- */
 .chat-sessions-wrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
-.chat-sessions { flex: 1 1 auto; min-height: 0; scrollbar-width: thin; scrollbar-color: #d8d4cb transparent; padding-bottom: 10px; }
+.chat-sessions { flex: 1 1 auto; min-height: 0; padding-bottom: 10px; }
 /* 底部渐隐：列表比可视区高时，最后一条淡出而不是被容器底边硬切 */
 .chat-sessions-fade {
   position: absolute; left: 0; right: 0; bottom: 0; height: 26px; pointer-events: none;
   background: linear-gradient(to bottom, rgba(250, 249, 247, 0), #faf9f7 88%);
 }
-.chat-sessions::-webkit-scrollbar { width: 8px; }
-.chat-sessions::-webkit-scrollbar-thumb { background: #d8d4cb; border-radius: 4px; }
-.chat-sessions::-webkit-scrollbar-track { background: transparent; }
 
 /* 分页条：只有一个页码按钮，箭头和页码对齐更紧凑 */
 .pagination .page-btn[data-page].active { min-width: 34px; }

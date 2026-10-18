@@ -24,6 +24,10 @@ data/
 .idea/
 *.swp
 
+# 已废弃的开机自启脚本：文件已从仓库删除，这里再挡一层，防止编辑器/脚本
+# 重新生成后被 git add -A 又加回去（真想恢复就删掉这一行）
+autostart_silent.vbs
+
 # 系统
 Thumbs.db
 .DS_Store

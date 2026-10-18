@@ -25,12 +25,16 @@ from ..schemas import (
 )
 from ..services import rag_service
 from ..services.kb_scope import allowed_course_names
+from ..services.like import contains
 from ..services.rag_service import is_unmatched_answer
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# 每个会话的生成序号：新请求一进来就顶掉旧序号，旧事件流收尾时不再落库
+# 每个会话的生成序号：新请求一进来就顶掉旧序号，旧事件流收尾时不再落库。
+# 注意：这是**进程内**状态，必须单 worker 跑（run.py 默认就是单进程）。
+# 换成 uvicorn --workers N 后每个 worker 各有一份，"顶掉旧流"会失效，
+# 表现为偶尔出现两条答案、顺序错乱——真要横向扩展就得把序号落库。
 _gen_counter = itertools.count(1)
 
 # 一个字都没生成就结束时落库的占位提示：它不是回答，不该当上下文喂给模型
@@ -131,32 +135,74 @@ def create_session(
     return conv
 
 
-@router.get("/unanswered/mine", summary="我的问题反馈（学生）")
+@router.get("/unanswered/mine", summary="我的问题反馈（学生，分页）")
 def my_unanswered(
+    status: str = "",
+    limit: int = 10,
+    offset: int = 0,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> list[dict]:
-    """当前学生的全部反馈记录（pending=待处理 / resolved=已解决）。
-    read=False 表示已解决但尚未查看，用于前端未读角标；pending 记录 read 恒为 False。"""
+) -> dict:
+    """当前学生的反馈记录：返回 {total, pending, resolved, items}。
+
+    以前一次最多给 50 条、前端按 10 条/页翻：第 51 条以后学生永远看不到，
+    「待处理 / 已解决」两个数字也跟着从这 50 条里算，跟管理员端对不上。
+    现在分页取当前页，两个计数按全量单独算。
+    read=False 表示已解决但尚未查看，用于未读角标；pending 记录 read 恒为 False。
+    """
+    if status not in ("", "pending", "resolved"):
+        raise HTTPException(status_code=400, detail="status 仅支持 pending / resolved")
+    limit = min(max(limit, 1), 100)
+    offset = max(offset, 0)
+    mine = UnansweredQuestion.created_by == user.id
+    pending = (
+        db.scalar(
+            select(func.count(UnansweredQuestion.id)).where(
+                mine, UnansweredQuestion.status == "pending"
+            )
+        )
+        or 0
+    )
+    resolved = (
+        db.scalar(
+            select(func.count(UnansweredQuestion.id)).where(
+                mine, UnansweredQuestion.status == "resolved"
+            )
+        )
+        or 0
+    )
+
+    where = [mine]
+    if status in ("pending", "resolved"):
+        where.append(UnansweredQuestion.status == status)
+    total = db.scalar(select(func.count(UnansweredQuestion.id)).where(*where)) or 0
     rows = db.scalars(
         select(UnansweredQuestion)
-        .where(UnansweredQuestion.created_by == user.id)
-        .order_by(UnansweredQuestion.id.desc())
-        .limit(50)
+        .where(*where)
+        # 按提交时间倒序（不是 id）：演示/导入数据的 id 顺序和时间不一定一致，
+        # 前端的「最近几条」靠这个顺序取
+        .order_by(UnansweredQuestion.created_at.desc(), UnansweredQuestion.id.desc())
+        .limit(limit)
+        .offset(offset)
     ).all()
-    return [
-        {
-            "id": q.id,
-            "question": q.question,
-            "course": q.course or "",
-            "status": q.status,
-            "answer": q.answer or "",
-            "created_at": q.created_at,
-            "answered_at": q.answered_at,
-            "read": q.read_at is not None,
-        }
-        for q in rows
-    ]
+    return {
+        "total": total,
+        "pending": pending,
+        "resolved": resolved,
+        "items": [
+            {
+                "id": q.id,
+                "question": q.question,
+                "course": q.course or "",
+                "status": q.status,
+                "answer": q.answer or "",
+                "created_at": q.created_at,
+                "answered_at": q.answered_at,
+                "read": q.read_at is not None,
+            }
+            for q in rows
+        ],
+    }
 
 
 @router.post("/unanswered/{qid}/read", summary="标记我的反馈已读（学生）")
@@ -182,7 +228,6 @@ def list_sessions(
     q: str = "",
     limit: int = 20,
     offset: int = 0,
-    kb: str | None = None,
     order: str = "desc",
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -198,9 +243,7 @@ def list_sessions(
     where = [Conversation.user_id == user.id]
     keyword = (q or "").strip()
     if keyword:
-        where.append(Conversation.title.like(f"%{keyword}%"))
-    if kb:
-        where.append(Conversation.knowledge_bases.like(f'%"{kb}"%'))
+        where.append(contains(Conversation.title, keyword))
 
     total = db.scalar(select(func.count(Conversation.id)).where(*where)) or 0
     # order=asc：「对话历史」按从旧到新排，编号才能是 1..n 升序；
@@ -298,11 +341,12 @@ def admin_list_conversations(
     keyword = q.strip()
     conditions = []
     if keyword:
-        like = f"%{keyword}%"
         if field == "user":
-            conditions.append(or_(User.username.like(like), User.real_name.like(like)))
+            conditions.append(
+                or_(contains(User.username, keyword), contains(User.real_name, keyword))
+            )
         else:
-            conditions.append(Conversation.title.like(like))
+            conditions.append(contains(Conversation.title, keyword))
 
     total = (
         db.scalar(
@@ -372,21 +416,6 @@ def admin_delete_conversation(
     return {"ok": True}
 
 
-def _kb_list(raw: str | None) -> list[str]:
-    """把会话里存的 knowledge_bases JSON 解析成列表。"""
-    try:
-        arr = json.loads(raw or "[]")
-        return [c for c in arr if c] if isinstance(arr, list) else []
-    except ValueError:
-        return []
-
-
-def _kb_from_conv(raw: str | None) -> str:
-    """从会话的 knowledge_bases 取第一个作为知识库名（管理端展示用）。"""
-    arr = _kb_list(raw)
-    return arr[0] if arr else ""
-
-
 @router.post("/ask", summary="智能问答（SSE 流式）")
 async def ask(
     payload: AskRequest,
@@ -408,24 +437,6 @@ async def ask(
 
     gen_token = next(_gen_counter)
     _gen_seq[conversation_id] = gen_token
-
-    selected = [c for c in payload.knowledge_bases if c]
-
-    # 本轮实际检索范围：补生成沿用上一轮自己的范围，不能用历史并集，
-    # 否则早期选过的库会把范围放大。knowledge_bases 仍存并集，只供历史筛选。
-    if payload.regenerate:
-        if selected:
-            conv.last_knowledge_bases = json.dumps(selected, ensure_ascii=False)
-        else:
-            selected = _kb_list(conv.last_knowledge_bases)
-    else:
-        conv.last_knowledge_bases = json.dumps(selected, ensure_ascii=False)
-    if selected:
-        known = _kb_list(conv.knowledge_bases)
-        merged = list(dict.fromkeys(known + selected))
-        if merged != known:
-            conv.knowledge_bases = json.dumps(merged, ensure_ascii=False)
-    db.commit()
 
     # 2. 保存用户消息；重新生成模式不重复落库提问，并删除上一条待替换的回答
     if payload.regenerate:
@@ -473,16 +484,14 @@ async def ask(
         )
     )
 
-    # 检索范围：学生只能在自己可见的知识库里检索。
+    # 检索范围：学生只能在自己可见的知识库里检索，管理员不限制（None）。
     # 不做这一步的话，"列表里看不到的知识库"照样能被提问捞出来。
-    allowed = allowed_course_names(user, db)
-    if allowed is None:
-        courses = selected or None          # 管理员：不选就是全部
-    else:
-        forbidden = [c for c in selected if c not in allowed]
-        if forbidden:
-            raise HTTPException(status_code=403, detail="没有权限检索该知识库")
-        courses = selected or allowed       # 学生：不选就限定在可见范围内
+    #
+    # 以前这里还有一段按 payload.knowledge_bases 校验的 403 分支，但校验写在
+    # 「保存用户提问」之后：越权请求会先落一条提问、再返回 403，会话里就多出
+    # 一条永远没有回答的提问（下次打开还会自动补生成）。前端从来没有发过这个
+    # 参数，这套逻辑等于白留，索性连 403 一起删掉，顺序问题也就不存在了。
+    courses = allowed_course_names(user, db)
 
     # 3. SSE 流式生成（结束时把助手回答落库）
     async def event_gen() -> AsyncGenerator[str, None]:
@@ -500,6 +509,8 @@ async def ask(
                 payload.message,
                 history,
                 courses=courses,
+                # 同一会话又发了一问：这一轮已被顶掉，别再占着一路模型跑完再丢
+                still_wanted=lambda: _gen_seq.get(conversation_id) == gen_token,
             ):
                 if event["type"] == "token":
                     answer_parts.append(event["content"])

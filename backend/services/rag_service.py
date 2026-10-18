@@ -9,7 +9,8 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import AsyncGenerator
+import weakref
+from collections.abc import AsyncGenerator, Callable
 
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage
@@ -238,9 +239,15 @@ async def is_course_related(question: str, timeout: float = 10.0) -> bool:
     先判课程词就会把它当课程问题，反而刷进反馈列表。
     """
     q = (question or "").lower()
-    if any(k.lower() in q for k in IRRELEVANT_KEYWORDS):
+    blocked = any(k.lower() in q for k in IRRELEVANT_KEYWORDS)
+    strong = any(k.lower() in q for k in COURSE_STRONG_KEYWORDS)
+    # 只命中无关词（天气/娱乐）→ 直接不相关；只命中课程词（红黑树/进程）→ 直接相关。
+    # 两组都命中（"考研面试里的多线程"、"考研 408 里的红黑树"）不能一刀切：
+    # 一刀切判无关，学生问得越贴近考试越会被拒答；判相关又会让闲话刷进反馈列表。
+    # 这种含糊的句子交给下面那个只答「是/否」的模型判定。
+    if blocked and not strong:
         return False
-    if any(k.lower() in q for k in COURSE_STRONG_KEYWORDS):
+    if strong and not blocked:
         return True
     try:
         llm = get_llm()
@@ -431,7 +438,9 @@ def _unmatched_result(question: str, docs: list[tuple[Document, float]]) -> dict
     return {"answer": content, "recommended": recommended, "matched": False}
 
 
-async def generate_answer(question: str, courses: list[str] | None = None) -> dict:
+async def _generate_answer_locked(
+    question: str, courses: list[str] | None = None
+) -> dict:
     """非流式生成一次完整回答（供管理员补充资料后"重新生成回答"使用）。
 
     返回：{"answer", "recommended", "matched", "error"}
@@ -473,7 +482,106 @@ async def generate_answer(question: str, courses: list[str] | None = None) -> di
     return {"answer": answer, "recommended": [], "matched": True}
 
 
+# 同时最多 _SLOT_COUNT 路生成：本机模型一次只吐一路 token，不限并发时排队的请求
+# 等不到第一个 token，180 秒后整批超时（前端只会看到「回答生成超时」）。
+_SLOT_COUNT = 3
+# 排队期间每隔这么久发一个 ping：前端按「收到数据」重置空闲计时，
+# 否则排在后面的请求会被前端的空闲超时（见 chat.js 的 idleTimeout）先掐掉。
+_QUEUE_PING_SECONDS = 10.0
+# 排队上限：等这么久还没拿到槽位就明确回「人多，稍后再试」。没有上限的话，
+# 排队时间不计入 LLM_TIMEOUT，学生会在前端转到总超时，最后看到一句指错方向的
+# 「回答生成超时」——他会以为是模型坏了，其实是没轮到他。
+_QUEUE_MAX_WAIT = 120.0
+
+# 闸门按事件循环缓存。不能用模块级的单个 Semaphore：asyncio 的信号量第一次
+# 真的**等过**之后就跟那个 loop 绑死（_LoopBoundMixin），换个 loop 再用会抛
+# 「bound to a different event loop」。uvicorn 只有一个循环所以没事，但 pytest
+# 每个 asyncio.run() 都是新循环，第二个"真的排队"的用例就会莫名其妙炸。
+_slot_cache: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _llm_slots() -> asyncio.Semaphore:
+    """当前事件循环的生成闸门（同时最多 _SLOT_COUNT 路）。"""
+    loop = asyncio.get_running_loop()
+    sem = _slot_cache.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(_SLOT_COUNT)
+        _slot_cache[loop] = sem
+    return sem
+
+
+async def generate_answer(question: str, courses: list[str] | None = None) -> dict:
+    """非流式生成（管理员「生成回答」用）：和流式那条路共用同一个并发闸门。
+
+    以前这里不排队，补完资料点「生成回答」会绕过闸门直接打本机模型，后台在跑
+    几路问答时这一下就是第 4、5 路。现在排队，但**最多等 _QUEUE_MAX_WAIT 秒**：
+    前端的 fetch 没有超时，无限期挂着等于按钮一直转、管理员不知道发生了什么。
+    """
+    sem = _llm_slots()
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=_QUEUE_MAX_WAIT)
+    except asyncio.TimeoutError:
+        return {"answer": "", "recommended": [], "matched": False, "error": "busy"}
+    try:
+        return await _generate_answer_locked(question, courses)
+    finally:
+        sem.release()
+
+
 async def stream_answer(
+    question: str,
+    history: list[tuple[str, str]] | None = None,
+    courses: list[str] | None = None,
+    still_wanted: Callable[[], bool] | None = None,
+) -> AsyncGenerator[dict, None]:
+    """带并发闸门的流式回答生成器：拿不到槽位时先发心跳，再排队。
+
+    产出事件同 _stream_answer_locked，额外的 {"type": "ping"} 只是保活，不参与答案。
+    排队超过 _QUEUE_MAX_WAIT 还没轮到，回一条 error 让前端别再转圈。
+
+    still_wanted：可选回调，返回 False 表示这一轮已经被同会话的新提问顶掉了。
+    排队期间和拿到槽位后各查一次——否则同一会话的两个请求里，旧的那个还要占着
+    一路模型把答案生成完，最后才发现序号不符、整个丢掉。
+    """
+    sem = _llm_slots()
+    deadline = time.monotonic() + _QUEUE_MAX_WAIT
+    while True:
+        if still_wanted is not None and not still_wanted():
+            return
+        try:
+            await asyncio.wait_for(sem.acquire(), timeout=_QUEUE_PING_SECONDS)
+            break
+        except asyncio.TimeoutError:
+            if time.monotonic() >= deadline:
+                yield {
+                    "type": "error",
+                    "message": (
+                        f"当前提问人数较多，排队超过 {_QUEUE_MAX_WAIT:.0f} 秒还没轮到，"
+                        "请稍后再发一次。"
+                    ),
+                }
+                return
+            yield {"type": "ping"}
+    if still_wanted is not None and not still_wanted():
+        # 排队期间被顶掉了：把刚拿到的槽位还回去，不生成
+        sem.release()
+        return
+    agen = _stream_answer_locked(question, history, courses)
+    try:
+        async for event in agen:
+            yield event
+    finally:
+        # 客户端断开时也要把里层生成器关掉，否则模型流会吊在那儿。
+        # 槽位放在嵌套的 finally 里释放：aclose() 自己抛异常时也不能把槽位漏掉。
+        try:
+            await agen.aclose()
+        finally:
+            sem.release()
+
+
+async def _stream_answer_locked(
     question: str,
     history: list[tuple[str, str]] | None = None,
     courses: list[str] | None = None,

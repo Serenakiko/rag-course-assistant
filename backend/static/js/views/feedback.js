@@ -1,9 +1,13 @@
 /* ============ 视图：我的反馈（学生端） ============ */
-/* 待处理 / 已解决 分区展示；统计卡 + Tab 切换；未读高亮；点击条目后标记已读 */
+/* 待处理 / 已解决 分区展示；统计卡 + Tab 切换；未读高亮；点击条目后标记已读。
+ * 分页在服务端做：以前一次最多拉 50 条再在前端切片，第 51 条以后学生永远看不到，
+ * 统计卡的数字也只按这 50 条算。现在每页按需取，两个统计数字由后端按全量返回。 */
 const FeedbackView = (() => {
-  let allItems = [];
+  let rows = [];          // 当前这一页
+  let total = 0;          // 当前 Tab 的匹配总数
+  let counts = { pending: 0, resolved: 0 };   // 全量计数（统计卡用）
   let currentTab = "all";
-  let pageSize = 10;     // 每页 10 条（分页条可切 10 / 20），三条 Tab 共用
+  let pageSize = 10;      // 每页 10 条（分页条可切 10 / 20），三条 Tab 共用
   let page = 1;
 
   async function render(container) {
@@ -26,7 +30,7 @@ const FeedbackView = (() => {
       page = 1;   // 换 Tab 回到第一页
       document.querySelectorAll(".fb-tab").forEach((b) =>
         b.classList.toggle("active", b === btn));
-      renderList();
+      load();
     });
     load();
   }
@@ -35,9 +39,21 @@ const FeedbackView = (() => {
     const list = document.getElementById("fb-list");
     if (!list) return;
     list.innerHTML = `<div class="fb-loading"><span class="loading-spinner"></span></div>`;
+    const params = new URLSearchParams({
+      limit: String(pageSize),
+      offset: String((page - 1) * pageSize),
+    });
+    if (currentTab !== "all") params.set("status", currentTab);
     try {
-      allItems = await API.request("GET", "/api/chat/unanswered/mine");
-      page = 1;
+      const data = await API.request("GET", `/api/chat/unanswered/mine?${params.toString()}`);
+      total = (data && data.total) || 0;
+      rows = (data && data.items) || [];
+      counts = {
+        pending: (data && data.pending) || 0,
+        resolved: (data && data.resolved) || 0,
+      };
+      const totalPages = Math.max(1, Math.ceil(total / pageSize));
+      if (page > totalPages) { page = totalPages; return load(); }   // 删完最后一页往回退
       renderStats();
       renderList();
     } catch (err) {
@@ -48,8 +64,6 @@ const FeedbackView = (() => {
   function renderStats() {
     const stats = document.getElementById("fb-stats");
     if (!stats) return;
-    const pending = allItems.filter((it) => it.status === "pending").length;
-    const resolved = allItems.filter((it) => it.status === "resolved").length;
     // 与首页（工作台）统计卡同款样式：白色卡片 + 浅色图标块 + 数字/标签
     const ICONS = {
       clock: `<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>`,
@@ -58,31 +72,18 @@ const FeedbackView = (() => {
     stats.innerHTML = `
       <div class="stat-card">
         <div class="stat-icon blue">${ICONS.clock}</div>
-        <div class="stat-info"><div class="stat-num">${pending}</div><div class="stat-label">待处理</div></div>
+        <div class="stat-info"><div class="stat-num">${counts.pending}</div><div class="stat-label">待处理</div></div>
       </div>
       <div class="stat-card">
         <div class="stat-icon green">${ICONS.check}</div>
-        <div class="stat-info"><div class="stat-num">${resolved}</div><div class="stat-label">已解决</div></div>
+        <div class="stat-info"><div class="stat-num">${counts.resolved}</div><div class="stat-label">已解决</div></div>
       </div>`;
   }
 
   function renderList() {
     const list = document.getElementById("fb-list");
     if (!list) return;
-    const filtered = currentTab === "all"
-      ? allItems
-      : allItems.filter((it) => it.status === currentTab);
-    const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-    if (page > totalPages) page = totalPages;   // 删除 / 切换后页码超界时回退
-    Common.renderPagination("fb-pagination", filtered.length, page, pageSize, (p) => {
-      page = p;
-      renderList();
-    }, {
-      sizeOptions: [10, 20],
-      hidePageInfo: true,   // 只留「共 N 条」，不显示「第 1/2 页」
-      onSizeChange: (s) => { pageSize = s; page = 1; renderList(); },
-    });
-    if (!filtered.length) {
+    if (!rows.length) {
       list.innerHTML = `<div class="fb-empty">
         <div class="fb-empty-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
         <p>${currentTab === "pending"
@@ -94,11 +95,10 @@ const FeedbackView = (() => {
       </div>`;
       const go = document.getElementById("fb-go-chat");
       if (go) go.addEventListener("click", () => App.navigate("chat"));
+      renderPager();
       return;
     }
-    const start = (page - 1) * pageSize;
-    const items = filtered.slice(start, start + pageSize);
-    list.innerHTML = items.map((it) => `
+    list.innerHTML = rows.map((it) => `
       <div class="fb-item ${it.status === "resolved" && !it.read ? "fb-unread" : ""}" data-id="${it.id}">
         <div class="fb-head">
           ${it.status === "resolved" ? `<span class="fb-badge fb-badge-done">已解决</span>` : ""}
@@ -114,15 +114,26 @@ const FeedbackView = (() => {
     // 点击这条反馈才标已读：进页面就全标掉的话，未读高亮和角标等于白做
     list.querySelectorAll(".fb-item").forEach((el) =>
       el.addEventListener("click", () => markRead(Number(el.dataset.id))));
+    renderPager();
+  }
+
+  function renderPager() {
+    Common.renderPagination("fb-pagination", total, page, pageSize, (p) => {
+      page = p;
+      load();
+    }, {
+      sizeOptions: [10, 20],
+      hidePageInfo: true,   // 只留「共 N 条」，不显示「第 1/2 页」
+      onSizeChange: (s) => { pageSize = s; page = 1; load(); },
+    });
   }
 
   async function markRead(id) {
-    const item = allItems.find((x) => x.id === id);
+    const item = rows.find((x) => x.id === id);
     if (!item || item.status !== "resolved" || item.read) return;
     try {
       await API.request("POST", `/api/chat/unanswered/${id}/read`);
       item.read = true;
-      renderStats();
       renderList();
     } catch { /* 忽略：下次再点 */ }
   }

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, joinedload
 
 from ..config import settings
@@ -110,7 +111,13 @@ def _question_vectors(db: Session, texts: list[str]) -> dict[str, list[float]]:
     for text, vec in zip(missing, vectors):
         vector = [float(x) for x in vec]
         out[text] = vector
-        db.add(QuestionVector(text_hash=hashes[text], text=text, vector=json.dumps(vector)))
+        # upsert：聚类是个 GET，两个标签页同时打开时会同时算同一批问题，
+        # 直接 add 会撞 text_hash 唯一索引（有 except 兜着，但那次向量就白算了）
+        db.execute(
+            sqlite_insert(QuestionVector)
+            .values(text_hash=hashes[text], text=text, vector=json.dumps(vector))
+            .on_conflict_do_nothing(index_elements=["text_hash"])
+        )
     try:
         db.commit()
     except Exception:  # noqa: BLE001
@@ -281,12 +288,12 @@ async def regenerate_answer(
     scope = allowed_course_names(q.creator, db) if q.creator is not None else None
     result = await generate_answer(q.question, courses=scope)
     if result.get("error"):
-        # 生成失败（超时 / 空回答）不能写成“已解决”，也不覆盖之前可用的答案
-        message = (
-            "生成超时了，这次没有保存回答，稍后再试"
-            if result["error"] == "timeout"
-            else "这次没生成出有效回答，检查模型服务后再试"
-        )
+        # 生成失败（排队没排上 / 超时 / 空回答）不能写成“已解决”，也不覆盖之前
+        # 可用的答案。三种原因要分开说，否则「没排上队」会被讲成「模型坏了」。
+        message = {
+            "busy": "后台正忙（同时最多 3 路生成），这次没排上队，稍后再点一次",
+            "timeout": "生成超时了，这次没有保存回答，稍后再试",
+        }.get(result["error"], "这次没生成出有效回答，检查模型服务后再试")
         return {"ok": False, "answer": "", "resolved": False, "message": message}
     if result["recommended"]:
         q.related_points = json.dumps(result["recommended"], ensure_ascii=False)
@@ -298,8 +305,12 @@ async def regenerate_answer(
         message = "回答已生成，学生那边能看到了"
         answer = result["answer"]
     else:
-        # 知识库仍未收录：清空旧回答并保持待处理，提示先补充资料
+        # 知识库仍未收录：清空旧回答并**退回待处理**。
+        # 只清 answer 不重置状态的话，一条「已解决」的记录重新生成失败后会变成
+        # 「已解决 + 空答案」，学生端点开是空白，管理员之前写好的答案也没了。
         q.answer = ""
+        q.status = "pending"
+        q.answered_at = None
         message = "知识库还没有收录相关内容，请先添加资料（上传文档或添加知识点）后再生成"
         answer = ""
     # 回答发生了变化：重新计为未读，等学生自己点开再清角标

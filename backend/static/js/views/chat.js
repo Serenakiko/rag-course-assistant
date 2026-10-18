@@ -153,6 +153,12 @@ const ChatView = (() => {
       sessionItems = (data && data.items) || [];
       sessionTotal = (data && data.total) || 0;
       sessionItems.forEach((it) => convMeta.set(it.id, it));
+      // 这个 Map 只用来「把正在看的会话钉在列表顶部」，没必要把几百个会话全记着
+      if (convMeta.size > 200) {
+        const keep = new Set(sessionItems.map((it) => it.id));
+        if (currentConvId) keep.add(currentConvId);
+        [...convMeta.keys()].forEach((id) => { if (!keep.has(id)) convMeta.delete(id); });
+      }
     } catch {
       sessionItems = [];
       sessionTotal = 0;
@@ -539,7 +545,16 @@ const ChatView = (() => {
           // 出错且已有部分内容时，保留 onError 中“部分内容 + 错误提示”的渲染结果
           scrollBottom();
         },
-      }, { regenerate, idleTimeout: 120_000, totalTimeout: 240_000 });
+      }, {
+        regenerate,
+        // 空闲超时必须**大于**后端的 LLM_TIMEOUT(180s)：这里等的是「一个字节都
+        // 没收到」，而排队段有 10 秒一次的心跳、生成段没有。冷启动加载本地模型
+        // 时首个 token 可能要一两分钟，120 秒会先把还在正常生成的请求掐掉。
+        idleTimeout: 200_000,
+        // 总超时 = 后端排队上限(120s) + LLM_TIMEOUT(180s) + 余量：排队超时由
+        // 后端给明确错误，这里只兜底「连接彻底不动了」这种真断网的情况
+        totalTimeout: 320_000,
+      });
 
       abortController = req.controller;  // 同步拿到 controller：从这一刻起「停止生成」真的能停
       await req.done;  // 本轮彻底结束（正常 / 出错 / 被停止）后才收尾

@@ -94,10 +94,13 @@ const WorkbenchView = (() => {
   async function loadStats() {
     // 我的反馈：与管理员数据概览反馈区块同款行式列表（状态徽标 + 问题 + 时间），点击进入反馈页
     try {
-      // 按提交时间倒序：id 顺序跟演示数据的时间不一致，直接切片会取错「最近」几条
-      const items = (await API.request("GET", "/api/chat/unanswered/mine") || [])
-        .slice()
-        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      // 接口返回 {total, pending, resolved, items}，列表在 items 里（曾经这里直接
+      // 当数组用，改成对象之后这块一渲染就报「slice is not a function」）
+      const data = await API.request("GET", "/api/chat/unanswered/mine?limit=50");
+      // 服务端已按提交时间倒序（created_at desc），前几条就是最近的。
+      // 以前这里再按时间排一次，但接口当时是按 id 取「最新 50 条」，两者顺序
+      // 不一致时会取错「最近 5 条」——排序口径统一交给后端。
+      const items = (data && data.items) || [];
       const listEl = document.getElementById("wb-resolved-list");
       if (listEl) {
         if (!items || !items.length) {

@@ -32,12 +32,11 @@ from ..services.document_parser import parse_file
 from ..services.recycle import snapshot_base
 from ..services.kb_scope import (
     admin_user_ids as _admin_user_ids,
-    all_course_names,
     assert_writable_course,
     can_view_point,
     point_scope_condition,
-    visible_course_names,
 )
+from ..services.like import contains
 from ..services.vector_store import (
     add_document_chunks,
     add_knowledge_point,
@@ -91,13 +90,14 @@ def page_bases(
         )
     kw = keyword.strip()
     if kw:
-        like = f"%{kw}%"
         if field == "description":
-            conditions.append(KnowledgeBase.description.like(like))
+            conditions.append(contains(KnowledgeBase.description, kw))
         elif field == "creator":
-            conditions.append(or_(User.real_name.like(like), User.username.like(like)))
+            conditions.append(
+                or_(contains(User.real_name, kw), contains(User.username, kw))
+            )
         else:
-            conditions.append(KnowledgeBase.name.like(like))
+            conditions.append(contains(KnowledgeBase.name, kw))
 
     join = select(KnowledgeBase).select_from(KnowledgeBase).outerjoin(
         User, KnowledgeBase.created_by == User.id
@@ -173,9 +173,12 @@ def list_bases(
             )
         )
     if keyword.strip():
-        like = f"%{keyword.strip()}%"
+        kw = keyword.strip()
         stmt = stmt.where(
-            or_(KnowledgeBase.name.like(like), KnowledgeBase.description.like(like))
+            or_(
+                contains(KnowledgeBase.name, kw),
+                contains(KnowledgeBase.description, kw),
+            )
         )
     stmt = stmt.order_by(KnowledgeBase.updated_at.desc(), KnowledgeBase.id.desc())
     bases = list(db.scalars(stmt))
@@ -339,12 +342,12 @@ def page_points(
     if course.strip():
         conditions.append(KnowledgePoint.course == course.strip())
     if keyword.strip():
-        like = f"%{keyword.strip()}%"
+        kw = keyword.strip()
         conditions.append(
             or_(
-                KnowledgePoint.title.like(like),
-                KnowledgePoint.content.like(like),
-                KnowledgePoint.tags.like(like),
+                contains(KnowledgePoint.title, kw),
+                contains(KnowledgePoint.content, kw),
+                contains(KnowledgePoint.tags, kw),
             )
         )
 
@@ -366,46 +369,6 @@ def page_points(
         "total": total,
         "items": [KnowledgePointOut.model_validate(p) for p in rows],
     }
-
-
-@router.get("/points", response_model=list[KnowledgePointOut], summary="知识点列表")
-def list_points(
-    keyword: str = Query(default="", max_length=100),
-    course: str = Query(default=""),
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> list[KnowledgePoint]:
-    stmt = select(KnowledgePoint)
-    # 知识点跟随所属知识库的可见性；历史课程和未分类只对创建者本人可见
-    conditions = point_scope_condition(user, db)
-    if conditions:
-        stmt = stmt.where(*conditions)
-    if keyword.strip():
-        like = f"%{keyword.strip()}%"
-        stmt = stmt.where(
-            or_(
-                KnowledgePoint.title.like(like),
-                KnowledgePoint.content.like(like),
-                KnowledgePoint.tags.like(like),
-            )
-        )
-    if course.strip():
-        stmt = stmt.where(KnowledgePoint.course == course.strip())
-    stmt = stmt.order_by(KnowledgePoint.updated_at.desc(), KnowledgePoint.id.desc())
-    return list(db.scalars(stmt))
-
-
-@router.get("/courses", summary="课程（知识库）名称列表")
-def list_courses(
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> list[str]:
-    visible = visible_course_names(user, db)
-    if visible is None:
-        # 管理员：全部知识库 + 历史课程
-        return sorted(all_course_names(db))
-    # 学生：可见知识库 + 自己（或管理员）留下的历史课程
-    return sorted(visible)
 
 
 @router.post("/points", response_model=KnowledgePointOut, summary="新增知识点")

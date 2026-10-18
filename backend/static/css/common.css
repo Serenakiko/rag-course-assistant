@@ -31,6 +31,15 @@
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
+/* ---------- 滚动条：细条、轨道透明 ----------
+   以前是全站 scrollbar-width: none：滚轮 / 触控板能滚，但**完全看不出这页还能
+   往下**，桌面端鼠标用户尤其容易以为到底了。现在保留 8px 细条：轨道透明，
+   不出现那条灰底，只在真的溢出时露出一根浅色把手当提示。 */
+* { scrollbar-width: thin; scrollbar-color: #d8d4cb transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: #d8d4cb; border-radius: 4px; }
+*::-webkit-scrollbar-track { background: transparent; }
+
 html, body { height: 100%; }
 
 body {
