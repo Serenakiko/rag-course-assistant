@@ -132,7 +132,7 @@ const Common = (() => {
     const el = typeof elId === "string" ? document.getElementById(elId) : elId;
     if (!el) return;
     opts = opts || {};
-    const sizeOptions = opts.sizeOptions && opts.sizeOptions.length ? opts.sizeOptions : [10, 20];
+    const sizeOptions = opts.sizeOptions || [];
     const totalPages = Math.max(1, Math.ceil((total || 0) / pageSize));
 
     let pages = "";
@@ -141,9 +141,9 @@ const Common = (() => {
     }
     el.innerHTML = `
       <span class="total">共 ${total || 0} 条</span>
-      <select class="page-size">
+      ${sizeOptions.length ? `<select class="page-size">
         ${sizeOptions.map((s) => `<option value="${s}" ${s === pageSize ? "selected" : ""}>${s}条/页</option>`).join("")}
-      </select>
+      </select>` : ""}
       <button class="page-btn" data-page="${current - 1}" ${current <= 1 ? "disabled" : ""}>‹</button>
       ${pages}
       <button class="page-btn" data-page="${current + 1}" ${current >= totalPages ? "disabled" : ""}>›</button>`;
@@ -160,11 +160,6 @@ const Common = (() => {
     }
   }
 
-  function roleBadge(role) {
-    const map = { student: "学生", admin: "管理员" };
-    return `<span class="badge badge-${role}">${map[role] || role}</span>`;
-  }
-
   // 头像：上传图 / 预设 emoji / 首字母
   function avatarContent(user) {
     const v = (user && user.avatar) || "";
@@ -178,5 +173,5 @@ const Common = (() => {
     return `<div class="avatar" style="width:${size}px;height:${size}px;font-size:${Math.max(13, Math.round(size * 0.42))}px;border-radius:${Math.round(size / 2)}px">${avatarContent(user)}</div>`;
   }
 
-  return { toast, escapeHtml, fmtTime, fmtSize, openModal, closeModal, alertDialog, confirmDialog, attachSearchButton, renderPagination, roleBadge, avatarContent, avatarHtml };
+  return { toast, escapeHtml, fmtTime, fmtSize, openModal, closeModal, alertDialog, confirmDialog, attachSearchButton, renderPagination, avatarContent, avatarHtml };
 })();

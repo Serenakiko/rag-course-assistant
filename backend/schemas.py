@@ -167,19 +167,8 @@ class DocumentOut(BaseModel):
 
 
 class DocumentDetailOut(DocumentOut):
-    chunks: list[dict] = []
-
-
-# ---------- 对话管理（管理员） ----------
-class AdminConversationOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    title: str
-    username: str = ""
-    real_name: str = ""
-    message_count: int = 0
-    created_at: datetime
+    chunks: list[dict] = []   # 向量库里的分块（真上传的文档才有）
+    preview: str = ""         # 分块为空时回退：直接读原文件的正文（种子文档只有记录没有分块）
 
 
 # ---------- 用户管理 ----------
@@ -200,8 +189,8 @@ class StatsOut(BaseModel):
     knowledge_points: int
     conversations: int
     messages: int
-    today_conversations: int = 0      # 今日提问数
-    daily_conversations: list[dict]    # [{date, count}]
+    today_questions: int = 0          # 今日提问数（user 消息条数）
+    daily_questions: list[dict]        # [{date, count}] 近 7 天每日提问数
     kb_doc_distribution: list[dict] = []  # [{name, count}] 知识库文档占比
     unanswered_pending: int = 0        # 待处理反馈数
     unanswered_resolved: int = 0       # 已解答反馈数

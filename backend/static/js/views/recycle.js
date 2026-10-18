@@ -4,6 +4,8 @@
  */
 const RecycleView = (() => {
   let items = [];
+  let page = 1;
+  let pageSize = 10;
 
   function render(container) {
     container.innerHTML = `
@@ -27,12 +29,13 @@ const RecycleView = (() => {
             <tbody id="recycle-tbody"><tr><td colspan="7" style="text-align:center;padding:36px"><span class="loading-spinner"></span></td></tr></tbody>
           </table>
         </div>
+        <div class="pagination pagination-fixed" id="recycle-pagination"></div>
       </div>`;
 
     const input = document.getElementById("recycle-search");
     const box = document.getElementById("recycle-search-box");
     const syncClear = () => box.classList.toggle("has-value", input.value.length > 0);
-    const rerun = () => { syncClear(); load(); };
+    const rerun = () => { page = 1; syncClear(); load(); };
     input.addEventListener("input", syncClear);
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); rerun(); }
@@ -75,13 +78,19 @@ const RecycleView = (() => {
     const tbody = document.getElementById("recycle-tbody");
     if (!tbody) return;
     const keyword = (document.getElementById("recycle-search")?.value || "").trim();
-    if (!items.length) {
+    const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+    if (page > totalPages) page = totalPages;
+    const start = (page - 1) * pageSize;
+    const pageRows = items.slice(start, start + pageSize);
+
+    if (!pageRows.length) {
       tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:36px;color:var(--text-3)">${keyword ? "没有匹配的记录" : "回收站是空的"}</td></tr>`;
+      renderPager();
       return;
     }
-    tbody.innerHTML = items.map((it, i) => `
+    tbody.innerHTML = pageRows.map((it, i) => `
       <tr>
-        <td>${i + 1}</td>
+        <td>${start + i + 1}</td>
         <td>${Common.escapeHtml(it.name || "-")}</td>
         <td class="muted">${it.points} 个知识点 · ${it.documents} 个文档</td>
         <td>${Common.escapeHtml(it.deleter_name || "-")}</td>
@@ -97,6 +106,19 @@ const RecycleView = (() => {
       b.addEventListener("click", () => restore(items.find((x) => x.id === Number(b.dataset.restore)))));
     tbody.querySelectorAll("[data-purge]").forEach((b) =>
       b.addEventListener("click", () => purge(items.find((x) => x.id === Number(b.dataset.purge)))));
+
+    renderPager();
+  }
+
+  /* 底部固定的分页条：与用户管理一致（共 N 条 + 每页条数 + 页码） */
+  function renderPager() {
+    Common.renderPagination("recycle-pagination", items.length, page, pageSize, (p) => {
+      page = p;
+      renderRows();
+    }, {
+      sizeOptions: [10, 20],
+      onSizeChange: (s) => { pageSize = s; page = 1; renderRows(); },
+    });
   }
 
   async function restore(item) {

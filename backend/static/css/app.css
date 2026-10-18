@@ -72,10 +72,6 @@ body.role-admin  .avatar { background: var(--primary); }
 .sidebar-user .logout-btn.holding { color: var(--danger); background: #f7ebe8; }
 
 /* 窄屏图标栏：用户行改成上下排列，头像在上、退出按钮在下 */
-@media (max-width: 960px) {
-  .sidebar-user-row { flex-direction: column; align-items: center; gap: 10px; }
-  .sidebar-user .logout-btn { margin-left: 0; }
-}
 
 /* ---------- 头像设置 ---------- */
 .avatar-presets { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -98,6 +94,15 @@ body.role-admin  .avatar { background: var(--primary); }
 
 .main-content { flex: 1; overflow-y: auto; padding: 24px 26px 76px; }
 
+/* 聊天页专用：页面底色压深一档，卡片才浮得起来。
+   靠 :has() 只在挂了 .chat-layout 时生效，不影响其它页面（浏览器不支持时退化成原样，
+   仍然有卡片的边框和阴影兜底）。顺便禁掉整页滚动，滚动只发生在消息区。 */
+.main-content:has(.chat-layout) {
+  background: #e9e4db; overflow: hidden;
+  display: flex; justify-content: center;  /* 卡片水平居中 */
+  padding: 20px 24px;  /* 四边对称；原来的 76px 下内边距是给列表页固定分页条留的 */
+}
+
 /* ---------- 页面通用 ---------- */
 .page-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
 .page-toolbar .filters { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
@@ -105,8 +110,15 @@ body.role-admin  .avatar { background: var(--primary); }
 
 /* 聊天界面 */
 .chat-layout {
-  height: calc(100vh - 108px); min-height: 460px; display: flex;
-  background: #fff; border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
+  /* 高度跟随主内容区（.main-content 是 flex:1，高度确定），不再用 100vh - 108px 猜：
+     header 60 + 上内边距 24 + 下内边距 76，可用其实只有 100vh - 160，算大了 52px
+     就会把整个 .main-content 撑出滚动条——以前整页能上下滚、输入框被顶出屏幕。
+     现在只有 .chat-messages 自己滚，页面本身不动。 */
+  height: 100%; min-height: 0; width: 100%; max-width: 1280px; display: flex;
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  /* 页面底色 #f6f5f2 和消息区 #f7f6f3 只差一个色阶，原来的 --shadow(0 1px 2px 5%) 等于没有，
+     卡片会跟背景糊成一片。这里用边框定出轮廓 + 大号阴影托起。 */
+  box-shadow: var(--shadow-lg); overflow: hidden;
 }
 
 /* 会话列表 */
@@ -123,6 +135,23 @@ body.role-admin  .avatar { background: var(--primary); }
 .chat-new svg { width: 16px; height: 16px; }
 .chat-new:hover { background: var(--primary-dark); transform: translateY(-1px); }
 .chat-sessions { flex: 1; overflow-y: auto; padding: 4px 10px 14px; }
+/* 会话太多时：侧边栏只放最近 20 条，搜索在本地过滤，更多去「对话历史」 */
+.chat-search { padding: 0 14px 10px; }
+.chat-search input {
+  width: 100%; padding: 8px 10px; font-size: 13px; color: var(--text-1);
+  border: 1px solid var(--border); border-radius: 6px; background: #fff;
+  transition: border-color .15s;
+}
+.chat-search input:focus { outline: none; border-color: var(--primary); }
+.chat-more { flex-shrink: 0; padding: 8px 14px 12px; border-top: 1px solid var(--border); }
+.chat-more:empty { display: none; }
+.session-more {
+  width: 100%; padding: 7px 8px; border: none; border-radius: 6px; background: none;
+  color: var(--primary); font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.session-more:hover { background: #f1efec; }
+.session-empty { padding: 16px 10px; font-size: 12.5px; line-height: 1.6; color: var(--text-3); text-align: center; }
+.session-hint { font-size: 12px; color: var(--text-3); text-align: center; }
 .session-item { padding: 10px 12px; border-radius: 6px; cursor: pointer; margin-bottom: 2px; transition: background .15s; }
 .session-item:hover { background: #f1efec; }
 .session-item.active { background: var(--primary-light); }
@@ -144,7 +173,7 @@ body.role-admin  .avatar { background: var(--primary); }
 .s-op.danger:hover { background: #f7ebe8; color: var(--danger); }
 
 /* 对话区 */
-.chat-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.chat-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .chat-messages {
   flex: 1; overflow-y: auto; padding: 28px 32px 12px;
   background: #f7f6f3;
@@ -207,7 +236,7 @@ body.role-admin  .avatar { background: var(--primary); }
 @keyframes typing { 0%, 60%, 100% { opacity: .3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-1px); } }
 
 /* 输入区 */
-.chat-input-area { padding: 6px 20px 16px; background: #faf9f7; }
+.chat-input-area { padding: 6px 20px 16px; background: #faf9f7; flex-shrink: 0; }
 .chat-input-box {
   display: flex; align-items: flex-end; gap: 10px;
   border: 1.5px solid var(--border); border-radius: 10px;
@@ -506,6 +535,8 @@ body.role-admin  .avatar { background: var(--primary); }
 .table .ops-link.edit { color: var(--primary); }
 .table .ops-link.del { color: var(--danger); margin-left: 10px; }
 .table .ops-link:hover { text-decoration: underline; }
+/* 操作列里「删除」排第一时不再缩进（文档表：删除在前，重新解析在后） */
+.table td .ops-link.del:first-child { margin-left: 0; }
 
 /* 类型 badge（文件类型） */
 .file-type-badge {
@@ -531,13 +562,15 @@ body.role-admin  .avatar { background: var(--primary); }
 .role-badge.student { background: var(--primary-light); color: var(--primary); }
 
 /* ---------- 响应式 ---------- */
+/* 断点一览：900 / 960 / 640。同一断点的规则都写在一起，改动时别只改到一半 */
 @media (max-width: 960px) {
   :root { --sidebar-w: 68px; }
   .sidebar { width: 68px; }
   .sidebar-logo .logo-text, .sidebar-logo .logo-sub, .nav-item span:not(.nav-icon), .nav-group-title, .sidebar-user .u-name { display: none; }
   .nav-item { justify-content: center; }
   .sidebar-user { padding: 10px 8px; }
-  .sidebar-user .logout-btn { padding: 8px 0; }
+  .sidebar-user-row { flex-direction: column; align-items: center; gap: 10px; }
+  .sidebar-user .logout-btn { padding: 8px 0; margin-left: 0; }
   .sidebar-user .logout-btn span { display: none; }
 }
 
@@ -684,3 +717,41 @@ body.nav-open .nav-backdrop { display: block; }
 .p-form input[readonly] + .p-pwd-toggle { display: none; }
 .p-divider { height: 1px; background: var(--border); margin: 6px 0 16px; }
 .p-card-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+
+/* ---------- 详情弹窗（文档分块 / 知识点正文） ---------- */
+.detail-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; margin-bottom: 14px; }
+.detail-meta > div { display: flex; gap: 8px; font-size: 13px; min-width: 0; }
+.detail-meta span { color: var(--text-3); flex: none; }
+.detail-meta b { color: var(--text-1); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.detail-note { margin-bottom: 12px; padding: 10px 12px; border-radius: 6px; background: #f7ebe8; color: var(--danger); font-size: 13px; line-height: 1.7; }
+.detail-text { white-space: pre-wrap; line-height: 1.9; font-size: 14px; color: var(--text-1); max-height: 56vh; overflow-y: auto; }
+.detail-chunks { max-height: 56vh; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.detail-chunk { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: #faf9f7; }
+.detail-chunk-no { font-size: 12px; color: var(--text-3); margin-bottom: 6px; }
+.detail-chunk-text { white-space: pre-wrap; font-size: 13.5px; line-height: 1.85; color: var(--text-1); word-break: break-word; }
+.kp-card[data-view] { cursor: pointer; }
+.kp-card[data-view]:hover { border-color: var(--primary); }
+
+/* ---------- 数据概览：一屏放下，不出现整页滚动 ---------- */
+/* 统计卡固定，两张图表占剩余高度（随窗口收缩），反馈卡片放不下时内部滚动。
+   以前图表高度写死 240px，加上反馈列表，整页比视口高，必须往下拉。 */
+.main-content:has(#stat-grid) {
+  display: flex; flex-direction: column; gap: 16px;
+  padding: 20px 24px; overflow-y: auto;
+}
+.main-content:has(#stat-grid) .stat-grid { flex: none; margin-bottom: 0; }
+.main-content:has(#stat-grid) .chart-row { flex: 1 1 auto; min-height: 220px; margin-bottom: 0; }
+.main-content:has(#stat-grid) .chart-card { display: flex; flex-direction: column; min-height: 0; }
+.main-content:has(#stat-grid) .chart-card h3 { margin-bottom: 10px; flex: none; }
+.main-content:has(#stat-grid) .chart-card > div:last-child {
+  flex: 1 1 auto; min-height: 0; display: flex; align-items: center; justify-content: center;
+}
+.main-content:has(#stat-grid) #chart-trend { align-items: stretch; }
+.main-content:has(#stat-grid) #chart-trend svg { width: 100%; height: 100%; }
+.main-content:has(#stat-grid) #chart-donut { overflow: hidden; }
+.main-content:has(#stat-grid) #chart-donut svg { max-height: 100%; }
+.main-content:has(#stat-grid) .donut-wrap { flex-direction: row; align-items: center; gap: 14px; }
+.main-content:has(#stat-grid) .donut-wrap > svg { width: 120px; height: 120px; flex: none; }
+.main-content:has(#stat-grid) .donut-legend { flex: 1; min-width: 0; gap: 6px; }
+.main-content:has(#stat-grid) #fb-card { flex: 0 1 auto; min-height: 0; margin-top: 0; display: flex; flex-direction: column; }
+.main-content:has(#stat-grid) #fb-list { flex: 1 1 auto; min-height: 0; max-height: 168px; overflow-y: auto; }

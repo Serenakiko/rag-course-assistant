@@ -205,12 +205,15 @@ const DocumentsView = (() => {
           <td>${Common.fmtSize(d.file_size)}</td>
           <td class="muted">${Common.fmtTime(d.created_at)}</td>
           <td>
+            <button class="ops-link" data-view="${d.id}">查看</button>
             ${d.status === "failed" ? `<button class="ops-link" data-retry="${d.id}">重新解析</button>` : ""}
             <button class="ops-link del" data-del="${d.id}">删除</button>
           </td>
         </tr>`).join("");
     }
 
+    tbody.querySelectorAll("[data-view]").forEach((b) =>
+      b.addEventListener("click", () => openDocDetail(Number(b.dataset.view))));
     tbody.querySelectorAll("[data-del]").forEach((b) =>
       b.addEventListener("click", () => removeDoc(Number(b.dataset.del))));
     tbody.querySelectorAll("[data-retry]").forEach((b) =>
@@ -246,6 +249,56 @@ const DocumentsView = (() => {
         });
       }
     }
+  }
+
+  /* 文档详情：元信息 + 分块正文（「看不到文件里写了什么」就是缺了这块） */
+  async function openDocDetail(id) {
+    const box = Common.openModal(`
+      <div class="modal-header">
+        <h3>文档详情</h3>
+        <button class="modal-close" data-close>×</button>
+      </div>
+      <div id="doc-detail"><div class="fb-loading"><span class="loading-spinner"></span></div></div>`,
+      { size: "modal-lg" });
+    box.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", Common.closeModal));
+    const body = box.querySelector("#doc-detail");
+    let detail;
+    try {
+      detail = await API.request("GET", `/api/documents/${id}`);
+    } catch (err) {
+      body.innerHTML = `<p style="color:var(--danger)">${Common.escapeHtml(err.message)}</p>`;
+      return;
+    }
+    const statusText = detail.status === "ready"
+      ? "解析完成"
+      : detail.status === "processing" ? "解析中" : "解析失败";
+    const meta = [
+      ["文件名", detail.filename],
+      ["所属知识库", detail.course || "-"],
+      ["类型 / 大小", `${(detail.file_type || "").toUpperCase()} · ${Common.fmtSize(detail.file_size)}`],
+      ["状态", statusText],
+      ["分块数", String(detail.chunk_count || 0)],
+      ["上传时间", Common.fmtTime(detail.created_at)],
+    ];
+    const chunks = detail.chunks || [];
+    const preview = detail.preview || "";
+    body.innerHTML = `
+      <div class="detail-meta">
+        ${meta.map(([k, v]) => `<div><span>${k}</span><b>${Common.escapeHtml(v)}</b></div>`).join("")}
+      </div>
+      ${detail.status === "failed" && detail.error ? `<div class="detail-note">解析失败：${Common.escapeHtml(detail.error)}</div>` : ""}
+      <div style="font-size:13px;color:var(--text-3);margin-bottom:8px">${chunks.length ? "文件内容（按分块）" : "文件内容"}</div>
+      <div class="detail-chunks">
+        ${chunks.length
+          ? chunks.map((c) => `<div class="detail-chunk"><div class="detail-chunk-no">第 ${c.index + 1} 块</div><div class="detail-chunk-text">${Common.escapeHtml(c.text)}</div></div>`).join("")
+          : preview
+            ? `<div class="detail-text">${Common.escapeHtml(preview)}</div>`
+            : `<div class="empty-state"><p>${
+                detail.status === "failed" ? "解析失败，没有可显示的内容"
+                  : detail.status === "processing" ? "文档正在解析，稍后再看"
+                    : "这篇文档没有取到正文内容"
+              }</p></div>`}
+      </div>`;
   }
 
   async function retryDoc(id) {

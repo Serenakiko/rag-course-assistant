@@ -10,14 +10,13 @@ from collections.abc import AsyncGenerator
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import SessionLocal, get_db
 from ..deps import get_current_user, require_role
 from ..models import Conversation, Message, UnansweredQuestion, User, utcnow
 from ..schemas import (
-    AdminConversationOut,
     AskRequest,
     ConversationOut,
     CreateConversationRequest,
@@ -33,6 +32,9 @@ logger = logging.getLogger(__name__)
 
 # 每个会话的生成序号：新请求一进来就顶掉旧序号，旧事件流收尾时不再落库
 _gen_counter = itertools.count(1)
+
+# 一个字都没生成就结束时落库的占位提示：它不是回答，不该当上下文喂给模型
+_NO_ANSWER_HINT = "（这条提问没有生成出回答，可能被中断了，重新发一次试试。）"
 _gen_seq: dict[int, int] = {}
 
 
@@ -96,6 +98,10 @@ def _load_history(db: Session, conversation_id: int, limit: int) -> list[tuple[s
     picked: list[tuple[str, str]] = []
     used = 0
     for m in msgs:  # 从最新往前挑
+        # 没生成出回答的占位提示、以及中断时留下的半截回答都不是有效上下文，
+        # 喂给模型只会让它以为“我刚才答不上来”，把下一轮也带偏
+        if m.role == "assistant" and (m.interrupted or (m.content or "").startswith(_NO_ANSWER_HINT)):
+            continue
         size = len(m.content or "")
         if picked and used + size > settings.HISTORY_CHAR_BUDGET:
             break
@@ -171,35 +177,50 @@ def mark_unanswered_read(
     return {"ok": True}
 
 
-@router.get("/sessions", response_model=list[ConversationOut], summary="会话列表")
+@router.get("/sessions", summary="会话列表（分页 + 标题搜索）")
 def list_sessions(
+    q: str = "",
+    limit: int = 20,
+    offset: int = 0,
     kb: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> list[ConversationOut]:
-    """会话列表；传 kb 时只返回使用过该知识库的会话（空/不传返回全部）。
+) -> dict:
+    """我的会话列表：服务端分页 + 标题关键字，返回 {total, items}。
 
-    消息条数用一次 group by 一起查出来，不逐会话 count；
-    学生端「对话历史」直接显示条数，不用点进去才知道。
+    以前是全量返回，侧边栏和「对话历史」各自拉一遍再在前端分页；会话一多，
+    每次进页面都要传几百 KB。消息条数仍用一次 group by 查出来，不逐会话 count。
+    kb 传了课程名时只返回用过该知识库的会话。
     """
-    stmt = (
+    limit = min(max(limit, 1), 100)
+    offset = max(offset, 0)
+    where = [Conversation.user_id == user.id]
+    keyword = (q or "").strip()
+    if keyword:
+        where.append(Conversation.title.like(f"%{keyword}%"))
+    if kb:
+        where.append(Conversation.knowledge_bases.like(f'%"{kb}"%'))
+
+    total = db.scalar(select(func.count(Conversation.id)).where(*where)) or 0
+    rows = db.execute(
         select(Conversation, func.count(Message.id))
         .outerjoin(Message, Message.conversation_id == Conversation.id)
-        .where(Conversation.user_id == user.id)
-    )
-    if kb:
-        stmt = stmt.where(Conversation.knowledge_bases.like(f'%"{kb}"%'))
-    stmt = stmt.group_by(Conversation.id).order_by(Conversation.id.desc())
-    return [
+        .where(*where)
+        .group_by(Conversation.id)
+        .order_by(Conversation.id.desc())
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    items = [
         ConversationOut(
             id=conv.id,
             title=conv.title,
             created_at=conv.created_at,
             message_count=count or 0,
         )
-        for conv, count in db.execute(stmt).all()
+        for conv, count in rows
     ]
-
+    return {"total": total, "items": items}
 
 @router.patch("/sessions/{conv_id}", response_model=ConversationOut, summary="重命名会话")
 def rename_session(
@@ -362,115 +383,6 @@ def _kb_from_conv(raw: str | None) -> str:
     return arr[0] if arr else ""
 
 
-@router.get("/admin/messages", summary="全部问答对（管理员，分页）")
-def admin_qa_pairs(
-    q: str = "",
-    field: str = "question",
-    limit: int = 20,
-    offset: int = 0,
-    admin: User = Depends(require_role("admin")),
-    db: Session = Depends(get_db),
-) -> dict:
-    """分页返回 user 提问 + 紧随其后的 assistant 回答，用于对话历史表格。
-
-    以前是把 messages 整表拉出来在 Python 里配对再切片；消息一多就要把整个表
-    读进内存。现在只取当前页的提问（每页最多 100 条），回答按需查。
-    """
-    limit = min(max(limit, 1), 100)
-    offset = max(offset, 0)
-    if field not in ("question", "answer", "user"):
-        raise HTTPException(status_code=400, detail="field 仅支持 question / answer / user")
-
-    base = (
-        select(
-            Message.id,
-            Message.content,
-            Message.conversation_id,
-            Message.created_at,
-            Conversation.knowledge_bases,
-            User.username,
-            User.real_name,
-        )
-        .join(Conversation, Message.conversation_id == Conversation.id)
-        .join(User, Conversation.user_id == User.id)
-        .where(Message.role == "user")
-    )
-    # 搜索范围：问题 / 回答 / 提问人（回答按"同一会话中此后的 assistant 消息"匹配）
-    keyword = q.strip()
-    if keyword:
-        like = f"%{keyword}%"
-        if field == "answer":
-            later = aliased(Message)
-            base = base.where(
-                select(later.id)
-                .where(
-                    later.conversation_id == Message.conversation_id,
-                    later.role == "assistant",
-                    later.id > Message.id,
-                    later.content.like(like),
-                )
-                .exists()
-            )
-        elif field == "user":
-            base = base.where(or_(User.username.like(like), User.real_name.like(like)))
-        else:
-            base = base.where(Message.content.like(like))
-
-    total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
-    rows = db.execute(
-        base.order_by(Message.id.asc()).limit(limit).offset(offset)
-    ).all()
-
-    # 一次性取出本页涉及会话的助手消息，按会话分组；每条提问用二分找
-    # 之后的第一条回答，避免逐行查库（N+1）。
-    answers: dict[int, list[tuple[int, str, str]]] = {}
-    if rows:
-        conv_ids = {r.conversation_id for r in rows}
-        min_id = min(r.id for r in rows)
-        ans_rows = db.execute(
-            select(
-                Message.id,
-                Message.conversation_id,
-                Message.content,
-                Message.sources,
-            )
-            .where(
-                Message.conversation_id.in_(conv_ids),
-                Message.role == "assistant",
-                Message.id > min_id,
-            )
-            .order_by(Message.conversation_id, Message.id)
-        ).all()
-        for aid, cid, content, sources in ans_rows:
-            answers.setdefault(cid, []).append((aid, content, sources))
-    answer_ids = {cid: [a[0] for a in arr] for cid, arr in answers.items()}
-
-    items: list[dict] = []
-    for r in rows:
-        arr = answers.get(r.conversation_id, [])
-        pos = bisect_right(answer_ids.get(r.conversation_id, []), r.id)
-        ans = arr[pos] if pos < len(arr) else None
-        try:
-            sources = json.loads(ans[2] or "[]") if ans else []
-        except ValueError:
-            sources = []
-        items.append(
-            {
-                "id": r.id,
-                "question": r.content,
-                "answer": ans[1] if ans else "",
-                "knowledge_base": _kb_from_conv(r.knowledge_bases),
-                "sources": sources if isinstance(sources, list) else [],
-                "conversation_id": r.conversation_id,
-                "username": r.username,
-                "real_name": r.real_name,
-                "created_at": r.created_at,
-            }
-        )
-    return {"total": total, "items": items}
-
-
-
 @router.post("/ask", summary="智能问答（SSE 流式）")
 async def ask(
     payload: AskRequest,
@@ -570,6 +482,9 @@ async def ask(
 
     # 3. SSE 流式生成（结束时把助手回答落库）
     async def event_gen() -> AsyncGenerator[str, None]:
+        # 先发一个心跳：模型首个 token 可能要几十秒，前端按“收到数据”重置空闲计时，
+        # 没有这个事件会被空闲超时误杀（结果就是会话里只剩提问、没有回答）。
+        yield _sse({"type": "ping"})
         answer_parts: list[str] = []
         sources_json: str = "[]"
         unmatched: dict | None = None
@@ -668,6 +583,18 @@ async def ask(
                             partial,
                             sources_json,
                             0 if completed else 1,
+                        )
+                    else:
+                        # 一个字都没生成就结束（用户点停止 / 断网 / 模型报错）：
+                        # 不落任何东西的话，会话里会留下一条永远没有回答的提问。
+                        # 这里落一句提示（不标记 interrupted，免得重新打开时又自动生成一遍），
+                        # 让用户看得出来这一问没答上、需要重发。
+                        _save_answer(
+                            conversation_id,
+                            turn_user_id,
+                            _NO_ANSWER_HINT,
+                            "[]",
+                            0,
                         )
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")

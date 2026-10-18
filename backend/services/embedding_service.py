@@ -22,10 +22,3 @@ def get_embeddings() -> Embeddings:
         model=settings.OLLAMA_EMBED_MODEL,
         base_url=settings.OLLAMA_BASE_URL,
     )
-
-
-def describe_embedding() -> str:
-    provider = settings.EMBEDDING_PROVIDER or settings.LLM_PROVIDER
-    if provider == "openai":
-        return f"OpenAI 兼容 API：{settings.OPENAI_EMBED_MODEL}"
-    return f"Ollama 本地：{settings.OLLAMA_EMBED_MODEL}"

@@ -12,6 +12,7 @@ import time
 from collections.abc import AsyncGenerator
 
 from langchain_core.documents import Document
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 
 from ..config import settings
@@ -66,6 +67,9 @@ SYSTEM_PROMPT = """你是这门课的助教，正在回答学生的提问。用�
 1. 只聊课程知识库里的内容（知识点、作业习题、学习资料）。碰到明显无关的问题（考公择业、天气、时事、娱乐、个人生活决策、闲聊之类），只回一句：“这个问题不在我的回答范围内，我只解答课程知识库中的内容。” 不展开、不建议、不猜测。
 2. 在范围内的问题，先看下面「参考资料」能不能答：
    - 能答：直接讲，用完整的句子把道理说清楚；需要分步骤时再用编号，不要为了显得“结构清晰”把本该连成一段的话拆成一堆要点。
+   - 资料只有一两句话时，别把原句换个说法抄一遍就交差：先说清它在回答什么，再把资料里的每个要点分别说一句
+     （它是什么、用来解决什么），出现的术语要展开成普通话说清楚。仍然不许补充资料之外的知识点；
+     资料真的只有一句话能讲，就答一句话，不要注水凑字数。
    - 只覆盖了一部分：把能确定的讲完，再说明“知识库中关于这部分的资料不完整”。
    - 答不上来，或资料讲的根本不是这个知识点（比如资料讲二叉树、学生问红黑树）：必须以“【知识库未收录】”开头，正文写“知识库中暂无相关内容”，再一两句说明现有资料和问题的差距。绝不许用自己的知识补充或编造，也不要列举资料标题、不要承诺已经反馈老师（这些由系统追加）。
 3. 不要用这些腔调：“总的来说”“综上所述”“需要注意的是”“希望对你有帮助”；不要复述学生的问题，不要开场白和收尾客套。问题短就答短，不硬凑篇幅。
@@ -92,6 +96,8 @@ OVERVIEW_PROMPT = """你是这门课的助教。学生想了解知识库里收�
 怎么答：
 1. 照着下面「参考资料」里列出的知识条目说：涉及哪几门课，各有哪些知识点主题，能帮他解答哪几类问题（概念解释、算法/原理讲解、对比辨析、习题答疑等）。
 2. 内容多的时候可以分条列，但每条说人话，别堆名词。先总说一句，再按课程或主题展开。
+   总量控制在 400 字以内：每门课一行，一行里只点 2~3 个代表性主题词，不要逐条抄知识点标题。
+   课程多的时候挑 6~8 门最典型的说，剩下的概括成一句“还有……”带过。
 3. 资料里有什么就说什么；绝对不要说“未收录”“暂无相关内容”“知识库里没有”这类话，也不要编资料之外的知识点。
 4. 简体中文。
 
@@ -128,11 +134,22 @@ def _format_sources(docs: list[tuple[Document, float]]) -> list[dict]:
     return out
 
 
-def recommend_titles(docs: list[tuple[Document, float]], limit: int = 3) -> list[str]:
-    """从检索结果中提取最相关的资料标题（去重），用于拒答时引导换问法。"""
+def recommend_titles(docs: list[tuple[Document, float]], limit: int = 3, spread: float = 0.15) -> list[str]:
+    """从检索结果中提取相近资料标题，用于拒答时引导换问法。
+
+    两道过滤：只取与首选结果距离接近的（spread），并且首选结果本身不能离题太远
+    （超过阈值 + 0.15 就说明整批都是噪声，"api 是什么意思"以前会被推《条件概率》）。
+    """
+    if not docs:
+        return []
+    top = docs[0][1]
+    if top > settings.UNMATCHED_DISTANCE + 0.15:
+        return []
     seen: set[str] = set()
     out: list[str] = []
-    for doc, _score in docs:
+    for doc, score in docs:
+        if score > top + spread:
+            continue
         src = doc.metadata
         title = (src.get("title") or src.get("filename") or "").strip()
         if title and title not in seen:
@@ -171,6 +188,7 @@ COURSE_STRONG_KEYWORDS = (
     "软件测试", "版本控制", "Git", "前端", "后端", "编译",
     "知识点", "课件", "章节", "考点", "习题", "实验报告", "作业", "复习", "考试",
     "课程", "助教", "知识库", "课本", "笔记",
+    "API", "接口", "协议", "带宽", "并发", "缓存", "编码", "加密", "容器", "虚拟机",
 )
 # 明显无关词：命中即视为与课程学习无关（不进入反馈）
 IRRELEVANT_KEYWORDS = (
@@ -180,6 +198,33 @@ IRRELEVANT_KEYWORDS = (
     "星座", "运势", "游戏攻略", "抽卡", "健身", "减肥", "养生", "就医", "购物",
     "折扣", "优惠", "外卖", "打车",
 )
+
+
+# 寒暄/客套/自我介绍类整句：这类话去检索必然撞距离门控，再走"是否课程相关"
+# 的模型判定又白等几秒，最后还回一句冷冰冰的拒答（学生说"你好"被甩脸）。
+# 直接在本地认出来，回一句引导语，不检索、不调模型、不记未命中。
+_SMALLTALK_RE = re.compile(
+    r"^(你好|您好|嗨|哈喽|哈啰|hi|hello|hey|在吗|在不在|有人吗|早上好|中午好|下午好|晚上好|晚安"
+    r"|谢谢|谢谢你|多谢|感谢|3q|thanks|thankyou|辛苦了|好的|好的呀|嗯嗯|ok|收到"
+    r"|你是谁|你叫什么|你叫什么名字|介绍一下你自己|你能帮我什么|测试|test)"
+    r"(呀|啊|呢|哈|鸭|啦|哦|喔|嘛)*"
+    r"[\s!！。？?~～,.，、]*$",
+    re.I,
+)
+
+SMALLTALK_REPLY = (
+    "你好，我是这门课的智能助教，只依据知识库里的课程资料回答。\n\n"
+    "能帮上忙的大致三类：\n"
+    "1. 讲知识点：概念、原理、推导过程；\n"
+    "2. 对比辨析：把容易混的两个概念放一起说区别；\n"
+    "3. 习题答疑：课后题、例题一步步拆开讲。\n\n"
+    "直接问具体的就行，比如「TCP 三次握手为什么不是两次」「进程和线程有什么区别」。"
+)
+
+
+def is_smalltalk(question: str) -> bool:
+    """是不是寒暄/客套/自我介绍类整句（"你好""谢谢""你是谁"）。"""
+    return bool(_SMALLTALK_RE.match((question or "").strip()))
 
 
 async def is_course_related(question: str, timeout: float = 10.0) -> bool:
@@ -192,9 +237,10 @@ async def is_course_related(question: str, timeout: float = 10.0) -> bool:
     顺序不能反："考研面试里的多线程" 同时命中课程词和无关词，
     先判课程词就会把它当课程问题，反而刷进反馈列表。
     """
-    if any(k in question for k in IRRELEVANT_KEYWORDS):
+    q = (question or "").lower()
+    if any(k.lower() in q for k in IRRELEVANT_KEYWORDS):
         return False
-    if any(k in question for k in COURSE_STRONG_KEYWORDS):
+    if any(k.lower() in q for k in COURSE_STRONG_KEYWORDS):
         return True
     try:
         llm = get_llm()
@@ -219,20 +265,13 @@ async def is_course_related(question: str, timeout: float = 10.0) -> bool:
         return False
 
 
-def search_docs(
-    query: str,
-    top_k: int | None = None,
-    courses: list[str] | None = None,
-) -> list[tuple[Document, float]]:
-    """对外暴露的检索接口（供诊断 / 测试使用）。"""
-    return vector_search(query, top_k, courses)
 
 
 def is_course_overview_question(question: str) -> bool:
-    """是否"这门课讲了什么 / 知识库有什么"类课程概览问题。
+    """是否"这门课讲了什么 / 知识库有什么 / 你能帮我做什么"类概览问题。
 
-    概览问题应基于检索到的已有资料直接总结，不适用"未收录"判定
-    （避免"这门课讲了什么""知识库里有什么"被误判拒答或混入未收录文案）。
+    概览问题跟资料没有字面相似度，走检索只会撞距离门控，再顺手推荐几条
+    不相干的标题，所以单独识别、直接汇总知识库，不参与未收录判定。
     """
     q = re.sub(r"\s+", "", question or "")
     markers = (
@@ -242,13 +281,27 @@ def is_course_overview_question(question: str) -> bool:
         "课程主要内容", "课程有哪些内容", "课程包括哪些", "知识库讲了什么",
         "知识库里有什么", "知识库有哪些内容", "知识库有什么内容", "知识库包括哪些",
         "知识库有什么知识点", "知识库收录了什么", "知识库里有什么知识点",
+        "知识库里收集了什么", "知识库收集了什么", "知识库里都收集了什么",
         "这个知识库讲了什么", "这个知识库有什么", "这个知识库有哪些内容",
         "知识库学什么", "检索知识库", "搜索知识库", "查询知识库",
         "知识库可以干什么", "知识库能干什么", "知识库能做什么", "知识库可以做什么",
         "知识库里有什么可以", "知识库有什么可以", "告诉我可以干什么", "可以干什么事情",
         "知识库里有什么内容", "知识库的内容", "知识库收录了", "知识库有哪些",
+        "你能做什么", "你能干什么", "你可以做什么", "能帮我做什么",
+        "怎么提问", "如何提问", "能问什么", "可以问什么",
     )
-    return any(m in q for m in markers)
+    if any(m in q for m in markers):
+        return True
+    # 短问句 + 概览/能力口气才走概览；具体问题（更长、带"关于"）仍然正常检索
+    if len(q) > 24 or "关于" in q:
+        return False
+    patterns = (
+        r"(知识库|课程|资料).{0,8}(收集|收录|包含|包括|有哪些|有什么|内容|知识点)",
+        r"(你|助教|系统|这里).{0,8}(能|可以|会).{0,6}(做什么|干什么|解答|回答|帮我|提供)",
+        r"(怎么|如何).{0,2}(提问|问你|用你|使用你)",
+        r"(能|可以)问(什么|哪些)",
+    )
+    return any(re.search(pat, q) for pat in patterns)
 
 
 ANSWERABILITY_PROMPT = """你是课程助教的知识库校对员。下面给你学生的问题，以及从知识库里检索到的资料。
@@ -287,6 +340,97 @@ async def can_answer(question: str, docs: list[tuple[Document, float]], timeout:
         return False
 
 
+def _trim_docs(docs: list[tuple[Document, float]], spread: float = 0.25) -> list[tuple[Document, float]]:
+    """只保留与首选结果距离接近的资料。
+
+    门控只看 top1，后面几条可能是离题内容（问死锁却引用"无穷级数"），
+    拿去拼提示词和引用来源只会干扰回答。至少保留一条。
+    """
+    if not docs:
+        return []
+    top = docs[0][1]
+    kept = [d for d in docs if d[1] <= top + spread]
+    return kept or docs[:1]
+
+
+def overview_context(courses: list[str] | None, per_base: int = 6) -> str:
+    """概览问题不走向量检索：按可见范围直接汇总知识库与其知识点标题。"""
+    from sqlalchemy import select
+
+    from ..database import SessionLocal
+    from ..models import KnowledgeBase, KnowledgePoint
+
+    allowed = set(courses) if courses is not None else None
+    lines: list[str] = []
+    with SessionLocal() as db:
+        names = [
+            n for (n,) in db.execute(select(KnowledgeBase.name).order_by(KnowledgeBase.id))
+        ]
+        if allowed is not None:
+            names = [n for n in names if n in allowed]
+        for name in names[:12]:
+            titles = [
+                t
+                for (t,) in db.execute(
+                    select(KnowledgePoint.title)
+                    .where(KnowledgePoint.course == name)
+                    .order_by(KnowledgePoint.id)
+                    .limit(per_base)
+                )
+            ]
+            lines.append(
+                f"课程《{name}》：{'、'.join(titles) if titles else '（暂无知识点）'}"
+            )
+    return "\n".join(lines)
+
+
+def build_prompt_messages(
+    system_prompt: str, history: list[tuple[str, str]], question: str
+) -> list:
+    """装配提示词：系统提示仍是带 {context} 的模板，历史和问题用消息对象。
+
+    历史如果也用 ("user", "字符串") 元组拼，ChatPromptTemplate 会把字符串当模板解析：
+    上一轮回答里只要出现花括号（代码块、JSON、集合记号），格式化时就 KeyError，
+    整轮问答直接失败，报错还只是一句“回答生成失败：' '”。
+    """
+    messages: list = [("system", system_prompt)]
+    for role, content in (history or [])[-settings.HISTORY_LIMIT * 2 :]:
+        if role == "user":
+            messages.append(HumanMessage(content=content))
+        elif role == "assistant":
+            messages.append(AIMessage(content=content))
+    messages.append(HumanMessage(content=question))
+    return messages
+
+async def _generate_stream(
+    system_prompt: str,
+    context: str,
+    question: str,
+    history: list[tuple[str, str]],
+) -> AsyncGenerator[str, None]:
+    """按给定提示词流式产出文本（超时抛 asyncio.TimeoutError，由调用方处理）。"""
+    chain = ChatPromptTemplate.from_messages(
+        build_prompt_messages(system_prompt, history, question)
+    ) | get_llm()
+    async for chunk in _astream_with_deadline(
+        chain,
+        {"context": context, "question": question},
+        settings.LLM_TIMEOUT,
+    ):
+        text = getattr(chunk, "content", "")
+        if isinstance(text, str) and text:
+            yield text
+
+
+def _unmatched_result(question: str, docs: list[tuple[Document, float]]) -> dict:
+    """未收录的统一结果（非流式路径用）。"""
+    recommended = recommend_titles(docs)
+    content = "【知识库未收录】知识库里暂时没有" + (
+        f"「{question}」" if len(question) <= 40 else "该问题"
+    ) + "的相关内容。\n" + "\n".join(feedback_lines(question, recommended))
+    return {"answer": content, "recommended": recommended, "matched": False}
+
+
 async def generate_answer(question: str, courses: list[str] | None = None) -> dict:
     """非流式生成一次完整回答（供管理员补充资料后"重新生成回答"使用）。
 
@@ -295,49 +439,25 @@ async def generate_answer(question: str, courses: list[str] | None = None) -> di
       - error="timeout"/"empty" 表示生成失败，answer 为空，调用方不能当已解决写入
     """
     # 向量化 + Chroma 查询是同步 IO，放到线程里跑，避免阻塞事件循环
-    docs = await asyncio.to_thread(
-        vector_search, question, settings.TOP_K, courses
-    )
+    docs = await asyncio.to_thread(vector_search, question, settings.TOP_K, courses)
     if not docs:
         return {
             "answer": "知识库里还没有相关内容，先补充课程资料再试。",
             "recommended": [],
             "matched": False,
         }
-    top_score = docs[0][1]
-    if top_score > settings.UNMATCHED_DISTANCE:
-        recommended = recommend_titles(docs)
-        content = "【知识库未收录】知识库里暂时没有" + (
-            f"「{question}」" if len(question) <= 40 else "该问题"
-        ) + "的相关内容。\n" + "\n".join(feedback_lines(question, recommended))
-        return {"answer": content, "recommended": recommended, "matched": False}
-
+    if docs[0][1] > settings.UNMATCHED_DISTANCE:
+        return _unmatched_result(question, docs)
     if settings.ANSWERABILITY_CHECK and not await can_answer(question, docs):
-        recommended = recommend_titles(docs)
-        content = "【知识库未收录】知识库里暂时没有" + (
-            f"「{question}」" if len(question) <= 40 else "该问题"
-        ) + "的相关内容。\n" + "\n".join(feedback_lines(question, recommended))
-        return {"answer": content, "recommended": recommended, "matched": False}
+        return _unmatched_result(question, docs)
 
-    context = _format_context(docs)
-    messages: list = [("system", SYSTEM_PROMPT), ("human", "{question}")]
-    prompt = ChatPromptTemplate.from_messages(messages)
-    chain = prompt | get_llm()
-
+    kept = _trim_docs(docs)
+    context = _format_context(kept)
     answer_parts: list[str] = []
-    timed_out = False
     try:
-        async for chunk in _astream_with_deadline(
-            chain,
-            {"context": context, "question": question},
-            settings.LLM_TIMEOUT,
-        ):
-            content = getattr(chunk, "content", "")
-            if isinstance(content, str) and content:
-                answer_parts.append(content)
+        async for chunk in _generate_stream(SYSTEM_PROMPT, context, question, []):
+            answer_parts.append(chunk)
     except asyncio.TimeoutError:
-        timed_out = True
-    if timed_out:
         # 超时提示不是答案，不能混进 answer 里被当成正常回答
         return {"answer": "", "recommended": [], "matched": False, "error": "timeout"}
     answer = "".join(answer_parts).strip()
@@ -370,10 +490,42 @@ async def stream_answer(
     """
     history = history or []
     try:
+        # -1. 寒暄/客套/自我介绍：本地识别，直接给引导语，不检索、不调模型、不记未命中。
+        #     以前「你好」要过检索→距离门控→模型判相关性，十几秒后换来一句
+        #     “这个问题不在我的回答范围内”，学生体验上就是被冷拒。
+        if is_smalltalk(question):
+            yield {"type": "token", "content": SMALLTALK_REPLY}
+            yield {"type": "sources", "sources": [], "answer": SMALLTALK_REPLY}
+            return
+
+        # 0. 概览 / 能力类问题：问句跟资料没有字面相似度，走向量检索只会撞门控。
+        #    这里直接汇总知识库与知识点标题，不判未收录、不给推荐。
+        if is_course_overview_question(question):
+            context = await asyncio.to_thread(overview_context, courses)
+            answer_parts: list[str] = []
+            if context:
+                try:
+                    async for chunk in _generate_stream(
+                        OVERVIEW_PROMPT, context, question, history
+                    ):
+                        answer_parts.append(chunk)
+                        yield {"type": "token", "content": chunk}
+                except asyncio.TimeoutError:
+                    logger.warning("概览回答生成超时：%s", question[:30])
+                    yield {
+                        "type": "error",
+                        "message": f"回答生成超时（超过 {settings.LLM_TIMEOUT:.0f} 秒），稍后再试或者换个问法。",
+                    }
+                    return
+            answer = "".join(answer_parts).strip()
+            if not answer:
+                answer = "知识库里还没有可以介绍的内容，先让老师补充课程资料。"
+                yield {"type": "token", "content": answer}
+            yield {"type": "sources", "sources": [], "answer": answer}
+            return
+
         # 1. 检索（可按知识库/课程限定范围）
-        docs = await asyncio.to_thread(
-            vector_search, question, settings.TOP_K, courses
-        )
+        docs = await asyncio.to_thread(vector_search, question, settings.TOP_K, courses)
         # 兜底：知识库没有任何内容时直接拒绝，不调用模型
         if not docs:
             yield {
@@ -381,14 +533,11 @@ async def stream_answer(
                 "content": "知识库里还没有相关内容，先添加课程资料，或者问点跟课程有关的问题。",
             }
             return
+
         # 2. 无匹配门控：最相似资料的距离仍超过阈值 → 知识库未覆盖该问题，
         #    先判定是否与课程学习相关：无关问题直接拒绝且不记录；
         #    学习相关但库无才进入“反馈”记录（避免天气/闲聊等污染反馈列表）。
-        #    课程概览类问题（“这门课讲了什么”“知识库有什么”）不走门控，
-        #    直接基于检索到的资料总结。
-        overview_mode = is_course_overview_question(question)
-        top_score = docs[0][1]
-        if not overview_mode and top_score > settings.UNMATCHED_DISTANCE:
+        if docs[0][1] > settings.UNMATCHED_DISTANCE:
             top_course = docs[0][0].metadata.get("course") or ""
             if not await is_course_related(question):
                 yield {
@@ -425,30 +574,18 @@ async def stream_answer(
             }
             return
 
-        context = _format_context(docs)
-
-        # 2. 组装消息（系统 + 历史 + 当前问题）；概览问题用专用提示引导
-        messages: list = [("system", OVERVIEW_PROMPT if overview_mode else SYSTEM_PROMPT)]
-        for role, content in history[-settings.HISTORY_LIMIT * 2 :]:
-            if role in ("user", "assistant"):
-                messages.append((role, content))
-        messages.append(("human", "{question}"))
-
-        prompt = ChatPromptTemplate.from_messages(messages)
-        chain = prompt | get_llm()
+        # 2.5 引用资料收紧：top5 里离题的那些不参与生成，也不展示为来源
+        kept = _trim_docs(docs)
+        context = _format_context(kept)
 
         # 3. 流式生成：每个 chunk 都用 wait_for 兜底，模型卡死（一个 token 都不来）也能停
-        answer_parts: list[str] = []
+        answer_parts = []
         try:
-            async for chunk in _astream_with_deadline(
-                chain,
-                {"context": context, "question": question},
-                settings.LLM_TIMEOUT,
+            async for chunk in _generate_stream(
+                SYSTEM_PROMPT, context, question, history
             ):
-                content = getattr(chunk, "content", "")
-                if isinstance(content, str) and content:
-                    answer_parts.append(content)
-                    yield {"type": "token", "content": content}
+                answer_parts.append(chunk)
+                yield {"type": "token", "content": chunk}
         except asyncio.TimeoutError:
             logger.warning("RAG 回答生成超过 %.0f 秒，已强制停止", settings.LLM_TIMEOUT)
             yield {
@@ -464,8 +601,7 @@ async def stream_answer(
 
         # 模型判定知识库未收录（未收录特征短语）：系统自动追加
         # 相近资料推荐与反馈提示，并发出 unmatched 事件供落库记录
-        # （概览模式基于所选库资料回答，不判未收录）
-        if not overview_mode and is_unmatched_answer(answer):
+        if is_unmatched_answer(answer):
             recommended = recommend_titles(docs)
             suffix = "\n\n" + "\n".join(feedback_lines(question, recommended))
             answer += suffix
@@ -477,13 +613,12 @@ async def stream_answer(
                 "recommended": recommended,
             }
 
-        yield {"type": "sources", "sources": _format_sources(docs), "answer": answer}
+        yield {"type": "sources", "sources": _format_sources(kept), "answer": answer}
     except Exception as exc:  # noqa: BLE001
         logger.exception("RAG 流式回答失败")
         err = str(exc)
         # 模型缺失（Ollama 404）：界面上只给一句人话，细节写日志
         if "404" in err or "model not found" in err.lower():
-            # 模型名和 pull 命令只写日志，界面上给学生一句人话
             logger.error("模型未安装：%s", settings.OLLAMA_LLM_MODEL)
             yield {
                 "type": "error",

@@ -11,7 +11,13 @@ import sys
 import webbrowser
 from threading import Timer
 
-REQUIRED_PACKAGES = ["fastapi", "uvicorn", "sqlalchemy", "chromadb", "langchain", "pypdf", "jwt", "dotenv", "multipart"]
+# 用代码里真正 import 的模块名：requirements.txt 装的是 langchain-core / -chroma，
+# 没有 langchain 这个总包，之前拿它自检会让干净的虚拟环境直接启动不了
+REQUIRED_PACKAGES = [
+    "fastapi", "uvicorn", "sqlalchemy", "chromadb",
+    "langchain_core", "langchain_chroma", "langchain_ollama", "langchain_openai",
+    "pypdf", "jwt", "dotenv", "multipart",
+]
 
 
 def check_dependencies() -> bool:

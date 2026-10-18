@@ -10,7 +10,6 @@ fastapi>=0.110,<1.0
 uvicorn[standard]>=0.29
 python-multipart>=0.0.9
 pydantic>=2.6
-pydantic-settings>=2.2
 
 # ---- Database ----
 SQLAlchemy>=2.0.25
@@ -22,8 +21,6 @@ PyJWT>=2.8
 python-dotenv>=1.0
 
 # ---- LangChain ecosystem ----
-langchain>=0.2.10
-langchain-community>=0.2.10
 langchain-core>=0.2.20
 langchain-chroma>=0.1.1
 langchain-ollama>=0.1.0
@@ -36,6 +33,7 @@ chromadb>=0.4.24
 # ---- Document parsing ----
 pypdf>=4.0
 
-# ---- HTTP client (LLM API calls) ----
-httpx>=0.27
-requests>=2.31
+# ---- Dev / tools ----
+# tests/test_core.py 用 pytest 跑；.tools/make_demo_avatar.py 需要 Pillow（运行时不需要）
+pytest>=8.0
+Pillow>=10.0

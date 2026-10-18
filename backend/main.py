@@ -5,15 +5,13 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from .database import SessionLocal, init_db
-from .deps import get_current_user
-from .models import User
 from .routers import auth, chat, documents, knowledge, recycle, stats, unanswered, users
 from .seed import init_seed
 from .services.recycle import purge_expired
@@ -91,16 +89,18 @@ def health() -> dict:
     return {"status": "ok", "app": settings.APP_NAME, "version": settings.APP_VERSION}
 
 
-@app.get("/api/llm/status", tags=["系统"], summary="大模型连接状态")
-def llm_status(user: User = Depends(get_current_user)) -> dict:
-    from .services.llm_service import check_llm_connection
-
-    ok, message = check_llm_connection()
-    return {"ok": ok, "message": message}
-
-
 # 前端静态资源
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
+
+# 静态资源一律 no-cache：浏览器每次回源校验（StaticFiles 带 ETag，命中就是 304）。
+# 不加的话，改了 js/css 但 app.html 里的 ?v= 忘了加一，浏览器会继续跑旧代码——
+# 表现就是「代码明明改了，页面还是老行为」。
+@app.middleware("http")
+async def static_no_cache(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 @app.get("/", include_in_schema=False)

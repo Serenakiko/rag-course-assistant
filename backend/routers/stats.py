@@ -90,19 +90,19 @@ def admin_stats(
     conversations = db.scalar(select(func.count(Conversation.id))) or 0
     messages = db.scalar(select(func.count(Message.id))) or 0
 
-    # 近 7 天每日会话数（按配置的本地时区折算，不再写死 +8）
+    # 近 7 天每天的提问数（提问 = 学生发的 user 消息，不是会话数）
+    # 以前按 Conversation 计数：一个会话里问 5 个问题只算 1，和学生首页的
+    # 「提问消息」口径对不上；时区按配置折算，不写死 +8。
     today_local = datetime.now(timezone.utc) + timedelta(hours=settings.UTC_OFFSET_HOURS)
     start_local = today_local.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=6)
     start_utc = start_local - timedelta(hours=settings.UTC_OFFSET_HOURS)
     tz_modifier = f"{settings.UTC_OFFSET_HOURS:+d} hours"
 
+    question_day = func.strftime("%Y-%m-%d", Message.created_at, tz_modifier)
     rows = db.execute(
-        select(
-            func.strftime("%Y-%m-%d", Conversation.created_at, tz_modifier),
-            func.count(Conversation.id),
-        )
-        .where(Conversation.created_at >= start_utc)
-        .group_by(func.strftime("%Y-%m-%d", Conversation.created_at, tz_modifier))
+        select(question_day, func.count(Message.id))
+        .where(Message.role == "user", Message.created_at >= start_utc)
+        .group_by(question_day)
     ).all()
     daily_map = {str(d): c for d, c in rows}
 
@@ -112,9 +112,8 @@ def admin_stats(
         key = day.strftime("%Y-%m-%d")
         daily.append({"date": key, "count": daily_map.get(key, 0)})
 
-    # 今日提问数（今天的会话数）
     today_key = today_local.strftime("%Y-%m-%d")
-    today_conversations = daily_map.get(today_key, 0)
+    today_questions = daily_map.get(today_key, 0)
 
     # 各知识库文档数分布：文档表本身带 course，直接按文档计数（和内容管理里的「文档数」同口径）
     kb_rows = db.execute(
@@ -161,8 +160,8 @@ def admin_stats(
         knowledge_points=knowledge_points,
         conversations=conversations,
         messages=messages,
-        today_conversations=today_conversations,
-        daily_conversations=daily,
+        today_questions=today_questions,
+        daily_questions=daily,
         kb_doc_distribution=kb_doc_distribution,
         unanswered_pending=unanswered_pending,
         unanswered_resolved=unanswered_resolved,

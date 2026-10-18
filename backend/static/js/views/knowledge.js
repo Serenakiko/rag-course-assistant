@@ -5,7 +5,6 @@
  */
 const KnowledgeView = (() => {
   let currentBase = null;   // null=总览视图；否则为当前知识库对象
-  let searchTimer = null;
   let kbCache = [];         // 当前页知识库
   let kbTotal = 0;
   let kbPage = 1;
@@ -30,31 +29,6 @@ const KnowledgeView = (() => {
         <input class="form-control" id="${id}" placeholder="${placeholder}">
         <button type="button" class="search-clear" id="${id}-clear" title="清空"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
       </div>`;
-  }
-
-  /* 绑定搜索：输入防抖 + 清空按钮显隐 + 清空触发重新加载 */
-  function bindSearch(inputId, loadFn) {
-    const input = document.getElementById(inputId);
-    if (!input) return;
-    const box = document.getElementById(inputId + "-box");
-    const clearBtn = document.getElementById(inputId + "-clear");
-    const refresh = () => {
-      const hasValue = input.value.length > 0;
-      if (box) box.classList.toggle("has-value", hasValue);
-      if (clearBtn) clearBtn.style.display = hasValue ? "" : "none";
-    };
-    input.addEventListener("input", () => {
-      refresh();
-      clearTimeout(searchTimer);
-      searchTimer = setTimeout(loadFn, 350);
-    });
-    if (clearBtn) clearBtn.addEventListener("click", () => {
-      input.value = "";
-      refresh();
-      loadFn();
-      input.focus();
-    });
-    refresh();
   }
 
   /* ==================== 渲染入口 ==================== */
@@ -130,7 +104,6 @@ const KnowledgeView = (() => {
     const grid = document.getElementById("kb-grid");
     if (!grid) return;
     const keyword = document.getElementById("kb-search")?.value.trim() || "";
-    const totalPages = Math.max(1, Math.ceil(kbTotal / kbPageSize));
 
     if (!kbCache.length) {
       grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1">
@@ -138,7 +111,7 @@ const KnowledgeView = (() => {
         <p>${keyword ? "没搜到相关的知识库，换个关键词试试" : "还没有知识库"}</p>
         ${!keyword ? `<p class="mt-8">点击右上角「新建知识库」，创建第一个课程知识库</p>` : ""}
       </div>`;
-      renderPagination("kb-pagination", 0, 1, 1, () => {});
+      Common.renderPagination("kb-pagination", 0, 1, kbPageSize, () => {});
       return;
     }
 
@@ -174,31 +147,8 @@ const KnowledgeView = (() => {
         if (base) removeBase(base);
       }));
 
-    renderPagination("kb-pagination", kbTotal, totalPages, kbPage, (p) => {
+    Common.renderPagination("kb-pagination", kbTotal, kbPage, kbPageSize, (p) => {
       kbPage = p; loadBases();
-    });
-  }
-
-  /* 分页组件：共 N 条 + 页码（知识库固定每页 12 条，不再带每页条数下拉） */
-  function renderPagination(elId, total, totalPages, current, onChange) {
-    const el = document.getElementById(elId);
-    if (!el) return;
-
-    let pages = "";
-    for (let p = 1; p <= totalPages; p++) {
-      pages += `<button class="page-btn ${p === current ? "active" : ""}" data-page="${p}">${p}</button>`;
-    }
-    el.innerHTML = `
-      <span class="total">共 ${total} 条</span>
-      <button class="page-btn" data-page="${current - 1}" ${current <= 1 ? "disabled" : ""}>‹</button>
-      ${pages}
-      <button class="page-btn" data-page="${current + 1}" ${current >= totalPages ? "disabled" : ""}>›</button>`;
-
-    el.querySelectorAll("[data-page]").forEach((b) => {
-      b.addEventListener("click", () => {
-        const p = Number(b.dataset.page);
-        if (p >= 1 && p <= totalPages && p !== current) onChange(p);
-      });
     });
   }
 
@@ -261,7 +211,7 @@ const KnowledgeView = (() => {
   async function removeBase(base) {
     const ok = await Common.confirmDialog({
       title: "删除知识库",
-      message: `将删除知识库「${Common.escapeHtml(base.name)}」及其下 ${base.point_count} 个知识点与向量索引，删除后不可恢复。确认？`,
+      message: `将删除知识库「${Common.escapeHtml(base.name)}」及其下 ${base.point_count} 个知识点与向量索引，删除后进入回收站，30 天内可由管理员恢复。确认？`,
       okText: "删除",
     });
     if (!ok) return;
@@ -404,7 +354,6 @@ const KnowledgeView = (() => {
   function renderPoints(keyword) {
     const grid = document.getElementById("kp-grid");
     if (!grid) return;
-    const totalPages = Math.max(1, Math.ceil(kpTotal / kpPageSize));
 
     if (!kpRows.length) {
       grid.innerHTML = keyword
@@ -414,12 +363,12 @@ const KnowledgeView = (() => {
           <p>这个知识库还没有知识点</p>
           <p class="mt-8">点击右上角「上传文档」添加课程资料</p>
         </div>`;
-      renderPagination("kp-pagination", 0, 1, 1, () => {});
+      Common.renderPagination("kp-pagination", 0, 1, kpPageSize, () => {});
       return;
     }
 
     grid.innerHTML = kpRows.map((p) => `
-      <div class="kp-card">
+      <div class="kp-card" data-view="${p.id}" title="点击查看完整内容">
         <div class="kp-head">
           <div class="kp-title">${Common.escapeHtml(p.title)}</div>
         </div>
@@ -436,6 +385,14 @@ const KnowledgeView = (() => {
         </div>
       </div>`).join("");
 
+    // 卡片只展示前几行，点一下打开详情看完整内容（编辑/删除按钮不触发）
+    grid.querySelectorAll(".kp-card[data-view]").forEach((card) => {
+      card.addEventListener("click", (e) => {
+        if (e.target.closest("[data-edit],[data-del]")) return;
+        const point = kpRows.find((x) => Number(x.id) === Number(card.dataset.view));
+        if (point) openPointDetail(point);
+      });
+    });
     grid.querySelectorAll("[data-edit]").forEach((b) => {
       b.addEventListener("click", () => {
         const point = kpRows.find((x) => Number(x.id) === Number(b.dataset.edit));
@@ -449,9 +406,27 @@ const KnowledgeView = (() => {
       });
     });
 
-    renderPagination("kp-pagination", kpTotal, totalPages, kpPage, (p) => {
+    Common.renderPagination("kp-pagination", kpTotal, kpPage, kpPageSize, (p) => {
       kpPage = p; loadPoints();
     });
+  }
+
+  /* 知识点详情：卡片里是截断的正文，这里给完整内容 */
+  function openPointDetail(point) {
+    const box = Common.openModal(`
+      <div class="modal-header">
+        <h3>${Common.escapeHtml(point.title)}</h3>
+        <button class="modal-close" data-close>×</button>
+      </div>
+      <div class="detail-meta">
+        <div><span>所属知识库</span><b>${Common.escapeHtml(point.course || "-")}</b></div>
+        <div><span>标签</span><b>${Common.escapeHtml(point.tags || "-")}</b></div>
+        <div><span>更新时间</span><b>${Common.fmtTime(point.updated_at)}</b></div>
+        <div><span>最后修改</span><b>${Common.escapeHtml(point.updater_name || point.creator_name || "-")}</b></div>
+      </div>
+      <div class="detail-text">${Common.escapeHtml(point.content || "")}</div>`,
+      { size: "modal-lg" });
+    box.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", Common.closeModal));
   }
 
   /* ---------- 知识点 新增 / 编辑 ---------- */

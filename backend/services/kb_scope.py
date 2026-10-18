@@ -44,12 +44,6 @@ def visible_base_names(user: User, db: Session) -> set[str] | None:
     )
 
 
-def hidden_base_names(user: User, db: Session) -> set[str]:
-    """当前用户看不到的知识库名称；空集合表示无需过滤。"""
-    visible = visible_base_names(user, db)
-    if visible is None:
-        return set()
-    return all_base_names(db) - visible
 
 
 def all_course_names(db: Session) -> set[str]:
@@ -150,5 +144,8 @@ def assert_writable_course(user: User, db: Session, course: str) -> None:
         raise HTTPException(status_code=400, detail="所属知识库不存在，请先创建知识库")
     if user.role == "admin":
         return
-    if name not in (visible_course_names(user, db) or set()):
-        raise HTTPException(status_code=403, detail="没有权限向该知识库写入内容")
+    # 能看见 ≠ 能往里写：以前按「可见」放行，一个学生就能往管理员发布的公共库
+    # 里塞知识点或文档，别人的回答也会引用这条内容。现在只允许创建者本人。
+    owner_id = db.scalar(select(KnowledgeBase.created_by).where(KnowledgeBase.name == name))
+    if owner_id != user.id:
+        raise HTTPException(status_code=403, detail="只有知识库创建者或管理员能往里添加内容")

@@ -1,11 +1,15 @@
-/* ============ 视图：对话历史（学生自己的会话） ============
- * ID 列显示 1..n（按当前排序，不是数据库主键），删掉一条会重新编号；
+/* ============ 视图：对话历史（学生自己的会话）
+ * 服务端分页 + 标题搜索（GET /api/chat/sessions?q=&limit=&offset=），
+ * 列表按创建时间倒序，ID 列显示的是「从最早数起」的序号 total-offset-i（不是数据库主键）。
  * 底部固定分页：共 N 条 + 10/20 条每页 + 页码。
  */
 const HistoryView = (() => {
-  let rows = [];       // 全量会话，按 id 升序
+  let rows = [];       // 当前这一页（服务端已按 id 倒序）
+  let total = 0;       // 匹配总数
   let page = 1;
   let pageSize = 10;
+  let query = "";      // 标题关键字（交给服务端过滤）
+  let searchTimer = null;
 
   function render(container) {
     container.innerHTML = `
@@ -13,6 +17,8 @@ const HistoryView = (() => {
         <div class="row-between mb-16">
           <b>我的问答会话</b>
           <div class="row" style="gap:10px">
+            <input class="form-control" id="history-search" type="search" placeholder="搜索会话标题"
+                   autocomplete="off" style="width:200px" aria-label="搜索会话">
             <button class="btn btn-sm" id="history-new"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>发起新问答</button>
             <button class="btn btn-sm" id="history-refresh"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 6"/><path d="M20 4v7h-7"/></svg>刷新</button>
           </div>
@@ -26,6 +32,12 @@ const HistoryView = (() => {
         <div class="pagination pagination-fixed" id="history-pagination"></div>
       </div>`;
 
+    document.getElementById("history-search").addEventListener("input", (e) => {
+      query = e.target.value.trim();
+      page = 1;
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => load(true), 250);
+    });
     document.getElementById("history-new").addEventListener("click", () => App.navigate("chat"));
     document.getElementById("history-refresh").addEventListener("click", () => {
       load(true).then((ok) =>
@@ -34,15 +46,18 @@ const HistoryView = (() => {
     load(false);
   }
 
-  /* keepPage=true：刷新时保留当前页（页码超界会自动回退到第 1 页） */
+  /* keepPage=true：刷新时保留当前页（页码超界会自动回退） */
   async function load(keepPage) {
     const tbody = document.getElementById("history-tbody");
     if (!tbody) return;
     tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:36px"><span class="loading-spinner"></span></td></tr>`;
+    if (!keepPage) page = 1;
+    const params = new URLSearchParams({ limit: String(pageSize), offset: String((page - 1) * pageSize) });
+    if (query) params.set("q", query);
     try {
-      const list = await API.request("GET", "/api/chat/sessions");
-      rows = (list || []).slice().sort((a, b) => Number(a.id) - Number(b.id));
-      if (!keepPage) page = 1;
+      const data = await API.request("GET", `/api/chat/sessions?${params.toString()}`);
+      total = (data && data.total) || 0;
+      rows = (data && data.items) || [];
       renderRows();
       return true;
     } catch (err) {
@@ -55,25 +70,30 @@ const HistoryView = (() => {
   function renderRows() {
     const tbody = document.getElementById("history-tbody");
     if (!tbody) return;
-    const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
-    if (page > totalPages) page = totalPages;   // 删掉最后一页的最后一条时往回退
-
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    if (page > totalPages) {   // 删掉最后一页的最后一条时往回退
+      load(true);
+      return;
+    }
     if (!rows.length) {
-      tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:36px;color:var(--text-3)">暂无会话，点击「发起新问答」开始第一次提问</td></tr>`;
-      Common.renderPagination("history-pagination", 0, 1, pageSize, () => {}, {
+      tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:36px;color:var(--text-3)">${query ? "没有匹配的会话" : "暂无会话，点击「发起新问答」开始第一次提问"}</td></tr>`;
+      Common.renderPagination("history-pagination", total, page, pageSize, (p) => {
+        page = p;
+        load(true);
+      }, {
         sizeOptions: [10, 20],
-        onSizeChange: (s) => { pageSize = s; page = 1; renderRows(); },
+        onSizeChange: (s) => { pageSize = s; page = 1; load(true); },
       });
       return;
     }
 
-    const start = (page - 1) * pageSize;
-    const pageRows = rows.slice(start, start + pageSize);
+    const start = (page - 1) * pageSize;   // 倒序列表里的全局偏移
+    // ID 列 = 从最早那条数起的序号：最新一页的编号最大，和以前的 1..n 一致
+    const noOf = (i) => total - (start + i);
 
-    // 编号 = 当前位置（不是数据库 id）：删掉一条后重新拉取即自动重排
-    tbody.innerHTML = pageRows.map((c, i) => `
+    tbody.innerHTML = rows.map((c, i) => `
       <tr>
-        <td>${start + i + 1}</td>
+        <td>${noOf(i)}</td>
         <td title="${Common.escapeHtml(c.title)}" style="max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Common.escapeHtml(c.title)}</td>
         <td class="muted">${c.message_count || 0}</td>
         <td class="muted">${Common.fmtTime(c.created_at)}</td>
@@ -87,22 +107,21 @@ const HistoryView = (() => {
 
     tbody.querySelectorAll("[data-view]").forEach((b) =>
       b.addEventListener("click", () => {
-        const idx = pageRows.findIndex((c) => c.id === Number(b.dataset.view));
-        viewSession(Number(b.dataset.view), start + idx + 1);
+        const idx = rows.findIndex((c) => c.id === Number(b.dataset.view));
+        viewSession(Number(b.dataset.view), noOf(idx));
       }));
     tbody.querySelectorAll("[data-del]").forEach((b) =>
       b.addEventListener("click", () =>
-        removeSession(Number(b.dataset.del), pageRows.find((c) => c.id === Number(b.dataset.del)))));
+        removeSession(Number(b.dataset.del), rows.find((c) => c.id === Number(b.dataset.del)))));
 
-    Common.renderPagination("history-pagination", rows.length, page, pageSize, (p) => {
+    Common.renderPagination("history-pagination", total, page, pageSize, (p) => {
       page = p;
-      renderRows();
+      load(true);
     }, {
       sizeOptions: [10, 20],
-      onSizeChange: (s) => { pageSize = s; page = 1; renderRows(); },
+      onSizeChange: (s) => { pageSize = s; page = 1; load(true); },
     });
   }
-
   // 兼容数组 / JSON 字符串两种来源格式
   function srcTitles(m) {
     if (m.role !== "assistant" || !m.sources) return [];

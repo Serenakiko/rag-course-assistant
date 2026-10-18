@@ -71,6 +71,12 @@ def _looks_like_image(data: bytes, ext: str) -> bool:
 _LOGIN_WINDOW = 600.0
 _LOGIN_MAX_FAILS = 10
 _login_fails: dict[str, list[float]] = {}
+# 再加一层按 IP 的失败计数：只按「IP + 账号」记，换个账号名就绕过去了，
+# 而账号只有 8 位数字，逐个号试是可行的。窗口相同，阈值放宽一些。
+_IP_MAX_FAILS = 30
+_login_ip_fails: dict[str, list[float]] = {}
+# 账号不存在时也算一次哈希，否则「立刻返回」本身就是账号不存在的信号
+_DUMMY_HASH = hash_password("timing-only-dummy-password")
 # 注册限流：同一 IP 10 分钟最多 5 次，防止脚本批量刷账号
 _REG_WINDOW = 600.0
 _REG_MAX = 5
@@ -90,7 +96,11 @@ def _prune_expired(now: float) -> None:
     if now - _last_prune < _PRUNE_INTERVAL:
         return
     _last_prune = now
-    for store, window in ((_login_fails, _LOGIN_WINDOW), (_reg_log, _REG_WINDOW)):
+    for store, window in (
+        (_login_fails, _LOGIN_WINDOW),
+        (_login_ip_fails, _LOGIN_WINDOW),
+        (_reg_log, _REG_WINDOW),
+    ):
         expired = [k for k, stamps in store.items() if not any(now - t < window for t in stamps)]
         for key in expired:
             del store[key]
@@ -121,6 +131,29 @@ def _note_fail(key: str) -> None:
 def _clear_fails(key: str) -> None:
     with _login_lock:
         _login_fails.pop(key, None)
+
+
+def _recent_ip_fails(client: str) -> int:
+    """同一 IP 在窗口内的登录失败次数。"""
+    now = time.monotonic()
+    with _login_lock:
+        _prune_expired(now)
+        stamps = [t for t in _login_ip_fails.get(client, []) if now - t < _LOGIN_WINDOW]
+        if stamps:
+            _login_ip_fails[client] = stamps
+        else:
+            _login_ip_fails.pop(client, None)
+        return len(stamps)
+
+
+def _note_ip_fail(client: str) -> None:
+    with _login_lock:
+        _login_ip_fails.setdefault(client, []).append(time.monotonic())
+
+
+def _clear_ip_fails(client: str) -> None:
+    with _login_lock:
+        _login_ip_fails.pop(client, None)
 
 
 @router.post("/register", response_model=UserOut, summary="注册（学生）")
@@ -159,14 +192,23 @@ def login(
     request: Request,
     db: Session = Depends(get_db),
 ) -> LoginResponse:
+    client = request.client.host if request.client else "-"
     key = _login_key(request, payload.username)
-    if _recent_fails(key) >= _LOGIN_MAX_FAILS:
+    if _recent_fails(key) >= _LOGIN_MAX_FAILS or _recent_ip_fails(client) >= _IP_MAX_FAILS:
         raise HTTPException(status_code=429, detail="登录失败次数过多，请 10 分钟后再试")
     user = db.scalar(select(User).where(User.username == payload.username))
-    if user is None or not verify_password(payload.password, user.password_hash):
+    if user is None:
+        # 账号不存在也走一遍哈希，抹平「不存在的号返回更快」这个信号
+        verify_password(payload.password, _DUMMY_HASH)
         _note_fail(key)
+        _note_ip_fail(client)
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    if not verify_password(payload.password, user.password_hash):
+        _note_fail(key)
+        _note_ip_fail(client)
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     _clear_fails(key)
+    _clear_ip_fails(client)
     token = create_access_token(
         user.id, user.username, user.role, user.token_version or 0
     )

@@ -1,19 +1,11 @@
 /* ============ 轻量 Markdown 渲染（离线可用，无第三方依赖） ============ */
 const Markdown = (() => {
-  function escapeHtml(str) {
-    return String(str ?? "")
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
-  }
-
   // 只放行安全协议，挡掉 javascript: / data: 这类可执行 URL
   const SAFE_URL = /^(https?:|mailto:|\/|#)|^[^:]*$/i;
 
   function inline(text) {
     // 先整体转义，之后的正则只在纯文本上工作，输出标签全部由本函数拼接
-    let t = escapeHtml(text);
+    let t = Common.escapeHtml(text);
     // 行内代码
     t = t.replace(/`([^`]+)`/g, (_, code) => `<code>${code}</code>`);
     // 图片
@@ -57,7 +49,7 @@ const Markdown = (() => {
         while (i < lines.length && !/^```/.test(lines[i])) { buf.push(lines[i]); i++; }
         i++; // 跳过结束 ```
         const code = buf.join("\n").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-        html.push(`<pre><code${lang ? ` class="lang-${escapeHtml(lang)}"` : ""}>${code}</code></pre>`);
+        html.push(`<pre><code${lang ? ` class="lang-${Common.escapeHtml(lang)}"` : ""}>${code}</code></pre>`);
         continue;
       }
 

@@ -6,12 +6,16 @@
 """
 from __future__ import annotations
 
+import logging
+
 import chromadb
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 
 from ..config import settings
 from .embedding_service import get_embeddings
+
+logger = logging.getLogger(__name__)
 
 _client: chromadb.ClientAPI | None = None
 _vector_store: Chroma | None = None
@@ -72,7 +76,8 @@ def delete_document(doc_id: int) -> None:
             }
         )
     except Exception:  # noqa: BLE001  集合为空/键不存在时忽略
-        pass
+        # 静默跳过会让「数据库已删、向量还在」——被删的资料继续被检索命中。
+        logger.warning("删除文档向量失败 doc_id=%s（该文档可能仍会被检索到）", doc_id, exc_info=True)
 
 
 # ---------- 知识点 ----------
@@ -103,7 +108,9 @@ def delete_knowledge_point(point_id: int) -> None:
             }
         )
     except Exception:  # noqa: BLE001
-        pass
+        logger.warning(
+            "删除知识点向量失败 point_id=%s（该知识点可能仍会被检索到）", point_id, exc_info=True
+        )
 
 
 # ---------- 检索 ----------

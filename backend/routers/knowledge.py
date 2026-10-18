@@ -244,18 +244,28 @@ def update_base(
         )
         if dup is not None:
             raise HTTPException(status_code=409, detail="已存在同名知识库")
-        # 同步更新该知识库下知识点的课程字段与向量元数据
+        old_name = base.name
         points = list(
-            db.scalars(select(KnowledgePoint).where(KnowledgePoint.course == base.name))
+            db.scalars(select(KnowledgePoint).where(KnowledgePoint.course == old_name))
         )
+        docs = list(db.scalars(select(Document).where(Document.course == old_name)))
+        # 先把数据库里的归属改定并提交，再重建向量。以前是逐条重建完才 commit：
+        # 中途一次 embedding 失败就抛 500，数据库还停在旧名，前面几条向量却已经
+        # 换成新名 —— 这批资料按旧名再也检索不到。现在单条失败只记日志。
         for p in points:
             p.course = name
-            update_knowledge_point(p.id, p.title, p.content, name, p.tags)
-
-        # 文档的课程归属和向量也要一起改，否则学生按新库名检索不到
-        docs = list(db.scalars(select(Document).where(Document.course == base.name)))
         for d in docs:
             d.course = name
+        base.name = name
+        base.description = payload.description.strip()
+        db.commit()
+        db.refresh(base)
+        for p in points:
+            try:
+                update_knowledge_point(p.id, p.title, p.content, name, p.tags)
+            except Exception:  # noqa: BLE001
+                logger.exception("改名后重建知识点向量失败 point_id=%s", p.id)
+        for d in docs:
             try:
                 text = parse_file(Path(d.stored_path))
                 chunks = split_text(text)
@@ -263,10 +273,10 @@ def update_base(
                 if chunks:
                     add_document_chunks(d.id, d.filename, name, chunks)
             except Exception:  # noqa: BLE001
-                logger.exception("重命名知识库时重建文档向量失败 doc_id=%s", d.id)
+                logger.exception("改名后重建文档向量失败 doc_id=%s", d.id)
                 # 旧课程名的向量必须清掉，避免检索到过期归属
                 delete_document(d.id)
-    base.name = name
+        return base
     base.description = payload.description.strip()
     db.commit()
     db.refresh(base)
@@ -511,11 +521,20 @@ def remove_point(
 
 
 def _find_auto_doc(db: Session, point: KnowledgePoint) -> Document | None:
-    """查找与知识点对应的自动生成文档。
+    """查找与知识点同名的「上传时自动生成」文档。
 
-    匹配条件：标题 = 文档名去扩展名、同课程、同上传者，且知识点内容与文档正文前 2000 字一致
-    （文档上传时自动生成的知识点内容即正文前 2000 字）。内容不一致视为手工/已编辑知识点，不联动。
+    匹配条件：标题 = 文档名去扩展名、同课程、同上传者，且正文前 2000 字与知识点内容一致
+    （上传时自动生成的知识点，内容就是正文前 2000 字）。
+
+    两处保护：
+      1) 先按文件名筛，再解析那一篇——以前对该课程每篇文档都 parse_file，
+         文档多的课程删一个知识点要解析几十次；
+      2) 解析失败/正文为空就放弃联动。以前 `not text` 也算匹配，
+         文件被挪走或 PDF 突然解析不了时，会把整篇文档连带向量一起删掉。
     """
+    stem = (point.title or "").strip()
+    if not stem:
+        return None
     docs = db.scalars(
         select(Document).where(
             Document.course == (point.course or ""),
@@ -523,12 +542,13 @@ def _find_auto_doc(db: Session, point: KnowledgePoint) -> Document | None:
         )
     ).all()
     for d in docs:
-        if Path(d.filename).stem != point.title:
+        if Path(d.filename).stem != stem:
             continue
         try:
             text = parse_file(Path(d.stored_path))
-        except Exception:  # noqa: BLE001  文件缺失/解析失败按空处理
-            text = ""
-        if not text or text[:2000] == (point.content or ""):
+        except Exception:  # noqa: BLE001
+            logger.warning("联动删除前解析文档失败，这次只删知识点 doc_id=%s", d.id)
+            return None
+        if text and text[:2000] == (point.content or ""):
             return d
     return None

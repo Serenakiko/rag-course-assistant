@@ -101,7 +101,7 @@ const WorkbenchView = (() => {
         if (!items || !items.length) {
           listEl.innerHTML = `<div class="wb-fb-empty">还没有提交过反馈。提问时如果知识库里没有相关内容，会自动记到这里；管理员补完资料后，你能在这里看到回答。</div>`;
         } else {
-          listEl.innerHTML = items.slice(0, 4).map((r) => `
+          listEl.innerHTML = items.slice(0, 5).map((r) => `
             <div class="fb-row" data-fb="${r.id}">
               <span class="fb-status">${r.status === "resolved" ? "已解决" : "处理中"}</span>
               <span class="fb-q" style="flex:1;min-width:0">${Common.escapeHtml(r.question)}</span>

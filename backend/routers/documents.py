@@ -20,6 +20,7 @@ from ..services.kb_scope import assert_writable_course
 from ..services.vector_store import (
     add_document_chunks,
     delete_document,
+    _get_client,
     delete_knowledge_point,
 )
 
@@ -192,12 +193,12 @@ def document_detail(
     chunks: list[dict] = []
     if doc.status == "ready":
         try:
-            from ..config import settings
-            from ..services.vector_store import _get_client
-
             collection = _get_client().get_collection(settings.COLLECTION_NAME)
+            # Chroma 的 where 只接受「一个操作符」，平铺两个键会直接 ValueError：
+            # Expected where to have exactly one operator —— 以前被 except 吞掉，
+            # 结果就是文档详情永远显示「没有分块」。多条件必须写成 $and。
             data = collection.get(
-                where={"source_type": "document", "doc_id": str(doc.id)},
+                where={"$and": [{"source_type": "document"}, {"doc_id": str(doc.id)}]},
                 include=["documents", "metadatas"],
             )
             items = sorted(
@@ -209,7 +210,16 @@ def document_detail(
                 for _id, text, meta in items
             ]
         except Exception:  # noqa: BLE001
+            logger.warning("读取文档分块失败 doc_id=%s", doc.id, exc_info=True)
             chunks = []
+    # 有些文档记录没有向量分块（例如 .tools/sync_seed_documents.py 生成的种子文档，
+    # 内容在知识点里，文档只做展示），这种情况直接读原文件，别让详情页空着。
+    preview = ""
+    if not chunks and doc.status == "ready" and doc.stored_path and Path(doc.stored_path).exists():
+        try:
+            preview = parse_file(Path(doc.stored_path))[:20000]
+        except Exception:  # noqa: BLE001
+            logger.warning("文档详情读取原文失败 doc_id=%s", doc.id, exc_info=True)
     return DocumentDetailOut(
         **{
             "id": doc.id,
@@ -217,12 +227,14 @@ def document_detail(
             "file_type": doc.file_type,
             "file_size": doc.file_size,
             "status": doc.status,
+            "course": doc.course or "",   # 之前漏了这个字段，弹窗里「所属知识库」永远是空的
             "chunk_count": doc.chunk_count,
             "error": doc.error,
             "uploaded_by": doc.uploaded_by,
             "created_at": doc.created_at,
         },
         chunks=chunks,
+        preview=preview,
     )
 
 
@@ -254,12 +266,14 @@ def remove_document(
     for kp in auto_kps:
         delete_knowledge_point(kp.id)
         db.delete(kp)
-    # 联动 2：知识来源被移除后，同课程的已解决反馈重置为待处理（答案快照不再有效）
+    # 联动 2：被删的文档曾是某条反馈的推荐来源时，那条回答快照不再可信，打回待处理。
+    # 以前按课程一刀切：删一篇无关文档，会把该课程下所有已解决反馈的答案清空。
     if doc.course:
         resolved_rows = db.scalars(
             select(UnansweredQuestion).where(
                 UnansweredQuestion.course == doc.course,
                 UnansweredQuestion.status == "resolved",
+                UnansweredQuestion.related_points.like(f"%{stem}%"),
             )
         ).all()
         for q in resolved_rows:

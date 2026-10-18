@@ -117,7 +117,9 @@ def restore_item(
     db.add(base)
     db.commit()
 
-    restored_points = failed_points = 0
+    # 知识点先全部 add、一次 commit 拿到 id，再统一写向量。
+    # 逐个 commit 时恢复 100 个知识点要等 100 次落盘。
+    new_points: list[KnowledgePoint] = []
     for p in data.get("points") or []:
         kp = KnowledgePoint(
             title=(p.get("title") or "未命名知识点")[:255],
@@ -128,7 +130,11 @@ def restore_item(
             is_auto=int(p.get("is_auto") or 0),
         )
         db.add(kp)
-        db.commit()
+        new_points.append(kp)
+    db.commit()
+
+    restored_points = failed_points = 0
+    for kp in new_points:
         db.refresh(kp)
         restored_points += 1
         # 文档自动生成的知识点只作展示，不重复入向量（和重建脚本保持一致）

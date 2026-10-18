@@ -2,7 +2,39 @@ const ChatView = (() => {
   let currentConvId = null;
   let abortController = null;
   let streamSeq = 0;  // 生成序号：切换会话中止旧生成后，旧回调不再操作界面
+  let activeSeq = 0;  // 正在进行的那一轮序号，0 = 空闲。同一会话不允许并发提问
   let pendingConvId = null;  // 记录"生成未完成"的会话：返回该会话时自动重新生成
+  const resumedConvs = new Set();  // 本次页面里已自动补过回答的会话，避免反复重试
+  let sessionQuery = "";      // 侧边栏搜索框的关键字（服务端按标题过滤）
+  let sessionItems = [];      // 当前这一页会话（最近 20 条，或搜索结果）
+  let sessionTotal = 0;       // 匹配总数（不搜索时就是全部会话数）
+  let searchTimer = null;     // 搜索防抖
+  const convMeta = new Map(); // id -> 会话概要：当前会话被挤出这一页时还能钉在最上面
+  const SIDEBAR_LIMIT = 20;   // 侧边栏只取这么多条，再多去「对话历史」页
+  const SEARCH_LIMIT = 50;    // 搜索结果最多取这么多条
+
+  const ICON_SEND = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3.4 20.4l17.45-7.48a1 1 0 0 0 0-1.84L3.4 3.6a.993.993 0 0 0-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z"/></svg>';
+  const ICON_STOP = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+
+  // 发送按钮的两种状态：生成中是可点击的「停止生成」
+  function setSending(on) {
+    const sendBtn = document.getElementById("send-btn");
+    if (!sendBtn) return;
+    sendBtn.title = on ? "停止生成" : "发送";
+    sendBtn.style.background = on ? "var(--danger)" : "";
+    sendBtn.innerHTML = on ? ICON_STOP : ICON_SEND;
+  }
+
+  // 中止当前生成（切换会话 / 新建对话 / 删除会话 / 点「停止生成」）。
+  // 顺手把 activeSeq 立刻放开：紧接着的补生成不会被这一轮的收尾卡住。
+  function stopStream() {
+    if (abortController) abortController.abort();
+    abortController = null;
+    if (activeSeq) {
+      activeSeq = 0;
+      setSending(false);
+    }
+  }
 
   function render(container) {
     container.innerHTML = `
@@ -12,8 +44,12 @@ const ChatView = (() => {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             <span>新对话</span>
           </button>
-          <div class="nav-group-title" style="padding:10px 14px 6px">会话记录</div>
+          <div class="chat-search">
+            <input id="chat-search" type="search" placeholder="搜索会话标题" autocomplete="off" aria-label="搜索会话">
+          </div>
+          <div class="nav-group-title" style="padding:2px 14px 6px">会话记录</div>
           <div class="chat-sessions" id="chat-sessions"></div>
+          <div class="chat-more" id="chat-more"></div>
         </aside>
         <section class="chat-main">
           <div class="chat-messages" id="chat-messages"></div>
@@ -31,6 +67,13 @@ const ChatView = (() => {
     const inputEl = document.getElementById("chat-input");
     const sendBtn = document.getElementById("send-btn");
 
+    document.getElementById("chat-search").addEventListener("input", (e) => {
+      sessionQuery = e.target.value;
+      // 服务端搜索：每敲一个字都发请求太浪费，防抖 250ms
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(fetchSessionPage, 250);
+    });
+
     document.getElementById("chat-new").addEventListener("click", async () => {
       const hasMessages = document.querySelectorAll("#chat-messages .msg").length > 0;
       if (!hasMessages) {
@@ -44,9 +87,9 @@ const ChatView = (() => {
         danger: false,
       });
       if (!ok) return;
-      if (abortController) {
+      if (activeSeq) {
         pendingConvId = currentConvId;  // 记录未完成生成的会话，便于返回时补生成
-        abortController.abort();  // 先停止正在进行的生成
+        stopStream();  // 先停止正在进行的生成
       }
       currentConvId = null;
       document.querySelectorAll(".session-item").forEach((el) => el.classList.remove("active"));
@@ -59,8 +102,8 @@ const ChatView = (() => {
     });
 
     const doSend = () => {
-      if (abortController) {  // 生成中：点击按钮 = 停止生成
-        abortController.abort();
+      if (activeSeq) {  // 生成中：点击按钮 = 停止生成，不会又发一轮
+        stopStream();
         return;
       }
       const text = inputEl.value.trim();
@@ -73,7 +116,7 @@ const ChatView = (() => {
     inputEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        if (!abortController) doSend();  // 生成中按 Enter 不触发停止，避免误触
+        if (!activeSeq) doSend();  // 生成中按 Enter 不发新问题（两轮重叠会让上一轮丢答案）
       }
     });
 
@@ -85,15 +128,11 @@ const ChatView = (() => {
     const listEl = document.getElementById("chat-sessions");
     if (!listEl) return;
     const keepCurrent = !!(opts && opts.keepCurrent);  // 提问后刷新：不覆盖当前对话界面
-    let sessions = [];
-    try {
-      sessions = await API.request("GET", "/api/chat/sessions");
-    } catch { /* 静默 */ }
-    renderSessionList(sessions);
-    if (keepCurrent) return;  // 提问后只刷新列表，不动当前对话界面
+    await fetchSessionPage();
+    if (keepCurrent) return;
 
     // 进入页面停在欢迎页（带示例问题）；只有你刚打开过的会话才自动恢复
-    if (currentConvId && sessions.some((s) => s.id === currentConvId)) {
+    if (currentConvId) {
       openSession(currentConvId);
     } else {
       currentConvId = null;
@@ -101,45 +140,99 @@ const ChatView = (() => {
     }
   }
 
-  function renderSessionList(sessions) {
+  /* 只取当前这一页 + 总数：以前是全量拉下来再前端切，会话一多就要传几百 KB */
+  async function fetchSessionPage() {
+    const q = sessionQuery.trim();
+    const params = new URLSearchParams({ limit: String(q ? SEARCH_LIMIT : SIDEBAR_LIMIT), offset: "0" });
+    if (q) params.set("q", q);
+    try {
+      const data = await API.request("GET", `/api/chat/sessions?${params.toString()}`);
+      sessionItems = (data && data.items) || [];
+      sessionTotal = (data && data.total) || 0;
+      sessionItems.forEach((it) => convMeta.set(it.id, it));
+    } catch {
+      sessionItems = [];
+      sessionTotal = 0;
+    }
+    renderSessionList();
+  }
+
+  /* 侧边栏只渲染当前这一页（最近 20 条 / 搜索结果）：会话一多一长串根本翻不动。
+     想看全部、做管理就去「对话历史」页（那边有服务端分页和删除）。 */
+  function renderSessionList() {
     const listEl = document.getElementById("chat-sessions");
     if (!listEl) return;
-    listEl.innerHTML = sessions.map((s) => `
-      <div class="session-item ${s.id === currentConvId ? "active" : ""}" data-id="${s.id}">
-        <div class="s-title" title="${Common.escapeHtml(s.title)}">${Common.escapeHtml(s.title)}</div>
-        <div class="s-meta">
-          <span class="s-time">${Common.fmtTime(s.created_at)}</span>
-          <span class="s-ops">
-            <button class="s-op" data-op="rename" title="重命名">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
-            </button>
-            <button class="s-op danger" data-op="delete" title="删除">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-            </button>
-          </span>
-        </div>
-      </div>`).join("");
+    const q = sessionQuery.trim();
+    let visible = sessionItems.slice();
+    // 正在看的老会话被挤出这一页时钉在最上面，否则它在列表里"消失"了
+    if (!q && currentConvId && !visible.some((s) => s.id === currentConvId)) {
+      const cur = convMeta.get(currentConvId);
+      if (cur) visible = [cur, ...visible];
+    }
 
-    listEl.querySelectorAll(".session-item").forEach((item) => {
-      item.addEventListener("click", (e) => {
-        if (e.target.closest("[data-op]")) return;
-        openSession(Number(item.dataset.id));
+    if (!visible.length) {
+      listEl.innerHTML = `<div class="session-empty">${
+        q ? "没有匹配的会话" : "还没有会话，直接在下面提问就行"
+      }</div>`;
+    } else {
+      listEl.innerHTML = visible.map((s) => `
+        <div class="session-item ${s.id === currentConvId ? "active" : ""}" data-id="${s.id}">
+          <div class="s-title" title="${Common.escapeHtml(s.title)}">${Common.escapeHtml(s.title)}</div>
+          <div class="s-meta">
+            <span class="s-time">${Common.fmtTime(s.created_at)}</span>
+            <span class="s-ops">
+              <button class="s-op" data-op="rename" title="重命名">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+              </button>
+              <button class="s-op danger" data-op="delete" title="删除">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+              </button>
+            </span>
+          </div>
+        </div>`).join("");
+
+      listEl.querySelectorAll(".session-item").forEach((item) => {
+        item.addEventListener("click", (e) => {
+          if (e.target.closest("[data-op]")) return;
+          openSession(Number(item.dataset.id));
+        });
+        item.querySelector('[data-op="rename"]').addEventListener("click", (e) => {
+          e.stopPropagation();
+          renameSession(Number(item.dataset.id));
+        });
+        item.querySelector('[data-op="delete"]').addEventListener("click", (e) => {
+          e.stopPropagation();
+          deleteSession(Number(item.dataset.id));
+        });
       });
-      item.querySelector('[data-op="rename"]').addEventListener("click", (e) => {
-        e.stopPropagation();
-        renameSession(Number(item.dataset.id));
-      });
-      item.querySelector('[data-op="delete"]').addEventListener("click", (e) => {
-        e.stopPropagation();
-        deleteSession(Number(item.dataset.id));
-      });
-    });
+    }
+
+    renderSessionFooter(q);
+  }
+
+  // 列表下方的说明行：「查看全部」入口 / 搜索结果条数
+  function renderSessionFooter(q) {
+    const footEl = document.getElementById("chat-more");
+    if (!footEl) return;
+    if (q) {
+      footEl.innerHTML = `<div class="session-hint">匹配 ${sessionTotal} 条${
+        sessionTotal > sessionItems.length ? `（只显示前 ${sessionItems.length} 条）` : ""
+      }</div>`;
+      return;
+    }
+    if (sessionTotal > sessionItems.length) {
+      footEl.innerHTML =
+        `<button type="button" class="session-more" id="chat-more-btn">查看全部 ${sessionTotal} 条 ›</button>`;
+      document.getElementById("chat-more-btn").addEventListener("click", () => App.navigate("history"));
+    } else {
+      footEl.innerHTML = "";
+    }
   }
 
   async function openSession(id) {
-    if (abortController) {
+    if (activeSeq) {
       pendingConvId = currentConvId;  // 切换会话时记录未完成生成的会话
-      abortController.abort();  // 先停止当前生成，避免占用模型
+      stopStream();  // 先停止当前生成，避免占用模型
     }
     currentConvId = id;
     document.querySelectorAll(".session-item").forEach((el) =>
@@ -152,19 +245,33 @@ const ChatView = (() => {
       msgs.forEach((m) => renderMessage(m.role, m.content, m.sources, m.interrupted));
       scrollBottom();
       // 返回“生成未完成”的会话：补生成。带 regenerate，后端不再重复落一条提问。
-      if (id === pendingConvId) {
+      const last = msgs[msgs.length - 1];
+      if (last && last.role === "user" && !resumedConvs.has(id)) {
+        // 只有提问没有回答的会话（生成中断 / 失败没落库）：进来自动补一条回答。
+        // 以前只在本次页面里记着 pendingConvId，刷新后就永远停在空白。
+        resumedConvs.add(id);
         pendingConvId = null;
-        const last = msgs[msgs.length - 1];
-        if (last && last.role === "user") {
-          send(last.content, { silentUser: true, regenerate: true });
-        } else if (last && last.role === "assistant") {
-          // 中断时半截回答已经落库，先去掉这条再从头生成，避免出现两条回答
-          const lastUser = [...msgs].reverse().find((m) => m.role === "user");
-          if (lastUser) {
-            if (messagesEl.lastElementChild) messagesEl.lastElementChild.remove();
-            send(lastUser.content, { silentUser: true, regenerate: true });
-          }
+        send(last.content, { silentUser: true, regenerate: true });
+      } else if (last && last.role === "assistant" && last.interrupted && !resumedConvs.has(id)) {
+        // 上次生成到一半断了（刷新页面 / 切走 / 超时），半截答案既不能续写也没法用：
+        // 自动重新生成一遍（后端 regenerate 会先删掉这条半截回答）。
+        resumedConvs.add(id);
+        pendingConvId = null;
+        const lastUserMsg = [...msgs].reverse().find((m) => m.role === "user");
+        if (lastUserMsg) {
+          if (messagesEl.lastElementChild) messagesEl.lastElementChild.remove();
+          send(lastUserMsg.content, { silentUser: true, regenerate: true });
         }
+      } else if (id === pendingConvId && last && last.role === "assistant") {
+        // 中断时半截回答已经落库，先去掉了这条再从头生成，避免出现两条回答
+        pendingConvId = null;
+        const lastUser = [...msgs].reverse().find((m) => m.role === "user");
+        if (lastUser) {
+          if (messagesEl.lastElementChild) messagesEl.lastElementChild.remove();
+          send(lastUser.content, { silentUser: true, regenerate: true });
+        }
+      } else if (id === pendingConvId) {
+        pendingConvId = null;
       }
     } catch {
       showWelcome();
@@ -211,7 +318,7 @@ const ChatView = (() => {
     try {
       await API.request("DELETE", `/api/chat/sessions/${id}`);
       if (currentConvId === id) {
-        if (abortController) abortController.abort();  // 删除生成中的会话时停止生成
+        stopStream();  // 删除生成中的会话时停止生成
         currentConvId = null;
       }
       loadSessions();
@@ -326,60 +433,65 @@ const ChatView = (() => {
   }
 
   async function send(text, opts) {
+    // 一轮没生成完就不允许再发。以前两轮能同时在跑：后一轮把前一轮顶掉，
+    // 前一轮既没答案也没收尾，气泡就一直转圈（下个问题答了、上个永远没有）。
+    if (activeSeq) return;
     const messagesEl = document.getElementById("chat-messages");
-    const sendBtn = document.getElementById("send-btn");
     const inputEl = document.getElementById("chat-input");
     const seq = ++streamSeq;  // 标记本次生成；切换会话后旧生成的回调将不再操作界面
+    activeSeq = seq;
     const silentUser = !!(opts && opts.silentUser);  // 补生成模式：不重复渲染提问、不新建会话
     const regenerate = !!(opts && opts.regenerate);  // 重新生成：后端不重复落提问、先删旧回答
-
-    let convId;
-    if (silentUser) {
-      convId = currentConvId;
-    } else {
-      try {
-        convId = await ensureConversation(text.replace(/\s+/g, " ").slice(0, 20));
-        loadSessions({ keepCurrent: true });  // 刷新列表，但不打断当前对话
-      } catch (err) {
-        Common.toast("会话创建失败：" + err.message, "error");
-        return;
-      }
-      if (messagesEl.querySelector(".chat-welcome")) messagesEl.innerHTML = "";
-      renderMessage("user", text);
-    }
-
-    const assistantDiv = document.createElement("div");
-    assistantDiv.className = "msg assistant";
-    assistantDiv.innerHTML = `
-      <div class="msg-avatar">AI</div>
-      <div class="msg-body">
-        <div class="bubble md-body"><span class="typing-dots"><span></span><span></span><span></span></span></div>
-      </div>`;
-    messagesEl.appendChild(assistantDiv);
-    scrollBottom();
-
-    const bubble = assistantDiv.querySelector(".bubble");
-    let fullText = "";
-    let renderTimer = null;
+    let bubble = null;
     let hadError = false;
     let errorMsg = "";
 
-    const scheduleRender = () => {
-      if (renderTimer) return;
-      renderTimer = setTimeout(() => {
-        bubble.innerHTML = Markdown.render(fullText);
-        scrollBottom();
-        renderTimer = null;
-      }, 90);
-    };
-
-    // 生成中：发送按钮变为可点击的“停止生成”
-    sendBtn.title = "停止生成";
-    sendBtn.style.background = "var(--danger)";
-    sendBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+    setSending(true);  // 立刻切成「停止生成」：建连这段空窗期再点，只会停止，不会又发一轮
 
     try {
-      abortController = await API.streamAsk(convId, text, {
+      let convId;
+      if (silentUser) {
+        convId = currentConvId;
+      } else {
+        try {
+          convId = await ensureConversation(text.replace(/\s+/g, " ").slice(0, 20));
+          loadSessions({ keepCurrent: true });  // 刷新列表，但不打断当前对话
+        } catch (err) {
+          Common.toast("会话创建失败：" + err.message, "error");
+          return;
+        }
+        if (messagesEl.querySelector(".chat-welcome")) messagesEl.innerHTML = "";
+        renderMessage("user", text);
+      }
+      if (!convId) {
+        Common.toast("会话状态异常，刷新页面后再试一次。", "error");
+        return;
+      }
+
+      const assistantDiv = document.createElement("div");
+      assistantDiv.className = "msg assistant";
+      assistantDiv.innerHTML = `
+        <div class="msg-avatar">AI</div>
+        <div class="msg-body">
+          <div class="bubble md-body"><span class="typing-dots"><span></span><span></span><span></span></span></div>
+        </div>`;
+      messagesEl.appendChild(assistantDiv);
+      scrollBottom();
+
+      bubble = assistantDiv.querySelector(".bubble");
+      let fullText = "";
+      let renderTimer = null;
+
+      const scheduleRender = () => {
+        if (renderTimer) return;
+        renderTimer = setTimeout(() => {
+          bubble.innerHTML = Markdown.render(fullText);
+          scrollBottom();
+          renderTimer = null;
+        }, 90);
+      };
+
+      const req = API.streamAsk(convId, text, {
         onToken: (t) => {
           if (seq !== streamSeq) return;  // 已切换到其他会话，忽略旧生成
           fullText += t;
@@ -422,19 +534,26 @@ const ChatView = (() => {
           // 出错且已有部分内容时，保留 onError 中“部分内容 + 错误提示”的渲染结果
           scrollBottom();
         },
-      }, { regenerate });
+      }, { regenerate, idleTimeout: 120_000, totalTimeout: 240_000 });
+
+      abortController = req.controller;  // 同步拿到 controller：从这一刻起「停止生成」真的能停
+      await req.done;  // 本轮彻底结束（正常 / 出错 / 被停止）后才收尾
     } catch (err) {
-      if (seq !== streamSeq) return;
       hadError = true;
       errorMsg = err.message;
-      bubble.innerHTML = `<span style="color:var(--danger)">${Common.escapeHtml(err.message)}</span>`;
+      if (bubble) {
+        bubble.innerHTML = `<span style="color:var(--danger)">${Common.escapeHtml(err.message)}</span>`;
+      } else {
+        Common.toast("发送失败：" + err.message, "error");
+      }
     } finally {
-      if (seq !== streamSeq) return;  // 已被新生成/切换会话取代，不恢复界面状态
-      sendBtn.title = "发送";
-      sendBtn.style.background = "";
-      sendBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3.4 20.4l17.45-7.48a1 1 0 0 0 0-1.84L3.4 3.6a.993.993 0 0 0-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z"/></svg>';
-      abortController = null;
-      inputEl.focus();
+      // 只有自己仍是当前这一轮才复位，避免把后一轮的状态清掉
+      if (activeSeq === seq) {
+        activeSeq = 0;
+        abortController = null;
+        setSending(false);
+        if (inputEl) inputEl.focus();
+      }
     }
   }
 
@@ -444,7 +563,7 @@ const ChatView = (() => {
   }
 
   function destroy() {
-    if (abortController) abortController.abort();
+    stopStream();
     currentConvId = null;
   }
 

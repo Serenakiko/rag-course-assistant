@@ -43,7 +43,7 @@ const AdminView = (() => {
         { key: "users",     icon: ICON.user,   cls: "blue",   num: s.users,              label: "用户总数" },
         { key: "kb",        icon: ICON.folder, cls: "green",  num: s.knowledge_bases,     label: "知识库数量" },
         { key: "documents", icon: ICON.doc,    cls: "orange", num: s.documents,           label: "文档总数" },
-        { key: "history",   icon: ICON.chat,   cls: "red",    num: s.today_conversations, label: "今日提问" },
+        { key: "history",   icon: ICON.chat,   cls: "red",    num: s.today_questions ?? 0, label: "今日提问" },
       ];
       grid.innerHTML = cards.map((c) => `
         <div class="stat-card clickable" data-key="${c.key}" title="点击查看${c.label}">
@@ -56,7 +56,7 @@ const AdminView = (() => {
       grid.querySelectorAll(".stat-card[data-key]").forEach((card) =>
         card.addEventListener("click", () => App.navigate(card.dataset.key)));
 
-      renderTrend(s.daily_conversations || []);
+      renderTrend(s.daily_questions || []);
       renderDonut(s.kb_doc_distribution || []);
       renderFeedback(s);
     } catch (err) {
@@ -91,6 +91,12 @@ const AdminView = (() => {
   function renderTrend(daily) {
     const el = document.getElementById("chart-trend");
     if (!el) return;
+    // 没有数据就直接收工：后面 points[points.length - 1].x 在空数组上会抛异常，
+    // 异常一旦冒出去，整个数据概览就白屏了（后端还没重启、字段对不上时就会这样）
+    if (!daily.length) {
+      el.innerHTML = `<div style="padding:40px 0;text-align:center;color:var(--text-3);font-size:13px">最近 7 天还没有提问数据</div>`;
+      return;
+    }
     const w = 640, h = 240, padL = 40, padR = 20, padT = 20, padB = 34;
     const max = Math.max(4, ...daily.map((d) => d.count));
     const innerW = w - padL - padR;
@@ -317,7 +323,6 @@ const AdminView = (() => {
     const keyword = (document.getElementById("users-search")?.value || "").trim();
     const countEl = document.getElementById("users-count");
     if (countEl) countEl.textContent = keyword ? `匹配 ${usersTotal} 条` : "";
-    const totalPages = Math.max(1, Math.ceil(usersTotal / usersPageSize));
     const me = API.getUser();
 
     if (!usersRows.length) {
@@ -343,10 +348,9 @@ const AdminView = (() => {
     tbody.querySelectorAll("[data-del]").forEach((b) =>
       b.addEventListener("click", () => removeUser(usersRows.find((u) => u.id === Number(b.dataset.del)))));
 
-    renderPagination("users-pagination", usersTotal, totalPages, usersPage, (p) => {
+    Common.renderPagination("users-pagination", usersTotal, usersPage, usersPageSize, (p) => {
       usersPage = p; loadUsers();
     }, {
-      pageSize: usersPageSize,
       sizeOptions: [10, 20],
       onSizeChange: (s) => { usersPageSize = s; usersPage = 1; loadUsers(); },
     });
@@ -604,7 +608,6 @@ const AdminView = (() => {
     const tbody = document.getElementById("kb-tbody");
     if (!tbody) return;
     const keyword = (document.getElementById("kb-search")?.value || "").trim();
-    const totalPages = Math.max(1, Math.ceil(kbTotal / kbPageSize));
 
     if (!kbRows.length) {
       tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:36px;color:var(--text-3)">${keyword ? "没有匹配的知识库" : "暂无知识库"}</td></tr>`;
@@ -630,10 +633,9 @@ const AdminView = (() => {
     tbody.querySelectorAll("[data-del]").forEach((b) =>
       b.addEventListener("click", () => removeKb(kbRows.find((x) => x.id === Number(b.dataset.del)))));
 
-    renderPagination("kb-pagination", kbTotal, totalPages, kbPage, (p) => {
+    Common.renderPagination("kb-pagination", kbTotal, kbPage, kbPageSize, (p) => {
       kbPage = p; loadKbTable();
     }, {
-      pageSize: kbPageSize,
       sizeOptions: [10, 20],
       onSizeChange: (s) => { kbPageSize = s; kbPage = 1; loadKbTable(); },
     });
@@ -761,7 +763,7 @@ const AdminView = (() => {
     if (!base) return;
     const ok = await Common.confirmDialog({
       title: "删除知识库",
-      message: `将删除知识库「${Common.escapeHtml(base.name)}」及其下 ${base.document_count || 0} 个文档、${base.point_count || 0} 个知识点与向量索引，删除后不可恢复。确认？`,
+      message: `将删除知识库「${Common.escapeHtml(base.name)}」及其下 ${base.document_count || 0} 个文档、${base.point_count || 0} 个知识点与向量索引，删除后进入回收站，30 天内可恢复。确认？`,
       okText: "删除",
     });
     if (!ok) return;
@@ -955,8 +957,11 @@ const AdminView = (() => {
   let uqRows = [];      // 当前页
   let uqTotal = 0;
   let uqPage = 1;
-  let uqPageSize = 10;   // 可在 10 / 20 之间切换
+  let uqPageSize = 5;    // 默认一页 5 条（最近 5 条），可在 5 / 10 / 20 之间切换
   let uqStatus = "";
+  let clusterRows = [];          // 聚类分组（一次拉全，前端分页）
+  let clusterPage = 1;
+  const UQ_CLUSTER_PAGE_SIZE = 5;   // 和列表保持一致
 
   function renderUnanswered(container) {
     container.innerHTML = `
@@ -1014,37 +1019,57 @@ const AdminView = (() => {
     const list = document.getElementById("uq-list");
     if (!list) return;
     list.innerHTML = `<div class="fb-loading"><span class="loading-spinner"></span></div>`;
-    const pag = document.getElementById("uq-pagination");
-    if (pag) pag.innerHTML = "";
     try {
       const [data, stats] = await Promise.all([
         API.request("GET", "/api/admin/unanswered/clusters?status=pending"),
         API.request("GET", "/api/admin/unanswered/stats").catch(() => null),
       ]);
       renderUqStats(stats);
-      const items = data.items || [];
-      if (!items.length) {
-        list.innerHTML = `<div class="fb-empty"><p>没有待处理的问题，聚类里暂时没东西可看</p></div>`;
-        return;
-      }
-      list.innerHTML = items.map((g) => `
-        <div class="fb-item">
-          <div class="fb-head">
-            <span class="fb-badge" style="background:#e7eff1;color:#17505e">${g.count} 人问过</span>
-            <b class="fb-q" title="${Common.escapeHtml(g.question)}">${Common.escapeHtml(g.question)}</b>
-            <span class="fb-time">${Common.fmtTime(g.latest_at)}</span>
-          </div>
-          <div class="fb-meta">
-            ${g.course ? `知识库：${Common.escapeHtml(g.course)}` : "未关联知识库"}
-            ${g.creators && g.creators.length ? ` · 提问者：${g.creators.map((c) => Common.escapeHtml(c)).join("、")}` : ""}
-          </div>
-          ${g.count > 1
-            ? `<div class="fb-answer" style="background:#faf9f7;line-height:1.9">${g.variants.map((v) => `<div style="font-size:13px">· ${Common.escapeHtml(v)}</div>`).join("")}</div>`
-            : `<div class="fb-wait-tip"><span>只有一个人问过</span></div>`}
-        </div>`).join("");
+      clusterRows = data.items || [];
+      clusterPage = 1;
+      renderClusters();
     } catch (err) {
       list.innerHTML = `<div class="fb-empty"><p style="color:var(--danger)">${Common.escapeHtml(err.message)}</p></div>`;
+      const pag = document.getElementById("uq-pagination");
+      if (pag) pag.innerHTML = "";
     }
+  }
+
+  /* 聚类分组可能几十条：和「全部 / 已解决」一样底部给分页（数据一次拉全，前端切页） */
+  function renderClusters() {
+    const list = document.getElementById("uq-list");
+    if (!list) return;
+    if (!clusterRows.length) {
+      list.innerHTML = `<div class="fb-empty"><p>没有待处理的问题，聚类里暂时没东西可看</p></div>`;
+      Common.renderPagination("uq-pagination", 0, 1, UQ_CLUSTER_PAGE_SIZE, () => {});
+      return;
+    }
+
+    const totalPages = Math.max(1, Math.ceil(clusterRows.length / UQ_CLUSTER_PAGE_SIZE));
+    if (clusterPage > totalPages) clusterPage = totalPages;
+    const startIdx = (clusterPage - 1) * UQ_CLUSTER_PAGE_SIZE;
+    const pageRows = clusterRows.slice(startIdx, startIdx + UQ_CLUSTER_PAGE_SIZE);
+
+    list.innerHTML = pageRows.map((g) => `
+      <div class="fb-item">
+        <div class="fb-head">
+          <span class="fb-badge" style="background:#e7eff1;color:#17505e">${g.count} 人问过</span>
+          <b class="fb-q" title="${Common.escapeHtml(g.question)}">${Common.escapeHtml(g.question)}</b>
+          <span class="fb-time">${Common.fmtTime(g.latest_at)}</span>
+        </div>
+        <div class="fb-meta">
+          ${g.course ? `知识库：${Common.escapeHtml(g.course)}` : "未关联知识库"}
+          ${g.creators && g.creators.length ? ` · 提问者：${g.creators.map((c) => Common.escapeHtml(c)).join("、")}` : ""}
+        </div>
+        ${g.count > 1
+          ? `<div class="fb-answer" style="background:#faf9f7;line-height:1.9">${g.variants.map((v) => `<div style="font-size:13px">· ${Common.escapeHtml(v)}</div>`).join("")}</div>`
+          : `<div class="fb-wait-tip"><span>只有一个人问过</span></div>`}
+      </div>`).join("");
+
+    Common.renderPagination("uq-pagination", clusterRows.length, clusterPage, UQ_CLUSTER_PAGE_SIZE, (p) => {
+      clusterPage = p;
+      renderClusters();
+    });
   }
 
   /* 与学生端「我的反馈」同款统计卡：白色卡片 + 浅色图标块 + 数字/标签 */
@@ -1076,7 +1101,6 @@ const AdminView = (() => {
   function renderUqList() {
     const list = document.getElementById("uq-list");
     if (!list) return;
-    const totalPages = Math.max(1, Math.ceil(uqTotal / uqPageSize));
 
     if (!uqRows.length) {
       list.innerHTML = `<div class="fb-empty">
@@ -1087,8 +1111,8 @@ const AdminView = (() => {
             ? "还没有已解决的反馈"
             : "还没有收到问题反馈"}</p>
       </div>`;
-      renderPagination("uq-pagination", 0, 1, 1, () => {}, {
-        pageSize: uqPageSize, sizeOptions: [10, 20],
+      Common.renderPagination("uq-pagination", 0, 1, uqPageSize, () => {}, {
+        sizeOptions: [5, 10, 20],
         onSizeChange: (s) => { uqPageSize = s; uqPage = 1; loadUnanswered(); },
       });
       return;
@@ -1115,11 +1139,10 @@ const AdminView = (() => {
     list.querySelectorAll("[data-del]").forEach((b) =>
       b.addEventListener("click", () => removeUq(uqRows.find((x) => x.id === Number(b.dataset.del)))));
 
-    renderPagination("uq-pagination", uqTotal, totalPages, uqPage, (p) => {
+    Common.renderPagination("uq-pagination", uqTotal, uqPage, uqPageSize, (p) => {
       uqPage = p; loadUnanswered();
     }, {
-      pageSize: uqPageSize,
-      sizeOptions: [10, 20],
+      sizeOptions: [5, 10, 20],
       onSizeChange: (s) => { uqPageSize = s; uqPage = 1; loadUnanswered(); },
     });
   }
@@ -1182,39 +1205,6 @@ const AdminView = (() => {
   }
 
   /* ==================== 通用分页渲染 ==================== */
-  function renderPagination(elId, total, totalPages, current, onChange, opts) {
-    const el = document.getElementById(elId);
-    if (!el) return;
-    opts = opts || {};
-    const sizeOptions = opts.sizeOptions && opts.sizeOptions.length ? opts.sizeOptions : [10];
-    const pageSize = opts.pageSize || sizeOptions[0];
-
-    let pages = "";
-    for (let p = 1; p <= totalPages; p++) {
-      pages += `<button class="page-btn ${p === current ? "active" : ""}" data-page="${p}">${p}</button>`;
-    }
-    el.innerHTML = `
-      <span class="total">共 ${total} 条</span>
-      <select class="page-size">
-        ${sizeOptions.map((s) => `<option value="${s}" ${s === pageSize ? "selected" : ""}>${s}条/页</option>`).join("")}
-      </select>
-      <button class="page-btn" data-page="${current - 1}" ${current <= 1 ? "disabled" : ""}>‹</button>
-      ${pages}
-      <button class="page-btn" data-page="${current + 1}" ${current >= totalPages ? "disabled" : ""}>›</button>`;
-
-    el.querySelectorAll("[data-page]").forEach((b) => {
-      b.addEventListener("click", () => {
-        const p = Number(b.dataset.page);
-        if (p >= 1 && p <= totalPages && p !== current) onChange(p);
-      });
-    });
-
-    const sizeSel = el.querySelector(".page-size");
-    if (sizeSel && typeof opts.onSizeChange === "function") {
-      sizeSel.addEventListener("change", () => opts.onSizeChange(Number(sizeSel.value)));
-    }
-  }
-
   /* ==================== 分派 ==================== */
   function render(container, sub, opts) {
     stopKbTimer();   // 离开知识库管理即停止轮询
