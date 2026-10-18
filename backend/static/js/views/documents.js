@@ -219,36 +219,14 @@ const DocumentsView = (() => {
     tbody.querySelectorAll("[data-retry]").forEach((b) =>
       b.addEventListener("click", () => retryDoc(Number(b.dataset.retry))));
 
-    // 分页
-    const pagEl = document.getElementById("doc-pagination");
-    if (pagEl) {
-      let pages = "";
-      for (let p = 1; p <= totalPages; p++) {
-        pages += `<button class="page-btn ${p === docPage ? "active" : ""}" data-page="${p}">${p}</button>`;
-      }
-      pagEl.innerHTML = `
-        <span class="total">共 ${filtered.length} 条</span>
-        <select id="doc-page-size">
-          <option value="10" ${docPageSize === 10 ? "selected" : ""}>10条/页</option>
-          <option value="20" ${docPageSize === 20 ? "selected" : ""}>20条/页</option>
-        </select>
-        <button class="page-btn" data-page="${docPage - 1}" ${docPage <= 1 ? "disabled" : ""}>‹</button>
-        ${pages}
-        <button class="page-btn" data-page="${docPage + 1}" ${docPage >= totalPages ? "disabled" : ""}>›</button>`;
-      pagEl.querySelectorAll("[data-page]").forEach((b) => {
-        b.addEventListener("click", () => {
-          const p = Number(b.dataset.page);
-          if (p >= 1 && p <= totalPages && p !== docPage) { docPage = p; renderDocTableRows(); }
-        });
-      });
-      const sizeSel = pagEl.querySelector("#doc-page-size");
-      if (sizeSel) {
-        sizeSel.addEventListener("change", () => {
-          const v = Number(sizeSel.value);
-          if (v && v !== docPageSize) { docPageSize = v; docPage = 1; renderDocTableRows(); }
-        });
-      }
-    }
+    // 分页：和全站一致，只显示当前这一个页码
+    Common.renderPagination("doc-pagination", filtered.length, docPage, docPageSize, (p) => {
+      docPage = p;
+      renderDocTableRows();
+    }, {
+      sizeOptions: [10, 20],
+      onSizeChange: (s) => { docPageSize = s; docPage = 1; renderDocTableRows(); },
+    });
   }
 
   /* 文档详情：元信息 + 分块正文（「看不到文件里写了什么」就是缺了这块） */

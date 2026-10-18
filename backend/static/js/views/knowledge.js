@@ -8,11 +8,11 @@ const KnowledgeView = (() => {
   let kbCache = [];         // 当前页知识库
   let kbTotal = 0;
   let kbPage = 1;
-  let kbPageSize = 12;      // 前端知识库固定每页 12 条
+  let kbPageSize = 12;      // 前端知识库固定每页 12 条（不给下拉）
   let kpRows = [];          // 当前页知识点
   let kpTotal = 0;
   let kpPage = 1;
-  let kpPageSize = 12;
+  let kpPageSize = 12;      // 知识点列表同样固定每页 12 条
 
   function canManage(creatorId) {
     const user = API.getUser();
@@ -50,7 +50,7 @@ const KnowledgeView = (() => {
         </div>
         <button class="btn btn-primary" id="kb-add"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>新建知识库</button>
       </div>
-      <div class="kb-grid" id="kb-grid" style="margin-bottom:64px">
+      <div class="kb-grid" id="kb-grid">
         <div style="grid-column:1/-1;text-align:center;padding:40px"><span class="loading-spinner"></span></div>
       </div>
       <div class="pagination pagination-fixed" id="kb-pagination"></div>`;
@@ -147,9 +147,10 @@ const KnowledgeView = (() => {
         if (base) removeBase(base);
       }));
 
+    // 每页固定 12 条：不给每页条数下拉，也不显示「第 x/y 页」
     Common.renderPagination("kb-pagination", kbTotal, kbPage, kbPageSize, (p) => {
       kbPage = p; loadBases();
-    });
+    }, { hidePageInfo: true });
   }
 
   function openBase(id) {
@@ -406,9 +407,10 @@ const KnowledgeView = (() => {
       });
     });
 
+    // 知识点列表同样固定 12 条/页
     Common.renderPagination("kp-pagination", kpTotal, kpPage, kpPageSize, (p) => {
       kpPage = p; loadPoints();
-    });
+    }, { hidePageInfo: true });
   }
 
   /* 知识点详情：卡片里是截断的正文，这里给完整内容 */

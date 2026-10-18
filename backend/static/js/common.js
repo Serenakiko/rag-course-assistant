@@ -133,14 +133,17 @@ const Common = (() => {
     if (!el) return;
     opts = opts || {};
     const sizeOptions = opts.sizeOptions || [];
+    // 管理员端所有列表页都不显示「· 第 x/y 页」；学生端默认显示，需要时用 opts.hidePageInfo 关掉
+    const who = typeof API !== "undefined" && API.getUser ? API.getUser() : null;
+    const showPageInfo = opts.hidePageInfo === true ? false : !(who && who.role === "admin");
     const totalPages = Math.max(1, Math.ceil((total || 0) / pageSize));
 
-    let pages = "";
-    for (let p = 1; p <= totalPages; p++) {
-      pages += `<button class="page-btn ${p === current ? "active" : ""}" data-page="${p}">${p}</button>`;
-    }
+    // 页码只显示当前这一个：点左右箭头翻页后再换成另一个页码，
+    // 页数再多分页条也不会撑满（总页数放到左侧文字里，信息不丢）
+    const pageTitle = showPageInfo ? `第 ${current} / ${totalPages} 页` : `第 ${current} 页`;
+    const pages = `<button class="page-btn active" data-page="${current}" title="${pageTitle}">${current}</button>`;
     el.innerHTML = `
-      <span class="total">共 ${total || 0} 条</span>
+      <span class="total">共 ${total || 0} 条${showPageInfo && totalPages > 1 ? ` · 第 ${current}/${totalPages} 页` : ""}</span>
       ${sizeOptions.length ? `<select class="page-size">
         ${sizeOptions.map((s) => `<option value="${s}" ${s === pageSize ? "selected" : ""}>${s}条/页</option>`).join("")}
       </select>` : ""}

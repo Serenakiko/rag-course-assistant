@@ -755,3 +755,134 @@ body.nav-open .nav-backdrop { display: block; }
 .main-content:has(#stat-grid) .donut-legend { flex: 1; min-width: 0; gap: 6px; }
 .main-content:has(#stat-grid) #fb-card { flex: 0 1 auto; min-height: 0; margin-top: 0; display: flex; flex-direction: column; }
 .main-content:has(#stat-grid) #fb-list { flex: 1 1 auto; min-height: 0; max-height: 168px; overflow-y: auto; }
+
+
+/* ==================== 列表页统一：整页不下拉（内容区内部滚动） ==================== */
+/* 说明：所有列表页底部都有 .pagination-fixed 固定分页条，main-content 的
+   padding-bottom: 76px 就是给它留的位置；只要内容高度不把 main-content 撑出滚动条，
+   整页就不会上下拉动，溢出部分只在列表容器内部滚。 */
+
+/* ---------- 学生首页：一屏放下，只有「我的反馈」列表内部滚动 ---------- */
+.main-content:has(.wb-page) {
+  display: flex; flex-direction: column;
+  padding: 20px 24px; overflow: hidden;
+}
+.wb-page { flex: 1 1 auto; min-height: 0; width: 100%; display: flex; flex-direction: column; gap: 16px; }
+.wb-page .wb-hero { flex: none; margin-bottom: 0; padding: 18px 22px; }
+.wb-page .wb-hero-desc { margin-top: 8px; }
+.wb-page .stat-grid { flex: none; margin-bottom: 0; }
+.wb-page .wb-section { flex: none; margin: 0 2px; }
+.wb-page .wb-section-title { font-size: 17px; }
+.wb-page .wb-func-grid { flex: none; }
+.wb-page .wb-func-card { padding: 14px 16px; }
+.wb-page .wb-func-icon { width: 42px; height: 42px; }
+.wb-page .wb-func-icon svg { width: 21px; height: 21px; }
+.wb-page .wb-fb-card {
+  /* 内容少就按内容高度（不拉出大片空白），内容多到撑不下时按可缩计算，列表自己滚 */
+  flex: 0 1 auto; min-height: 0; margin-top: 0 !important;
+  display: flex; flex-direction: column; padding: 16px 18px;
+}
+.wb-page .wb-fb-card > .row-between { flex: none; margin-bottom: 10px !important; }
+.wb-page .wb-fb-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 2px; }
+.wb-page .fb-row { padding: 9px 12px; margin-bottom: 6px; }
+.wb-page .fb-row:last-child { margin-bottom: 0; }
+
+/* ---------- 我的反馈：一屏放下 + 底部固定分页（全部 / 处理中 / 已解决都分页） ---------- */
+.main-content:has(.fb-wrap) {
+  display: flex; flex-direction: column;
+  padding: 20px 24px 76px; overflow: hidden;
+}
+.fb-wrap { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; padding: 18px 22px; }
+.fb-wrap .fb-stat-grid { flex: none; margin-bottom: 14px; }
+.fb-wrap .fb-tabs { flex: none; }
+.fb-wrap #fb-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 4px; }
+.fb-wrap .fb-item:last-child { margin-bottom: 0; }
+
+/* ---------- 知识库 / 知识点：网格内部滚动，底部固定分页不再压住卡片 ---------- */
+.main-content:has(#kb-grid), .main-content:has(#kp-grid) {
+  display: flex; flex-direction: column; padding-bottom: 76px; overflow: hidden;
+}
+.main-content:has(#kb-grid) .page-toolbar,
+.main-content:has(#kp-grid) .page-toolbar,
+.main-content:has(#kp-grid) .kb-detail-head { flex: none; }
+.main-content:has(#kb-grid) #kb-grid,
+.main-content:has(#kp-grid) #kp-grid {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  align-content: start; margin-bottom: 0; padding-right: 4px;
+}
+
+/* ---------- 智能问答侧边栏：会话列表滚动条常显，最后一条不再被硬切断 ---------- */
+.chat-sessions-wrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
+.chat-sessions { flex: 1 1 auto; min-height: 0; scrollbar-width: thin; scrollbar-color: #d8d4cb transparent; padding-bottom: 10px; }
+/* 底部渐隐：列表比可视区高时，最后一条淡出而不是被容器底边硬切 */
+.chat-sessions-fade {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 26px; pointer-events: none;
+  background: linear-gradient(to bottom, rgba(250, 249, 247, 0), #faf9f7 88%);
+}
+.chat-sessions::-webkit-scrollbar { width: 8px; }
+.chat-sessions::-webkit-scrollbar-thumb { background: #d8d4cb; border-radius: 4px; }
+.chat-sessions::-webkit-scrollbar-track { background: transparent; }
+
+/* 分页条：只有一个页码按钮，箭头和页码对齐更紧凑 */
+.pagination .page-btn[data-page].active { min-width: 34px; }
+
+
+/* ---------- 一屏微调：反馈条目 / 知识点卡片收紧一点，整行整条都露得出来 ---------- */
+.fb-wrap .fb-stat-grid { gap: 12px; margin-bottom: 12px; }
+.fb-wrap .stat-card { padding: 14px 18px; }
+.fb-wrap .fb-item { padding: 12px 14px; margin-bottom: 10px; }
+.fb-wrap .fb-wait-tip { margin-top: 6px; padding: 7px 12px; }
+.fb-wrap .fb-answer { margin-top: 6px; padding-top: 8px; }
+.main-content:has(#kp-grid) .kp-grid { gap: 12px; }
+.main-content:has(#kp-grid) .kp-card { padding: 14px 16px; }
+.main-content:has(#kp-grid) .kp-card .kp-content { -webkit-line-clamp: 3; }
+
+
+/* ---------- 管理端「问题反馈」：同款一屏布局（列表内部滚动，分页条不压内容） ---------- */
+.main-content:has(#uq-list) {
+  display: flex; flex-direction: column;
+  padding: 20px 24px 76px; overflow: hidden;
+}
+.main-content:has(#uq-list) #uq-stats { flex: none; margin-bottom: 12px; gap: 12px; }
+.main-content:has(#uq-list) .stat-card { padding: 14px 18px; }
+.main-content:has(#uq-list) #uq-tabs { flex: none; }
+.main-content:has(#uq-list) #uq-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 4px; }
+.main-content:has(#uq-list) #uq-list .fb-item { padding: 12px 14px; margin-bottom: 10px; }
+.main-content:has(#uq-list) #uq-list .fb-item:last-child { margin-bottom: 0; }
+
+
+/* ---------- 管理端「知识库与文档」：表格区内部滚动，最后一行不被分页条压住 ---------- */
+.main-content:has(#content-panel) {
+  display: flex; flex-direction: column;
+  padding: 20px 24px 76px; overflow: hidden;
+}
+.main-content:has(#content-panel) > #content-tabs { flex: none; }
+#content-panel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+#content-panel > .page-toolbar { flex: none; }
+#content-panel > .card { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+#content-panel > .card > .table-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; }
+
+
+/* ==================== 通用：整页不再出现滚动条，多出来的内容在内部滚 ==================== */
+/* 所有带底部固定分页条的列表页：页头工具栏固定，卡片里的表格区自己滚。
+   这样无论多少行数据、窗口多矮，整页都不会被顶出滚动条，分页条也不会压住最后一行。 */
+.main-content:has(.pagination-fixed) {
+  display: flex; flex-direction: column; overflow: hidden; padding-bottom: 76px;
+}
+.main-content:has(.pagination-fixed) > .page-toolbar { flex: none; }
+.main-content:has(.pagination-fixed) > .card:has(.table-wrap) {
+  flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
+}
+.main-content:has(.pagination-fixed) > .card:has(.table-wrap) > .table-wrap {
+  flex: 1 1 auto; min-height: 0; overflow: auto;
+}
+
+/* 个人中心：整张卡片内部滚动，页面不动 */
+.main-content:has(.p-card) {
+  display: flex; flex-direction: column; overflow: hidden; padding: 20px 24px;
+}
+.main-content:has(.p-card) > div {
+  width: 100%; max-width: 520px; margin: 0 auto;
+  flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
+}
+.main-content:has(.p-card) .p-card { flex: 1 1 auto; min-height: 0; overflow-y: auto; }

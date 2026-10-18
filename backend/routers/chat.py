@@ -183,6 +183,7 @@ def list_sessions(
     limit: int = 20,
     offset: int = 0,
     kb: str | None = None,
+    order: str = "desc",
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -202,12 +203,15 @@ def list_sessions(
         where.append(Conversation.knowledge_bases.like(f'%"{kb}"%'))
 
     total = db.scalar(select(func.count(Conversation.id)).where(*where)) or 0
+    # order=asc：「对话历史」按从旧到新排，编号才能是 1..n 升序；
+    # 侧边栏不传，默认 desc（最近的在最上面）。
+    order_by = Conversation.id.asc() if (order or "").lower() == "asc" else Conversation.id.desc()
     rows = db.execute(
         select(Conversation, func.count(Message.id))
         .outerjoin(Message, Message.conversation_id == Conversation.id)
         .where(*where)
         .group_by(Conversation.id)
-        .order_by(Conversation.id.desc())
+        .order_by(order_by)
         .limit(limit)
         .offset(offset)
     ).all()

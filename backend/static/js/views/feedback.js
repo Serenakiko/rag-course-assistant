@@ -3,6 +3,8 @@
 const FeedbackView = (() => {
   let allItems = [];
   let currentTab = "all";
+  let pageSize = 10;     // 每页 10 条（分页条可切 10 / 20），三条 Tab 共用
+  let page = 1;
 
   async function render(container) {
     container.innerHTML = `
@@ -13,13 +15,15 @@ const FeedbackView = (() => {
           <button class="fb-tab" data-tab="pending">处理中</button>
           <button class="fb-tab" data-tab="resolved">已解决</button>
         </div>
-        <div id="fb-list"><div class="fb-loading"><span class="loading-spinner"></span></div></div>
+        <div class="fb-list" id="fb-list"><div class="fb-loading"><span class="loading-spinner"></span></div></div>
+        <div class="pagination pagination-fixed" id="fb-pagination"></div>
       </div>`;
 
     document.getElementById("fb-tabs").addEventListener("click", (e) => {
       const btn = e.target.closest(".fb-tab");
       if (!btn) return;
       currentTab = btn.dataset.tab;
+      page = 1;   // 换 Tab 回到第一页
       document.querySelectorAll(".fb-tab").forEach((b) =>
         b.classList.toggle("active", b === btn));
       renderList();
@@ -33,6 +37,7 @@ const FeedbackView = (() => {
     list.innerHTML = `<div class="fb-loading"><span class="loading-spinner"></span></div>`;
     try {
       allItems = await API.request("GET", "/api/chat/unanswered/mine");
+      page = 1;
       renderStats();
       renderList();
     } catch (err) {
@@ -64,10 +69,20 @@ const FeedbackView = (() => {
   function renderList() {
     const list = document.getElementById("fb-list");
     if (!list) return;
-    const items = currentTab === "all"
+    const filtered = currentTab === "all"
       ? allItems
       : allItems.filter((it) => it.status === currentTab);
-    if (!items.length) {
+    const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+    if (page > totalPages) page = totalPages;   // 删除 / 切换后页码超界时回退
+    Common.renderPagination("fb-pagination", filtered.length, page, pageSize, (p) => {
+      page = p;
+      renderList();
+    }, {
+      sizeOptions: [10, 20],
+      hidePageInfo: true,   // 只留「共 N 条」，不显示「第 1/2 页」
+      onSizeChange: (s) => { pageSize = s; page = 1; renderList(); },
+    });
+    if (!filtered.length) {
       list.innerHTML = `<div class="fb-empty">
         <div class="fb-empty-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
         <p>${currentTab === "pending"
@@ -81,6 +96,8 @@ const FeedbackView = (() => {
       if (go) go.addEventListener("click", () => App.navigate("chat"));
       return;
     }
+    const start = (page - 1) * pageSize;
+    const items = filtered.slice(start, start + pageSize);
     list.innerHTML = items.map((it) => `
       <div class="fb-item ${it.status === "resolved" && !it.read ? "fb-unread" : ""}" data-id="${it.id}">
         <div class="fb-head">

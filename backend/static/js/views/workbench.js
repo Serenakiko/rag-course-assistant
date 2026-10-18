@@ -17,6 +17,7 @@ const WorkbenchView = (() => {
     const md = `${now.getMonth() + 1}/${now.getDate()}`;
 
     container.innerHTML = `
+      <div class="wb-page">
       <div class="card wb-hero">
         <div class="row" style="gap:20px;align-items:center">
           <div style="flex:1;min-width:0">
@@ -59,12 +60,13 @@ const WorkbenchView = (() => {
         </div>
       </div>
 
-      <div class="card" id="wb-resolved" style="margin-top:16px">
+      <div class="card wb-fb-card" id="wb-resolved">
         <div class="row-between mb-16">
           <b>我的反馈</b>
           <button class="btn btn-sm" id="wb-fb-all">查看全部</button>
         </div>
-        <div id="wb-resolved-list"><div class="fb-loading"><span class="loading-spinner"></span></div></div>
+        <div class="wb-fb-list" id="wb-resolved-list"><div class="fb-loading"><span class="loading-spinner"></span></div></div>
+      </div>
       </div>`;
 
     document.getElementById("wb-fb-all").addEventListener("click", () => App.navigate("feedback"));

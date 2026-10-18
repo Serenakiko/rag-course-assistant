@@ -957,11 +957,10 @@ const AdminView = (() => {
   let uqRows = [];      // 当前页
   let uqTotal = 0;
   let uqPage = 1;
-  let uqPageSize = 5;    // 默认一页 5 条（最近 5 条），可在 5 / 10 / 20 之间切换
+  let uqPageSize = 10;   // 默认一页 10 条，可在 10 / 20 之间切换（四个 tab 共用，底部条统一）
   let uqStatus = "";
   let clusterRows = [];          // 聚类分组（一次拉全，前端分页）
   let clusterPage = 1;
-  const UQ_CLUSTER_PAGE_SIZE = 5;   // 和列表保持一致
 
   function renderUnanswered(container) {
     container.innerHTML = `
@@ -1036,19 +1035,28 @@ const AdminView = (() => {
   }
 
   /* 聚类分组可能几十条：和「全部 / 已解决」一样底部给分页（数据一次拉全，前端切页） */
+  /* 底部条换每页条数后，按当前 tab 重画：列表走接口重新拉，聚类在本地重新切片 */
+  function renderListByTab() {
+    if (uqStatus === "clusters") { clusterPage = 1; renderClusters(); }
+    else { uqPage = 1; loadUnanswered(); }
+  }
+
   function renderClusters() {
     const list = document.getElementById("uq-list");
     if (!list) return;
     if (!clusterRows.length) {
       list.innerHTML = `<div class="fb-empty"><p>没有待处理的问题，聚类里暂时没东西可看</p></div>`;
-      Common.renderPagination("uq-pagination", 0, 1, UQ_CLUSTER_PAGE_SIZE, () => {});
+      Common.renderPagination("uq-pagination", 0, 1, uqPageSize, () => {}, {
+        sizeOptions: [10, 20],
+        onSizeChange: (s) => { uqPageSize = s; renderListByTab(); },
+      });
       return;
     }
 
-    const totalPages = Math.max(1, Math.ceil(clusterRows.length / UQ_CLUSTER_PAGE_SIZE));
+    const totalPages = Math.max(1, Math.ceil(clusterRows.length / uqPageSize));
     if (clusterPage > totalPages) clusterPage = totalPages;
-    const startIdx = (clusterPage - 1) * UQ_CLUSTER_PAGE_SIZE;
-    const pageRows = clusterRows.slice(startIdx, startIdx + UQ_CLUSTER_PAGE_SIZE);
+    const startIdx = (clusterPage - 1) * uqPageSize;
+    const pageRows = clusterRows.slice(startIdx, startIdx + uqPageSize);
 
     list.innerHTML = pageRows.map((g) => `
       <div class="fb-item">
@@ -1066,9 +1074,12 @@ const AdminView = (() => {
           : `<div class="fb-wait-tip"><span>只有一个人问过</span></div>`}
       </div>`).join("");
 
-    Common.renderPagination("uq-pagination", clusterRows.length, clusterPage, UQ_CLUSTER_PAGE_SIZE, (p) => {
+    Common.renderPagination("uq-pagination", clusterRows.length, clusterPage, uqPageSize, (p) => {
       clusterPage = p;
       renderClusters();
+    }, {
+      sizeOptions: [10, 20],
+      onSizeChange: (s) => { uqPageSize = s; renderListByTab(); },
     });
   }
 
@@ -1112,8 +1123,8 @@ const AdminView = (() => {
             : "还没有收到问题反馈"}</p>
       </div>`;
       Common.renderPagination("uq-pagination", 0, 1, uqPageSize, () => {}, {
-        sizeOptions: [5, 10, 20],
-        onSizeChange: (s) => { uqPageSize = s; uqPage = 1; loadUnanswered(); },
+        sizeOptions: [10, 20],
+        onSizeChange: (s) => { uqPageSize = s; renderListByTab(); },
       });
       return;
     }
@@ -1142,8 +1153,8 @@ const AdminView = (() => {
     Common.renderPagination("uq-pagination", uqTotal, uqPage, uqPageSize, (p) => {
       uqPage = p; loadUnanswered();
     }, {
-      sizeOptions: [5, 10, 20],
-      onSizeChange: (s) => { uqPageSize = s; uqPage = 1; loadUnanswered(); },
+      sizeOptions: [10, 20],
+      onSizeChange: (s) => { uqPageSize = s; renderListByTab(); },
     });
   }
 

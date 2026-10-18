@@ -48,7 +48,10 @@ const ChatView = (() => {
             <input id="chat-search" type="search" placeholder="搜索会话标题" autocomplete="off" aria-label="搜索会话">
           </div>
           <div class="nav-group-title" style="padding:2px 14px 6px">会话记录</div>
-          <div class="chat-sessions" id="chat-sessions"></div>
+          <div class="chat-sessions-wrap">
+            <div class="chat-sessions" id="chat-sessions"></div>
+            <div class="chat-sessions-fade" aria-hidden="true"></div>
+          </div>
           <div class="chat-more" id="chat-more"></div>
         </aside>
         <section class="chat-main">
@@ -220,13 +223,15 @@ const ChatView = (() => {
       }</div>`;
       return;
     }
-    if (sessionTotal > sessionItems.length) {
-      footEl.innerHTML =
-        `<button type="button" class="session-more" id="chat-more-btn">查看全部 ${sessionTotal} 条 ›</button>`;
-      document.getElementById("chat-more-btn").addEventListener("click", () => App.navigate("history"));
-    } else {
-      footEl.innerHTML = "";
-    }
+    // 底部入口常驻：会话不足 20 条时以前这块是空的，列表又被容器底边截断，
+    // 最后一条看着像丢了。现在始终给一个明确的「查看全部会话」出口。
+    footEl.innerHTML =
+      `<button type="button" class="session-more" id="chat-more-btn">` +
+      (sessionTotal > sessionItems.length
+        ? `查看全部 ${sessionTotal} 条 ›`
+        : `查看全部会话${sessionTotal ? `（${sessionTotal} 条）` : ""} ›`) +
+      `</button>`;
+    document.getElementById("chat-more-btn").addEventListener("click", () => App.navigate("history"));
   }
 
   async function openSession(id) {
