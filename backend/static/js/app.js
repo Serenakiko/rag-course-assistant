@@ -17,35 +17,35 @@ const App = (() => {
   };
 
   // 侧边栏顺序：高频核心动作在前，账号类（个人中心）放在最后一组，不要单独沉底。
-  // 学生：首页 → 学习（问答/历史/反馈）→ 资料（知识库/我的文档）
-  // 管理员：概览 → 内容（知识库与文档/自测问答）→ 运营（反馈/历史）→ 系统（用户）
+  // 学生：首页 / 智能问答（一级入口）→ 学习记录（历史/反馈）→ 课程资料（知识库/我的文档）
+  // 管理员：概览 → 内容管理（知识库与文档/回收站）→ 教学运营（反馈/历史/自测问答）→ 系统管理（用户）
   const NAV = [
     { group: "", roles: ["student"], items: [
       { key: "workbench", icon: ICON.home, label: "首页" },
-    ]},
-    { group: "学习", roles: ["student"], items: [
       { key: "chat", icon: ICON.chat, label: "智能问答" },
+    ]},
+    { group: "学习记录", roles: ["student"], items: [
       { key: "history", icon: ICON.history, label: "对话历史" },
       { key: "feedback", icon: ICON.unanswered, label: "我的反馈" },
     ]},
-    { group: "资料", roles: ["student"], items: [
+    { group: "课程资料", roles: ["student"], items: [
       { key: "knowledge", icon: ICON.knowledge, label: "知识库" },
       { key: "documents", icon: ICON.documents, label: "我的文档" },
     ]},
     { group: "", roles: ["admin"], items: [
       { key: "overview", icon: ICON.overview, label: "数据概览" },
     ]},
-    { group: "内容", roles: ["admin"], items: [
+    { group: "内容管理", roles: ["admin"], items: [
       { key: "content", icon: ICON.knowledge, label: "知识库与文档" },
-      { key: "chat", icon: ICON.chat, label: "智能问答" },
+      { key: "recycle", icon: ICON.trash, label: "回收站" },
     ]},
-    { group: "运营", roles: ["admin"], items: [
+    { group: "教学运营", roles: ["admin"], items: [
       { key: "unanswered", icon: ICON.unanswered, label: "问题反馈" },
       { key: "history", icon: ICON.history, label: "对话历史" },
+      { key: "chat", icon: ICON.chat, label: "智能问答" },
     ]},
-    { group: "系统", roles: ["admin"], items: [
+    { group: "系统管理", roles: ["admin"], items: [
       { key: "users", icon: ICON.users, label: "用户管理" },
-      { key: "recycle", icon: ICON.trash, label: "回收站" },
     ]},
     // 账号类和其他组连在一起，不要再沉到底部留一大块空白
     { group: "账号", roles: ["student", "admin"], items: [
