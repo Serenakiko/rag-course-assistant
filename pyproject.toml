@@ -1,0 +1,19 @@
+# 工程配置（本项目不是可安装的分发包，这里只放工具配置）
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+# .tools 是一次性运维脚本，backend/static 是前端，data 是运行时数据
+exclude = [".tools", "backend/static", "data", "venv"]
+
+[tool.ruff.lint]
+# E/F：pycodestyle 错误 + pyflakes（未定义/未使用）；I：import 排序
+select = ["E", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# 提示词正文按整句保留，拆行反而难核对；其余文件仍按 120 列
+"backend/services/rag_prompts.py" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

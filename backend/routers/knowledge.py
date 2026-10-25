@@ -29,14 +29,16 @@ from ..schemas import (
 )
 from ..services.chunker import split_text
 from ..services.document_parser import parse_file
-from ..services.recycle import snapshot_base
 from ..services.kb_scope import (
     admin_user_ids as _admin_user_ids,
+)
+from ..services.kb_scope import (
     assert_writable_course,
     can_view_point,
     point_scope_condition,
 )
 from ..services.like import contains
+from ..services.recycle import snapshot_base
 from ..services.vector_store import (
     add_document_chunks,
     add_knowledge_point,

@@ -7,7 +7,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..deps import get_current_user, require_role
+from ..deps import require_role
 from ..models import Conversation, KnowledgeBase, Message, User
 from ..schemas import AdminUserUpdate, UserOut
 from ..security import hash_password

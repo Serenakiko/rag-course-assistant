@@ -28,9 +28,9 @@ from ..services.document_parser import is_supported, parse_file
 from ..services.kb_scope import assert_writable_course
 from ..services.like import LIKE_ESCAPE, contains, escape_like
 from ..services.vector_store import (
+    _get_client,
     add_document_chunks,
     delete_document,
-    _get_client,
     delete_knowledge_point,
 )
 

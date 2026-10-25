@@ -11,8 +11,8 @@ from ..config import settings
 from ..database import get_db
 from ..deps import get_current_user, require_role
 from ..models import Conversation, Document, KnowledgeBase, KnowledgePoint, Message, UnansweredQuestion, User
-from ..services.kb_scope import visible_base_names
 from ..schemas import StatsOut
+from ..services.kb_scope import visible_base_names
 
 router = APIRouter()
 

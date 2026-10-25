@@ -281,7 +281,7 @@ async def regenerate_answer(
 
     from ..models import utcnow
     from ..services.kb_scope import allowed_course_names
-    from ..services.rag_service import generate_answer, is_unmatched_answer
+    from ..services.rag_service import generate_answer
 
     # 按提问学生当时的可见范围重新检索。不限定范围的话，管理员一按「生成回答」，
     # 检索会跨到别人的私有知识库，把那里的内容写进这个学生的反馈里。

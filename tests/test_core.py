@@ -434,16 +434,16 @@ def test_my_unanswered_rejects_unknown_status(db):
     assert exc.value.status_code == 400
 
 
-def test_frontend_pagination_script():
-    """前端分页条回归：管理员端不该再出现「第 x/y 页」（需要本机有 node）。"""
+def _run_node_script(filename: str, what: str) -> None:
+    """跑一个前端纯函数回归脚本（需要本机有 node）。"""
     import shutil
     import subprocess
     from pathlib import Path
 
     node = shutil.which("node")
     if not node:
-        pytest.skip("本机没有 node，跳过前端分页回归")
-    script = Path(__file__).with_name("frontend_pagination.mjs")
+        pytest.skip(f"本机没有 node，跳过{what}")
+    script = Path(__file__).with_name(filename)
     # Windows 上 text=True 默认用 GBK 解码，node 输出的是 UTF-8，会炸在读取线程里
     proc = subprocess.run(
         [node, str(script)],
@@ -453,6 +453,16 @@ def test_frontend_pagination_script():
         timeout=60,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_frontend_pagination_script():
+    """前端分页条回归：管理员端不该再出现「第 x/y 页」。"""
+    _run_node_script("frontend_pagination.mjs", "前端分页回归")
+
+
+def test_frontend_markdown_script():
+    """前端 Markdown 回归：回答正文里的 HTML 必须转义、危险协议不生成链接。"""
+    _run_node_script("frontend_markdown.mjs", "前端 Markdown 回归")
 
 
 def test_documents_list_is_paginated_and_scoped(db):

@@ -4,7 +4,6 @@ from __future__ import annotations
 import itertools
 import json
 import logging
-from bisect import bisect_right
 from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException
