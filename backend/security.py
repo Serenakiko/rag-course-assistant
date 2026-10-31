@@ -36,13 +36,13 @@ def verify_password(password: str, stored: str) -> bool:
 
 
 def create_access_token(
-    user_id: int, username: str, role: str, token_version: int = 0
+    user_id: int, account: str, role: str, token_version: int = 0
 ) -> str:
     """签发 JWT；ver 与用户当前 token_version 不一致时令牌失效。"""
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),
-        "username": username,
+        "account": account,
         "role": role,
         "ver": token_version,
         "iat": now,

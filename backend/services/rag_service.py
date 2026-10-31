@@ -87,10 +87,9 @@ def _format_sources(docs: list[tuple[Document, float]]) -> list[dict]:
 
 
 def recommend_titles(docs: list[tuple[Document, float]], limit: int = 3, spread: float = 0.15) -> list[str]:
-    """从检索结果中提取相近资料标题，用于拒答时引导换问法。
+    """从检索结果提取相近资料标题，用于拒答时引导换问法。
 
-    两道过滤：只取与首选结果距离接近的（spread），并且首选结果本身不能离题太远
-    （超过阈值 + 0.15 就说明整批都是噪声，"api 是什么意思"以前会被推《条件概率》）。
+    只取与首选结果距离接近的；首选结果离题太远（超过阈值 + spread）说明整批是噪声。
     """
     if not docs:
         return []
@@ -115,20 +114,12 @@ def recommend_titles(docs: list[tuple[Document, float]], limit: int = 3, spread:
 async def is_course_related(question: str, timeout: float = 10.0) -> bool:
     """轻量判定：该问题是否与课程学习相关。
 
-    规则优先：先判明显无关（天气/考公/娱乐等），命中直接不相关；
-    再看课程术语（红黑树/进程/TCP 等）判相关；
-    其余交给 LLM 二分类。LLM 失败时保守返回 False。
-
-    顺序不能反："考研面试里的多线程" 同时命中课程词和无关词，
-    先判课程词就会把它当课程问题，反而刷进反馈列表。
+    规则优先：先判明显无关，再看课程术语，其余交给 LLM 二分类；LLM 失败保守返回 False。
     """
     q = (question or "").lower()
     blocked = any(k.lower() in q for k in IRRELEVANT_KEYWORDS)
     strong = any(k.lower() in q for k in COURSE_STRONG_KEYWORDS)
-    # 只命中无关词（天气/娱乐）→ 直接不相关；只命中课程词（红黑树/进程）→ 直接相关。
-    # 两组都命中（"考研面试里的多线程"、"考研 408 里的红黑树"）不能一刀切：
-    # 一刀切判无关，学生问得越贴近考试越会被拒答；判相关又会让闲话刷进反馈列表。
-    # 这种含糊的句子交给下面那个只答「是/否」的模型判定。
+    # 只命中无关词 → 不相关；只命中课程词 → 相关；两组都命中交给模型判
     if blocked and not strong:
         return False
     if strong and not blocked:
@@ -277,11 +268,10 @@ async def _generate_answer_locked(
 ) -> dict:
     """非流式生成一次完整回答（供管理员补充资料后"重新生成回答"使用）。
 
-    返回：{"answer", "recommended", "matched", "error"}
-      - matched=False 表示仍未命中知识库（空库 / 距离门控），answer 为拒答文案
-      - error="timeout"/"empty" 表示生成失败，answer 为空，调用方不能当已解决写入
+    返回 {"answer", "recommended", "matched", "error"}：matched=False 表示仍未命中；
+    error="timeout"/"empty" 表示生成失败，调用方不能当已解决写入。
     """
-    # 向量化 + Chroma 查询是同步 IO，放到线程里跑，避免阻塞事件循环
+    # 向量化 + Chroma 查询是同步 IO，放线程里跑，避免阻塞事件循环
     docs = await asyncio.to_thread(vector_search, question, settings.TOP_K, courses)
     if not docs:
         return {
@@ -301,7 +291,7 @@ async def _generate_answer_locked(
         async for chunk in _generate_stream(SYSTEM_PROMPT, context, question, []):
             answer_parts.append(chunk)
     except asyncio.TimeoutError:
-        # 超时提示不是答案，不能混进 answer 里被当成正常回答
+        # 超时提示不是答案，不混进 answer
         return {"answer": "", "recommended": [], "matched": False, "error": "timeout"}
     answer = "".join(answer_parts).strip()
     if not answer:
@@ -316,21 +306,15 @@ async def _generate_answer_locked(
     return {"answer": answer, "recommended": [], "matched": True}
 
 
-# 同时最多 _SLOT_COUNT 路生成：本机模型一次只吐一路 token，不限并发时排队的请求
-# 等不到第一个 token，180 秒后整批超时（前端只会看到「回答生成超时」）。
+# 同时最多 _SLOT_COUNT 路生成：本机模型一次只吐一路 token
 _SLOT_COUNT = 3
-# 排队期间每隔这么久发一个 ping：前端按「收到数据」重置空闲计时，
-# 否则排在后面的请求会被前端的空闲超时（见 chat.js 的 idleTimeout）先掐掉。
+# 排队期间每隔这么久发一个 ping，让前端重置空闲计时
 _QUEUE_PING_SECONDS = 10.0
-# 排队上限：等这么久还没拿到槽位就明确回「人多，稍后再试」。没有上限的话，
-# 排队时间不计入 LLM_TIMEOUT，学生会在前端转到总超时，最后看到一句指错方向的
-# 「回答生成超时」——他会以为是模型坏了，其实是没轮到他。
+# 排队上限：超时后明确回「人多，稍后再试」
 _QUEUE_MAX_WAIT = 120.0
 
-# 闸门按事件循环缓存。不能用模块级的单个 Semaphore：asyncio 的信号量第一次
-# 真的**等过**之后就跟那个 loop 绑死（_LoopBoundMixin），换个 loop 再用会抛
-# 「bound to a different event loop」。uvicorn 只有一个循环所以没事，但 pytest
-# 每个 asyncio.run() 都是新循环，第二个"真的排队"的用例就会莫名其妙炸。
+# 闸门按事件循环缓存：asyncio 信号量第一次等过之后就跟 loop 绑死，
+# pytest 每个 asyncio.run() 都是新循环，不能用模块级单个 Semaphore
 _slot_cache: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
     weakref.WeakKeyDictionary()
 )
@@ -347,12 +331,7 @@ def _llm_slots() -> asyncio.Semaphore:
 
 
 async def generate_answer(question: str, courses: list[str] | None = None) -> dict:
-    """非流式生成（管理员「生成回答」用）：和流式那条路共用同一个并发闸门。
-
-    以前这里不排队，补完资料点「生成回答」会绕过闸门直接打本机模型，后台在跑
-    几路问答时这一下就是第 4、5 路。现在排队，但**最多等 _QUEUE_MAX_WAIT 秒**：
-    前端的 fetch 没有超时，无限期挂着等于按钮一直转、管理员不知道发生了什么。
-    """
+    """非流式生成（管理员「生成回答」用）：和流式共用同一个并发闸门，最多等 _QUEUE_MAX_WAIT 秒。"""
     sem = _llm_slots()
     try:
         await asyncio.wait_for(sem.acquire(), timeout=_QUEUE_MAX_WAIT)
@@ -407,12 +386,111 @@ async def stream_answer(
         async for event in agen:
             yield event
     finally:
-        # 客户端断开时也要把里层生成器关掉，否则模型流会吊在那儿。
-        # 槽位放在嵌套的 finally 里释放：aclose() 自己抛异常时也不能把槽位漏掉。
+        # 断开时关掉里层生成器；槽位在嵌套 finally 里释放，避免 aclose 抛异常时漏掉
         try:
             await agen.aclose()
         finally:
             sem.release()
+
+
+def _timeout_message() -> str:
+    return f"回答生成超时（超过 {settings.LLM_TIMEOUT:.0f} 秒），稍后再试或者换个问法。"
+
+
+def _unmatched_content(question: str, recommended: list[str]) -> str:
+    """未收录拒答正文：知识库暂缺 + 相近资料推荐 + 反馈提示。"""
+    head = f"「{question}」" if len(question) <= 40 else "该问题"
+    return (
+        f"【知识库未收录】知识库里暂时没有{head}的相关内容。\n"
+        + "\n".join(feedback_lines(question, recommended))
+    )
+
+
+def _unmatched_event(question: str, course: str, recommended: list[str]) -> dict:
+    """发出 unmatched 事件（供调用方落库记录未命中问题）。"""
+    return {"type": "unmatched", "question": question, "course": course, "recommended": recommended}
+
+
+async def _handle_smalltalk(question: str) -> AsyncGenerator[dict, None]:
+    """寒暄/客套/自我介绍：本地识别，直接回引导语，不检索、不调模型、不记未命中。"""
+    yield {"type": "token", "content": SMALLTALK_REPLY}
+    yield {"type": "sources", "sources": [], "answer": SMALLTALK_REPLY}
+
+
+async def _handle_overview(
+    question: str, history: list[tuple[str, str]], courses: list[str] | None
+) -> AsyncGenerator[dict, None]:
+    """概览/能力类问题：汇总知识库与知识点标题，不判未收录、不给推荐。"""
+    context = await asyncio.to_thread(overview_context, courses)
+    answer_parts: list[str] = []
+    if context:
+        try:
+            async for chunk in _generate_stream(OVERVIEW_PROMPT, context, question, history):
+                answer_parts.append(chunk)
+                yield {"type": "token", "content": chunk}
+        except asyncio.TimeoutError:
+            logger.warning("概览回答生成超时：%s", question[:30])
+            yield {"type": "error", "message": _timeout_message()}
+            return
+    answer = "".join(answer_parts).strip()
+    if not answer:
+        answer = "知识库里还没有可以介绍的内容，先让老师补充课程资料。"
+        yield {"type": "token", "content": answer}
+    yield {"type": "sources", "sources": [], "answer": answer}
+
+
+async def _handle_unmatched(
+    question: str, docs: list[tuple[Document, float]]
+) -> AsyncGenerator[dict, None]:
+    """知识库未覆盖该问题：先判课程相关性，学习相关才记录反馈并拒答。"""
+    if not await is_course_related(question):
+        yield {"type": "token", "content": "这个问题不在我的回答范围内，我只解答课程知识库中的内容。"}
+        return
+    course = docs[0][0].metadata.get("course") or ""
+    recommended = recommend_titles(docs)
+    yield {"type": "token", "content": _unmatched_content(question, recommended)}
+    yield _unmatched_event(question, course, recommended)
+
+
+async def _handle_answerability_gate(
+    question: str, docs: list[tuple[Document, float]]
+) -> AsyncGenerator[dict, None]:
+    """距离门控拦不住、但资料其实没讲这个知识点时，再独立判一次。"""
+    recommended = recommend_titles(docs)
+    yield {"type": "token", "content": _unmatched_content(question, recommended)}
+    yield _unmatched_event(question, docs[0][0].metadata.get("course") or "", recommended)
+
+
+async def _handle_generate(
+    question: str,
+    history: list[tuple[str, str]],
+    kept: list[tuple[Document, float]],
+) -> AsyncGenerator[dict, None]:
+    """基于检索资料流式生成回答，并在模型判「未收录」时追加推荐与反馈。"""
+    context = _format_context(kept)
+    answer_parts: list[str] = []
+    try:
+        async for chunk in _generate_stream(SYSTEM_PROMPT, context, question, history):
+            answer_parts.append(chunk)
+            yield {"type": "token", "content": chunk}
+    except asyncio.TimeoutError:
+        logger.warning("RAG 回答生成超过 %.0f 秒，已强制停止", settings.LLM_TIMEOUT)
+        yield {"type": "error", "message": _timeout_message()}
+        return
+
+    answer = "".join(answer_parts).strip()
+    if not answer:
+        answer = "这次没生成出有效回答。检查一下模型服务，或者换个问法再问。"
+        yield {"type": "token", "content": answer}
+
+    if is_unmatched_answer(answer):
+        recommended = recommend_titles(kept)
+        suffix = "\n\n" + "\n".join(feedback_lines(question, recommended))
+        answer += suffix
+        yield {"type": "token", "content": suffix}
+        yield _unmatched_event(question, kept[0][0].metadata.get("course") or "", recommended)
+
+    yield {"type": "sources", "sources": _format_sources(kept), "answer": answer}
 
 
 async def _stream_answer_locked(
@@ -426,49 +504,26 @@ async def _stream_answer_locked(
       {"type": "token", "content": str}        逐字 token
       {"type": "sources", "sources": [...],    结束：来源列表
        "answer": str}
+      {"type": "unmatched", ...}               知识库未覆盖，需落库记录
       {"type": "error", "message": str}        失败
 
     courses 非空时，只基于这些知识库（课程）检索回答。
     """
     history = history or []
     try:
-        # -1. 寒暄/客套/自我介绍：本地识别，直接给引导语，不检索、不调模型、不记未命中。
-        #     以前「你好」要过检索→距离门控→模型判相关性，十几秒后换来一句
-        #     “这个问题不在我的回答范围内”，学生体验上就是被冷拒。
+        # -1. 寒暄 / 概览：不走向量检索
         if is_smalltalk(question):
-            yield {"type": "token", "content": SMALLTALK_REPLY}
-            yield {"type": "sources", "sources": [], "answer": SMALLTALK_REPLY}
+            async for event in _handle_smalltalk(question):
+                yield event
             return
-
-        # 0. 概览 / 能力类问题：问句跟资料没有字面相似度，走向量检索只会撞门控。
-        #    这里直接汇总知识库与知识点标题，不判未收录、不给推荐。
         if is_course_overview_question(question):
-            context = await asyncio.to_thread(overview_context, courses)
-            answer_parts: list[str] = []
-            if context:
-                try:
-                    async for chunk in _generate_stream(
-                        OVERVIEW_PROMPT, context, question, history
-                    ):
-                        answer_parts.append(chunk)
-                        yield {"type": "token", "content": chunk}
-                except asyncio.TimeoutError:
-                    logger.warning("概览回答生成超时：%s", question[:30])
-                    yield {
-                        "type": "error",
-                        "message": f"回答生成超时（超过 {settings.LLM_TIMEOUT:.0f} 秒），稍后再试或者换个问法。",
-                    }
-                    return
-            answer = "".join(answer_parts).strip()
-            if not answer:
-                answer = "知识库里还没有可以介绍的内容，先让老师补充课程资料。"
-                yield {"type": "token", "content": answer}
-            yield {"type": "sources", "sources": [], "answer": answer}
+            async for event in _handle_overview(question, history, courses):
+                yield event
             return
 
-        # 1. 检索（可按知识库/课程限定范围）
+        # 1. 检索
         docs = await asyncio.to_thread(vector_search, question, settings.TOP_K, courses)
-        # 兜底：知识库没有任何内容时直接拒绝，不调用模型
+        # 知识库没有任何内容时直接拒绝，不调模型
         if not docs:
             yield {
                 "type": "token",
@@ -476,90 +531,26 @@ async def _stream_answer_locked(
             }
             return
 
-        # 2. 无匹配门控：最相似资料的距离仍超过阈值 → 知识库未覆盖该问题，
-        #    先判定是否与课程学习相关：无关问题直接拒绝且不记录；
-        #    学习相关但库无才进入“反馈”记录（避免天气/闲聊等污染反馈列表）。
+        # 2. 无匹配门控：最相似资料的距离仍超过阈值 → 知识库未覆盖该问题
         if docs[0][1] > settings.UNMATCHED_DISTANCE:
-            top_course = docs[0][0].metadata.get("course") or ""
-            if not await is_course_related(question):
-                yield {
-                    "type": "token",
-                    "content": "这个问题不在我的回答范围内，我只解答课程知识库中的内容。",
-                }
-                return
-            recommended = recommend_titles(docs)
-            content = "【知识库未收录】知识库里暂时没有" + (
-                f"「{question}」" if len(question) <= 40 else "该问题"
-            ) + "的相关内容。\n" + "\n".join(feedback_lines(question, recommended))
-            yield {"type": "token", "content": content}
-            yield {
-                "type": "unmatched",
-                "question": question,
-                "course": top_course,
-                "recommended": recommended,
-            }
+            async for event in _handle_unmatched(question, docs):
+                yield event
             return
 
-        # 距离门控拦不住、但资料其实没讲这个知识点的情况（资料讲二叉树、学生问红黑树），
-        # 再独立判一次，免得生成模型照着相近资料编出一套不存在的性质。
+        # 3. 可答性二次判定：距离门控拦不住的相近未覆盖，再独立判一次
         if settings.ANSWERABILITY_CHECK and not await can_answer(question, docs):
-            recommended = recommend_titles(docs)
-            content = "【知识库未收录】知识库里暂时没有" + (
-                f"「{question}」" if len(question) <= 40 else "该问题"
-            ) + "的相关内容。\n" + "\n".join(feedback_lines(question, recommended))
-            yield {"type": "token", "content": content}
-            yield {
-                "type": "unmatched",
-                "question": question,
-                "course": docs[0][0].metadata.get("course") or "",
-                "recommended": recommended,
-            }
+            async for event in _handle_answerability_gate(question, docs):
+                yield event
             return
 
-        # 2.5 引用资料收紧：top5 里离题的那些不参与生成，也不展示为来源
+        # 4. 引用资料收紧（离题的不参与生成），再流式生成
         kept = _trim_docs(docs)
-        context = _format_context(kept)
-
-        # 3. 流式生成：每个 chunk 都用 wait_for 兜底，模型卡死（一个 token 都不来）也能停
-        answer_parts = []
-        try:
-            async for chunk in _generate_stream(
-                SYSTEM_PROMPT, context, question, history
-            ):
-                answer_parts.append(chunk)
-                yield {"type": "token", "content": chunk}
-        except asyncio.TimeoutError:
-            logger.warning("RAG 回答生成超过 %.0f 秒，已强制停止", settings.LLM_TIMEOUT)
-            yield {
-                "type": "error",
-                "message": f"回答生成超时（超过 {settings.LLM_TIMEOUT:.0f} 秒），稍后再试或者换个问法。",
-            }
-            return
-
-        answer = "".join(answer_parts).strip()
-        if not answer:
-            answer = "这次没生成出有效回答。检查一下模型服务，或者换个问法再问。"
-            yield {"type": "token", "content": answer}
-
-        # 模型判定知识库未收录（未收录特征短语）：系统自动追加
-        # 相近资料推荐与反馈提示，并发出 unmatched 事件供落库记录
-        if is_unmatched_answer(answer):
-            recommended = recommend_titles(docs)
-            suffix = "\n\n" + "\n".join(feedback_lines(question, recommended))
-            answer += suffix
-            yield {"type": "token", "content": suffix}
-            yield {
-                "type": "unmatched",
-                "question": question,
-                "course": docs[0][0].metadata.get("course") or "",
-                "recommended": recommended,
-            }
-
-        yield {"type": "sources", "sources": _format_sources(kept), "answer": answer}
+        async for event in _handle_generate(question, history, kept):
+            yield event
     except Exception as exc:  # noqa: BLE001
         logger.exception("RAG 流式回答失败")
         err = str(exc)
-        # 模型缺失（Ollama 404）：界面上只给一句人话，细节写日志
+        # 模型缺失（Ollama 404）：给一句人话，细节写日志
         if "404" in err or "model not found" in err.lower():
             logger.error("模型未安装：%s", settings.OLLAMA_LLM_MODEL)
             yield {

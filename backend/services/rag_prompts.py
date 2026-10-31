@@ -140,10 +140,9 @@ def is_smalltalk(question: str) -> bool:
 
 
 def is_course_overview_question(question: str) -> bool:
-    """是否"这门课讲了什么 / 知识库有什么 / 你能帮我做什么"类概览问题。
+    """是否"这门课讲了什么"类概览问题。
 
-    概览问题跟资料没有字面相似度，走检索只会撞距离门控，再顺手推荐几条
-    不相干的标题，所以单独识别、直接汇总知识库，不参与未收录判定。
+    概览问题跟资料没有字面相似度，走检索只会撞距离门控，所以单独识别、直接汇总知识库。
     """
     q = re.sub(r"\s+", "", question or "")
     markers = (

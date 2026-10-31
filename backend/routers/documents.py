@@ -28,10 +28,10 @@ from ..services.document_parser import is_supported, parse_file
 from ..services.kb_scope import assert_writable_course
 from ..services.like import LIKE_ESCAPE, contains, escape_like
 from ..services.vector_store import (
-    _get_client,
     add_document_chunks,
     delete_document,
     delete_knowledge_point,
+    get_collection,
 )
 
 logger = logging.getLogger(__name__)
@@ -116,8 +116,7 @@ def process_document(doc_id: int, course: str) -> None:
         doc.status = "ready"
         doc.chunk_count = count
         doc.error = ""
-        # 自动生成知识点：文档名即标题，内容取正文前 2000 字，只作详情页展示。
-        # 不再写入向量：文档分块已经入过库，同一段内容存两份会在检索里重复命中。
+        # 自动生成知识点：文档名即标题、正文前 2000 字，只作展示，不入向量
         try:
             title = Path(doc.filename).stem or doc.filename
             session.add(
@@ -157,20 +156,16 @@ def list_documents(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """管理员看全部；学生只看自己上传的，避免“能传却看不到/删不掉”。
+    """管理员看全部；学生只看自己上传的。
 
-    和其他列表页统一走服务端分页 + 服务端搜索。以前是整张表拉回前端再切片，
-    资料一多首屏就要传全量 JSON。processing 一起返回，前端据此决定要不要轮询
-    （只看当前页的话，进度条会漏掉别的页上正在解析的文档）。它按可见范围的**全量**
-    统计，不受当前搜索词影响——否则搜着别的词就以为解析完了。
+    服务端分页 + 搜索。processing 按可见范围的全量统计，不受当前搜索词影响。
     """
     if field not in ("filename", "course", "type"):
         raise HTTPException(status_code=400, detail="field 仅支持 filename / course / type")
     limit = min(max(limit, 1), 100)
     offset = max(offset, 0)
 
-    # scope = 可见范围（学生只看自己上传的）；搜索条件只影响分页和 total，
-    # 不能算进 processing：那个数是「还有多少文档在解析」，跟搜什么无关。
+    # scope = 可见范围（学生只看自己上传的）；processing 不受搜索词影响
     scope: list = []
     if user.role != "admin":
         scope.append(Document.uploaded_by == user.id)
@@ -212,11 +207,7 @@ def reparse_document(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """把解析失败的文档重跑一遍：源文件还在，就不必让用户删掉重传。
-
-    只允许 failed：ready 的再跑一次会多生成一条同名知识点，
-    processing 的说明正在跑，别插队。
-    """
+    """把解析失败的文档重跑一遍：源文件还在就不必重传。只允许 failed。"""
     doc = db.get(Document, doc_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="文档不存在")
@@ -248,10 +239,8 @@ def document_detail(
     chunks: list[dict] = []
     if doc.status == "ready":
         try:
-            collection = _get_client().get_collection(settings.COLLECTION_NAME)
-            # Chroma 的 where 只接受「一个操作符」，平铺两个键会直接 ValueError：
-            # Expected where to have exactly one operator —— 以前被 except 吞掉，
-            # 结果就是文档详情永远显示「没有分块」。多条件必须写成 $and。
+            collection = get_collection()
+            # Chroma 的 where 只接受一个操作符，多条件必须写 $and
             data = collection.get(
                 where={"$and": [{"source_type": "document"}, {"doc_id": str(doc.id)}]},
                 include=["documents", "metadatas"],
@@ -267,8 +256,7 @@ def document_detail(
         except Exception:  # noqa: BLE001
             logger.warning("读取文档分块失败 doc_id=%s", doc.id, exc_info=True)
             chunks = []
-    # 有些文档记录没有向量分块（例如 .tools/sync_seed_documents.py 生成的种子文档，
-    # 内容在知识点里，文档只做展示），这种情况直接读原文件，别让详情页空着。
+    # 无向量分块的文档（如种子文档）直接读原文件，别让详情页空着
     preview = ""
     if not chunks and doc.status == "ready" and doc.stored_path and Path(doc.stored_path).exists():
         try:
@@ -282,7 +270,7 @@ def document_detail(
             "file_type": doc.file_type,
             "file_size": doc.file_size,
             "status": doc.status,
-            "course": doc.course or "",   # 之前漏了这个字段，弹窗里「所属知识库」永远是空的
+            "course": doc.course or "",
             "chunk_count": doc.chunk_count,
             "error": doc.error,
             "uploaded_by": doc.uploaded_by,
@@ -321,8 +309,7 @@ def remove_document(
     for kp in auto_kps:
         delete_knowledge_point(kp.id)
         db.delete(kp)
-    # 联动 2：被删的文档曾是某条反馈的推荐来源时，那条回答快照不再可信，打回待处理。
-    # 以前按课程一刀切：删一篇无关文档，会把该课程下所有已解决反馈的答案清空。
+    # 联动：被删文档曾是某条反馈的推荐来源时，打回待处理（按课程+文档名精确定位）
     if doc.course:
         resolved_rows = db.scalars(
             select(UnansweredQuestion).where(

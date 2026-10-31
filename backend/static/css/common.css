@@ -10,6 +10,17 @@
   --warning: #96661a;
   --danger: #a83e33;
 
+  /* 语义色对应的「浅底」：徽章 / 提示条 / 警告图标共用，低饱和浅底 + 深色文字。
+     状态色必须有区分度（可访问性），不再各自写死浅底色 */
+  --success-bg: #eaf3ed;
+  --warning-bg: #f6f0e5;
+  --danger-bg: #f7ebe8;
+
+  /* 待处理提示专用琥珀色（区别于 warning 橙）：未读反馈 / 提示条 / 等待处理状态 */
+  --notice-bg: #faf3e2;
+  --notice-border: #dcc07e;
+  --notice-text: #7d5b1a;
+
   /* 文字：暖墨色，不用纯黑，减轻「截图感」 */
   --text-1: #1d1b18;
   --text-2: #4b4740;
@@ -19,14 +30,110 @@
   --border: #e3e0d9;
   --bg: #f6f5f2;
   --card: #ffffff;
+  --text-inverse: #ffffff;  /* 反白文字：深色按钮/气泡上的白字，区别于 --card（白底） */
   --sidebar-bg: #ffffff;
   --sidebar-text: #4b4740;
   --sidebar-active: #f0efeb;
 
-  /* 小圆角 + 克制的投影：层级靠留白和分隔线，不靠阴影堆叠 */
-  --radius: 6px;
+  /* 中性色（surface）刻度：同一暖纸底色系按深浅分四档，替换全站散落的硬编码色。
+     命名只表达「深浅层级」，不绑定具体场景，避免换主题时要改一堆语义名。 */
+  --surface-1: #faf9f7;  /* 最浅：表头底、输入框底、列表 hover */
+  --surface-2: #f1efec;  /* 浅灰：列表项/标签/按钮 hover */
+  --surface-3: #e6e3dc;  /* 中灰：行内代码底、分隔符 */
+  --surface-4: #f7f6f3;  /* 消息区底，比页面底 --bg 深一档，让卡片浮起来 */
+  --chat-page-bg: #e9e4db;  /* 聊天页专属压深底色，卡片靠边框+阴影浮出 */
+
+  /* z-index 层级刻度：从低到高，新增浮层按语义取档，禁止裸数字 */
+  --z-backdrop: 15;   /* 抽屉背板遮罩 */
+  --z-docked: 20;     /* 侧栏 / 分页条等常驻元素 */
+  --z-drawer: 30;     /* 抽屉本体 */
+  --z-skip: 200;      /* 键盘跳转链接 */
+  --z-modal: 1000;    /* 弹窗遮罩 */
+  --z-toast: 2000;    /* 全局提示 */
+
+  /* 小圆角 + 克制的投影：层级靠留白和分隔线，不靠阴影堆叠。
+     圆角四档：小(4)/基准(6)/卡片(10)/胶囊(999)，散落的 3/5/7/8/12 就近归并。
+     阴影三档：卡片/浮起/抽屉，外加一条聚焦环（键盘与输入框焦点，语义不同于投影）。 */
+  --radius-sm: 4px;    /* 图标、标签、行内小元素 */
+  --radius: 6px;       /* 基准：按钮、输入框、普通卡片 */
+  --radius-lg: 10px;   /* 卡片、弹窗、登录卡 */
+  --radius-pill: 999px;/* 胶囊：徽章、标签、分段按钮 */
+
   --shadow: 0 1px 2px rgba(29, 27, 24, .05);
   --shadow-lg: 0 2px 10px rgba(29, 27, 24, .09);
+  --shadow-xl: 0 8px 28px rgba(0, 0, 0, .16);   /* 抽屉 / 浮层 */
+  --focus-ring: 0 0 0 3px rgba(23, 80, 94, .12); /* 输入框 / 键盘聚焦环 */
+
+  /* 散落硬编码色统一成 token，暗色模式下可一起翻白 */
+  --scrollbar-thumb: #d8d4cb;   /* 滚动条把手 */
+  --disabled: #c9c5bd;          /* 禁用态底色（发送按钮 / 加载环） */
+  --danger-border: #e8cdc7;     /* 危险按钮描边 */
+  --mask: rgba(29, 27, 24, .45);/* 弹窗 / 抽屉遮罩 */
+  --hero-bg: #e9edee;           /* 学生首页 hero 底（青色系） */
+  --hero-border: #cfdbdd;       /* hero 边框 */
+}
+
+/* ============ 暗色主题 ============
+   在 <html> 上挂 data-theme="dark" 即生效，其余变量沿用上方浅色默认值。
+   只覆盖「会翻白」的灰阶 / 文字 / 语义色浅底与阴影，主色、圆角、间距不动。 */
+[data-theme="dark"] {
+  /* 主色在暗底上提亮一档，保持对比度 */
+  --primary: #5fa8b8;
+  --primary-dark: #7ab8c6;
+  --primary-light: #1f3a40;
+  --accent: #d3a257;
+
+  --success: #6bbd8e;
+  --warning: #d3a257;
+  --danger: #e07a6d;
+
+  --success-bg: #1e3329;
+  --warning-bg: #332b1d;
+  --danger-bg: #38221f;
+
+  --notice-bg: #332d1d;
+  --notice-border: #6b5a2e;
+  --notice-text: #d3b76a;
+
+  --text-1: #e9e6e0;
+  --text-2: #b8b3aa;
+  --text-3: #8f8a81;
+
+  --border: #33302b;
+  --bg: #171512;
+  --card: #1f1c18;
+  --text-inverse: #141210;
+  --sidebar-bg: #1b1815;
+  --sidebar-text: #b8b3aa;
+  --sidebar-active: #2a2621;
+
+  --surface-1: #242019;
+  --surface-2: #2b2720;
+  --surface-3: #38332b;
+  --surface-4: #211e1a;
+  --chat-page-bg: #12100d;
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, .4);
+  --shadow-lg: 0 2px 10px rgba(0, 0, 0, .5);
+  --shadow-xl: 0 8px 28px rgba(0, 0, 0, .6);
+  --focus-ring: 0 0 0 3px rgba(95, 168, 184, .25);
+
+  --scrollbar-thumb: #3c3831;
+  --disabled: #3a3630;
+  --danger-border: #5c3a33;
+  --mask: rgba(0, 0, 0, .6);
+  --hero-bg: #1f2a2c;
+  --hero-border: #2c3a3d;
+}
+
+/* 暗色下让浏览器原生控件（select 下拉、滚动条、日期等）整体翻成深色，
+   否则 select 展开的 <option> 仍是系统白底黑字，和深色下拉框格格不入 */
+[data-theme="dark"] {
+  color-scheme: dark;
+}
+[data-theme="dark"] select.form-control option {
+  background: var(--card);
+  color: var(--text-1);
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -35,9 +142,9 @@
    以前是全站 scrollbar-width: none：滚轮 / 触控板能滚，但**完全看不出这页还能
    往下**，桌面端鼠标用户尤其容易以为到底了。现在保留 8px 细条：轨道透明，
    不出现那条灰底，只在真的溢出时露出一根浅色把手当提示。 */
-* { scrollbar-width: thin; scrollbar-color: #d8d4cb transparent; }
+* { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
 *::-webkit-scrollbar { width: 8px; height: 8px; }
-*::-webkit-scrollbar-thumb { background: #d8d4cb; border-radius: 4px; }
+*::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: var(--radius-sm); }
 *::-webkit-scrollbar-track { background: transparent; }
 
 html, body { height: 100%; }
@@ -58,19 +165,19 @@ input, select, textarea { font-family: inherit; font-size: 14px; }
 /* ---------- 按钮 ---------- */
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-  padding: 8px 16px; border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 16px; border: 1px solid var(--border); border-radius: var(--radius);
   background: var(--card); color: var(--text-1); font-size: 14px;
   transition: all .15s ease; white-space: nowrap;
 }
 .btn:hover { border-color: var(--primary); color: var(--primary); background: var(--primary-light); }
 .btn:disabled { opacity: .55; cursor: not-allowed; }
-.btn-primary { background: var(--primary); border-color: var(--primary); color: #fff; }
-.btn-primary:hover { background: var(--primary-dark); color: #fff; }
-.btn-danger { color: var(--danger); border-color: #e8cdc7; }
-.btn-danger:hover { background: #f7ebe8; border-color: var(--danger); color: var(--danger); }
+.btn-primary { background: var(--primary); border-color: var(--primary); color: var(--text-inverse); }
+.btn-primary:hover { background: var(--primary-dark); color: var(--text-inverse); }
+.btn-danger { color: var(--danger); border-color: var(--danger-border); }
+.btn-danger:hover { background: var(--danger-bg); border-color: var(--danger); color: var(--danger); }
 .btn-ghost { border: none; background: transparent; color: var(--text-2); }
 .btn-ghost:hover { background: var(--primary-light); color: var(--primary); }
-.btn-sm { padding: 5px 10px; font-size: 13px; border-radius: 4px; }
+.btn-sm { padding: 5px 10px; font-size: 13px; border-radius: var(--radius-sm); }
 .btn-block { width: 100%; }
 
 /* ---------- 表单 ---------- */
@@ -78,9 +185,9 @@ input, select, textarea { font-family: inherit; font-size: 14px; }
 .form-group label { display: block; margin-bottom: 6px; font-weight: 500; color: var(--text-2); }
 .form-control {
   width: 100%; padding: 9px 12px; border: 1px solid var(--border);
-  border-radius: 6px; background: #fff; outline: none; transition: border .15s, box-shadow .15s;
+  border-radius: var(--radius); background: var(--card); color: var(--text-1); outline: none; transition: border .15s, box-shadow .15s;
 }
-.form-control:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(23, 80, 94, .12); }
+.form-control:focus { border-color: var(--primary); box-shadow: var(--focus-ring); }
 textarea.form-control { resize: vertical; min-height: 90px; }
 
 /* ---------- 卡片 ---------- */
@@ -91,25 +198,25 @@ textarea.form-control { resize: vertical; min-height: 90px; }
 
 /* ---------- 徽章 ---------- */
 .badge {
-  display: inline-block; padding: 2px 10px; border-radius: 999px;
+  display: inline-block; padding: 2px 10px; border-radius: var(--radius-pill);
   font-size: 12px; font-weight: 500; line-height: 1.7;
 }
 .badge-student { background: var(--primary-light); color: var(--primary); }
-.badge-admin   { background: #f6f0e5; color: #8a5a12; }
-.badge-ready   { background: #eaf3ed; color: #2f7d54; }
+.badge-admin   { background: var(--warning-bg); color: var(--warning); }
+.badge-ready   { background: var(--success-bg); color: var(--success); }
 .badge-processing { background: var(--primary-light); color: var(--primary); }
-.badge-failed  { background: #f7ebe8; color: #a83e33; }
+.badge-failed  { background: var(--danger-bg); color: var(--danger); }
 
 /* ---------- 弹窗 ---------- */
 .modal-mask {
-  position: fixed; inset: 0; background: rgba(29, 27, 24, .45);
-  display: none; align-items: center; justify-content: center; z-index: 1000;
+  position: fixed; inset: 0; background: var(--mask);
+  display: none; align-items: center; justify-content: center; z-index: var(--z-modal);
   padding: 20px;
 }
 .modal-mask.show { display: flex; }
 .modal {
   background: var(--card); border: 1px solid var(--border);
-  border-radius: 10px; width: 100%; max-width: 460px;
+  border-radius: var(--radius-lg); width: 100%; max-width: 460px;
   max-height: 86vh; overflow-y: auto; box-shadow: var(--shadow-lg);
   padding: 24px; animation: modalIn .18s ease;
   color: var(--text-2);
@@ -130,9 +237,9 @@ textarea.form-control { resize: vertical; min-height: 90px; }
   display: flex; align-items: center; justify-content: center;
 }
 .alert-icon svg { width: 21px; height: 21px; }
-.alert-icon.error   { background: #f7ebe8; color: var(--danger); }
-.alert-icon.warning { background: #f6f0e5; color: var(--warning); }
-.alert-icon.success { background: #eaf3ed; color: var(--success); }
+.alert-icon.error   { background: var(--danger-bg); color: var(--danger); }
+.alert-icon.warning { background: var(--warning-bg); color: var(--warning); }
+.alert-icon.success { background: var(--success-bg); color: var(--success); }
 .alert-icon.info    { background: var(--primary-light); color: var(--primary); }
 .alert-icon.logout  { background: var(--primary-light); color: var(--primary); }
 .alert-text { flex: 1; min-width: 0; }
@@ -155,12 +262,12 @@ textarea.form-control { resize: vertical; min-height: 90px; }
 /* 统一成白底卡片 + 左侧色条（和弹窗同一套背景色），不再按类型换整块底色 */
 #toast-root {
   position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
-  z-index: 2000; display: flex; flex-direction: column; gap: 8px; align-items: center;
+  z-index: var(--z-toast); display: flex; flex-direction: column; gap: 8px; align-items: center;
 }
 .toast {
   background: var(--card); color: var(--text-1);
   border: 1px solid var(--border);
-  padding: 10px 16px; border-radius: 6px;
+  padding: 10px 16px; border-radius: var(--radius);
   font-size: 13.5px; line-height: 1.6; box-shadow: var(--shadow-lg);
   animation: toastIn .2s ease; max-width: 480px;
 }
@@ -178,11 +285,11 @@ textarea.form-control { resize: vertical; min-height: 90px; }
 .table-wrap { overflow-x: auto; }
 .table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .table th {
-  text-align: left; padding: 11px 14px; background: #faf9f7; color: var(--text-2);
+  text-align: left; padding: 11px 14px; background: var(--surface-1); color: var(--text-2);
   font-weight: 600; border-bottom: 1px solid var(--border); white-space: nowrap;
 }
 .table td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
-.table tr:hover td { background: #faf9f7; }
+.table tr:hover td { background: var(--surface-1); }
 .table .ops { display: flex; gap: 6px; }
 
 /* ---------- 工具 ---------- */
@@ -193,7 +300,7 @@ textarea.form-control { resize: vertical; min-height: 90px; }
 .muted { color: var(--text-3); font-size: 13px; }
 .hidden { display: none !important; }
 .loading-spinner {
-  width: 18px; height: 18px; border: 2.5px solid #c9c5bd; border-top-color: var(--primary);
+  width: 18px; height: 18px; border: 2.5px solid var(--disabled); border-top-color: var(--primary);
   border-radius: 50%; display: inline-block; animation: spin .7s linear infinite; vertical-align: -3px;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -204,9 +311,9 @@ textarea.form-control { resize: vertical; min-height: 90px; }
 .form-control:focus-visible { outline: none; }
 
 .skip-link {
-  position: absolute; left: -9999px; top: 0; z-index: 200;
-  background: var(--primary); color: #fff; padding: 10px 16px;
-  border-radius: 0 0 6px 0; font-size: 13.5px;
+  position: absolute; left: -9999px; top: 0; z-index: var(--z-skip);
+  background: var(--primary); color: var(--text-inverse); padding: 10px 16px;
+  border-radius: 0 0 var(--radius) 0; font-size: 13.5px;
 }
 .skip-link:focus { left: 0; }
 

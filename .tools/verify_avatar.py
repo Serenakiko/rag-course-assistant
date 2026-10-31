@@ -54,7 +54,7 @@ if not TEST_USER or not TEST_PASSWORD:
 status, content = http(
     "POST",
     "/api/auth/login",
-    data={"username": TEST_USER, "password": TEST_PASSWORD},
+    data={"account": TEST_USER, "password": TEST_PASSWORD},
 )
 assert status == 200, f"login failed: {status} {content}"
 login = json.loads(content)

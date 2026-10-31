@@ -168,7 +168,7 @@ const Common = (() => {
     const v = (user && user.avatar) || "";
     if (v.startsWith("emoji:")) return `<span>${escapeHtml(v.slice(6))}</span>`;
     if (v) return `<img src="${escapeHtml(v)}" alt="头像">`;
-    const ch = (user && (user.real_name || user.username || "?"))[0];
+    const ch = (user && (user.username || user.account || "?"))[0];
     return `<span>${escapeHtml(ch)}</span>`;
   }
 

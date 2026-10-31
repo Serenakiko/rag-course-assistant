@@ -19,11 +19,11 @@ const ProfileView = (() => {
           <div class="p-form">
             <div class="form-group">
               <label>账号</label>
-              <input class="form-control" id="p-username" value="${Common.escapeHtml(user.username)}" maxlength="8" autocomplete="off" ${ro}>
+              <input class="form-control" id="p-account" value="${Common.escapeHtml(user.account)}" maxlength="8" autocomplete="off" ${ro}>
             </div>
             <div class="form-group">
               <label>用户名</label>
-              <input class="form-control" id="p-name-box" value="${Common.escapeHtml(user.real_name || "")}" maxlength="32" autocomplete="off" ${ro}>
+              <input class="form-control" id="p-name-box" value="${Common.escapeHtml(user.username || "")}" maxlength="32" autocomplete="off" ${ro}>
             </div>
             <div class="form-group">
               <label>角色</label>
@@ -82,13 +82,13 @@ const ProfileView = (() => {
     document.getElementById("p-cancel").addEventListener("click", () => render(container, false));
 
     document.getElementById("p-save").addEventListener("click", async () => {
-      const username = document.getElementById("p-username").value.trim();
-      const realName = document.getElementById("p-name-box").value.trim();
+      const account = document.getElementById("p-account").value.trim();
+      const username = document.getElementById("p-name-box").value.trim();
       const oldPwd = document.getElementById("p-old").value;
       const newPwd = document.getElementById("p-new").value;
       const newPwd2 = document.getElementById("p-new2").value;
 
-      if (!/^\d{8}$/.test(username)) return Common.toast("账号必须是 8 位数字", "error");
+      if (!/^\d{8}$/.test(account)) return Common.toast("账号必须是 8 位数字", "error");
 
       const wantsPwd = !!(oldPwd || newPwd || newPwd2);
       if (wantsPwd) {
@@ -101,7 +101,7 @@ const ProfileView = (() => {
       btn.disabled = true;
       btn.textContent = "保存中…";
       try {
-        const u = await API.request("PUT", "/api/auth/profile", { username, real_name: realName });
+        const u = await API.request("PUT", "/api/auth/profile", { account, username });
         API.saveSession(API.getToken(), { ...API.getUser(), ...u });
         App.refreshUserInfo();
 

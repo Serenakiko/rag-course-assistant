@@ -1,12 +1,16 @@
 """数据库引擎与会话管理。"""
 from __future__ import annotations
 
+import logging
 from collections.abc import Generator
+from pathlib import Path
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import settings
+
+logger = logging.getLogger(__name__)
 
 settings.ensure_dirs()
 
@@ -42,14 +46,44 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    """建表（幂等），并对旧库补列。"""
+    """建表（幂等），并对旧库补列 / 重命名列。"""
     from . import models  # noqa: F401  确保模型已注册
+
+    # 列重命名迁移（先于 create_all）：把历史库里的旧列名对齐到当前模型。
+    # 早期 users 表用 username=账号、real_name=用户名；现统一为 account=账号、
+    # username=用户名。SQLite 支持 RENAME COLUMN，这里按「旧列存在且新列不存在」逐列处理，
+    # 顺序很重要：先把 username(账号) 重命名为 account，再把 real_name 重命名为 username，
+    # 避免中间态列名冲突。
+    with engine.begin() as conn:
+        cols = [row[1] for row in conn.execute(text("PRAGMA table_info(users)"))]
+        if "account" not in cols and "username" in cols:
+            conn.execute(text("ALTER TABLE users RENAME COLUMN username TO account"))
+        cols = [row[1] for row in conn.execute(text("PRAGMA table_info(users)"))]
+        if "username" not in cols and "real_name" in cols:
+            conn.execute(text("ALTER TABLE users RENAME COLUMN real_name TO username"))
 
     models.Base.metadata.create_all(bind=engine)
     with engine.begin() as conn:
         cols = [row[1] for row in conn.execute(text("PRAGMA table_info(users)"))]
         if "avatar" not in cols:
             conn.execute(text("ALTER TABLE users ADD COLUMN avatar VARCHAR(255) DEFAULT ''"))
+        # username 唯一性：SQLite 无法给已有列直接加 UNIQUE 约束，用唯一索引等价实现。
+        # create_all 对已存在的表不会重建列约束，所以这里对旧库手动补唯一索引，
+        # 与模型里的 unique=True 语义对齐（应用层预检之外的并发兜底）。
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_users_username "
+                "ON users (username)"
+            )
+        )
+        # 索引名对齐：字段重命名（username→account）后，旧库遗留的 ix_users_username
+        # 实际指向 account 列，名称有误导。这里删旧建新为 ix_users_account。
+        idx_list = [row[1] for row in conn.execute(text("PRAGMA index_list(users)"))]
+        if "ix_users_username" in idx_list and "ix_users_account" not in idx_list:
+            conn.execute(text("DROP INDEX ix_users_username"))
+            conn.execute(
+                text("CREATE INDEX ix_users_account ON users (account)")
+            )
         if "token_version" not in cols:
             conn.execute(text("ALTER TABLE users ADD COLUMN token_version INTEGER DEFAULT 0"))
         # unanswered_questions 增量迁移：为旧库补充闭环增强所需字段
@@ -62,6 +96,8 @@ def init_db() -> None:
             conn.execute(text("ALTER TABLE unanswered_questions ADD COLUMN answered_at DATETIME"))
         if "read_at" not in uq_cols:
             conn.execute(text("ALTER TABLE unanswered_questions ADD COLUMN read_at DATETIME"))
+        if "admin_read_at" not in uq_cols:
+            conn.execute(text("ALTER TABLE unanswered_questions ADD COLUMN admin_read_at DATETIME"))
         if "updated_at" not in uq_cols:
             conn.execute(text("ALTER TABLE unanswered_questions ADD COLUMN updated_at DATETIME"))
         if "display_no" not in uq_cols:
@@ -96,13 +132,41 @@ def init_db() -> None:
             conn.execute(
                 text("ALTER TABLE conversations ADD COLUMN last_knowledge_bases TEXT DEFAULT '[]'")
             )
+        if "gen_seq" not in conv_cols:
+            conn.execute(text("ALTER TABLE conversations ADD COLUMN gen_seq INTEGER DEFAULT 0"))
         # messages 增量迁移：标记生成中断时保存的半截回答
         msg_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(messages)"))]
         if "interrupted" not in msg_cols:
             conn.execute(text("ALTER TABLE messages ADD COLUMN interrupted INTEGER DEFAULT 0"))
+        if "feedback" not in msg_cols:
+            conn.execute(text("ALTER TABLE messages ADD COLUMN feedback VARCHAR(8) DEFAULT ''"))
         # knowledge_points 增量迁移：文档自动生成的知识点标记
         kp_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(knowledge_points)"))]
         if "is_auto" not in kp_cols:
             conn.execute(text("ALTER TABLE knowledge_points ADD COLUMN is_auto INTEGER DEFAULT 0"))
         if "updated_by" not in kp_cols:
             conn.execute(text("ALTER TABLE knowledge_points ADD COLUMN updated_by INTEGER"))
+
+    # 上面的 create_all + 手写补列已把任意旧库对齐到当前模型；这里再用 Alembic 把库
+    # stamp 到基线版本，之后的新 schema 变更走 alembic revision --autogenerate 版本化迁移。
+    # stamp 是幂等的：已标记过就不会重复，未初始化 alembic_version 表的库会在这里建表。
+    _stamp_alembic_head()
+
+
+def _stamp_alembic_head() -> None:
+    """把当前库 stamp 到 Alembic 基线版本（幂等，失败不阻塞启动）。
+
+    数据库迁移正在从「手写 PRAGMA」过渡到 Alembic：历史遗留库由上面的补列对齐，
+    这里补一个版本戳，让未来的 autogenerate 有正确的 diff 起点。
+    """
+    try:
+        from alembic.config import Config
+
+        from alembic import command
+
+        cfg = Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
+        cfg.set_main_option("sqlalchemy.url", f"sqlite:///{settings.DB_PATH}")
+        command.stamp(cfg, "head")
+    except Exception:  # noqa: BLE001
+        # alembic 未安装或版本目录异常时降级为「无版本戳」，不影响主流程
+        logger.warning("Alembic stamp 失败（忽略，迁移仍由手写补列保证）", exc_info=True)

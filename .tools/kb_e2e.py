@@ -22,7 +22,7 @@ def main():
         sys.exit("请先设置 RAG_TEST_USER / RAG_TEST_PASSWORD 环境变量")
     r = httpx.post(
         f"{base}/api/auth/login",
-        json={"username": TEST_USER, "password": TEST_PASSWORD},
+        json={"account": TEST_USER, "password": TEST_PASSWORD},
         timeout=10,
     )
     r.raise_for_status()

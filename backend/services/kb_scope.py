@@ -56,9 +56,7 @@ def all_course_names(db: Session) -> set[str]:
 def visible_course_names(user: User, db: Session) -> set[str] | None:
     """当前用户可见的课程名（含历史课程）；管理员返回 None，表示不限制。
 
-    历史课程（课程名不对应任何知识库）也按创建者判断：管理员留下的对所有学生可见，
-    学生自己建的只有他自己能看到。只按知识库过滤的话，学生 A 以前留下的
-    "某某的私藏" 这种课程名会出现在学生 B 的课程列表里。
+    历史课程也按创建者判断：管理员留下的对所有学生可见，学生自建的只有本人可见。
     """
     visible = visible_base_names(user, db)
     if visible is None:
@@ -130,13 +128,7 @@ def allowed_course_names(user: User, db: Session) -> list[str] | None:
 
 
 def assert_writable_course(user: User, db: Session, course: str) -> None:
-    """校验写权限：必须选一个已存在的知识库，学生只能写自己可见的库。
-
-    新增/编辑知识点、上传文档都要走这里。不校验的话，学生随手填一个课程名就能
-    把内容塞进别的学生的私有知识库，或者造出一个「不属于任何知识库」的课程名。
-    空课程以前是放行的，但学生的检索范围只含知识库名，course 为空的资料
-    永远问不出来，所以现在直接 400，强制先建库/选库。
-    """
+    """校验写权限：必须选已存在的知识库，学生只能写自己可见的库。"""
     name = (course or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="请选择所属知识库")
@@ -144,8 +136,7 @@ def assert_writable_course(user: User, db: Session, course: str) -> None:
         raise HTTPException(status_code=400, detail="所属知识库不存在，请先创建知识库")
     if user.role == "admin":
         return
-    # 能看见 ≠ 能往里写：以前按「可见」放行，一个学生就能往管理员发布的公共库
-    # 里塞知识点或文档，别人的回答也会引用这条内容。现在只允许创建者本人。
+    # 能看见 ≠ 能往里写：学生只能写自己创建的库
     owner_id = db.scalar(select(KnowledgeBase.created_by).where(KnowledgeBase.name == name))
     if owner_id != user.id:
         raise HTTPException(status_code=403, detail="只有知识库创建者或管理员能往里添加内容")

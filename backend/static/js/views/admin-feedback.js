@@ -1,8 +1,6 @@
 /* ============ 视图：问题反馈（管理台） ============
  * 统计卡 + 四个 tab（全部 / 处理中 / 已解决 / 按问题聚类） + 生成回答、删除。
- * 从 views/admin.js 里拆出来的独立模块：原来 admin.js 一个文件 1200 多行，
- * 改「每页几条」这种小事也要在四个模块之间翻。这里只依赖全局 Common / API /
- * Markdown / App，由 AdminView.render(container, "unanswered") 委托进来。
+ * 由 AdminView.render(container, "unanswered") 委托进来。
  */
 const AdminFeedbackView = (() => {
   /* ==================== 反馈（学生提问未答上的问题） ==================== */
@@ -195,11 +193,16 @@ const AdminFeedbackView = (() => {
           ? `<div class="fb-answer md-body">${Markdown.render(q.answer)}</div>`
           : `<div class="fb-wait-tip"><span>待补充资料并生成回答，解决后学生端会收到通知</span></div>`}
         <div class="fb-ops">
+          ${q.status === "pending" && !q.admin_read
+            ? `<button class="btn btn-sm" data-read="${q.id}">标为已读</button>`
+            : ""}
           <button class="btn btn-sm" data-gen="${q.id}">${q.status === "resolved" ? "重新生成" : "生成回答"}</button>
           <button class="btn btn-sm btn-danger" data-del="${q.id}">删除</button>
         </div>
       </div>`).join("");
 
+    list.querySelectorAll("[data-read]").forEach((b) =>
+      b.addEventListener("click", () => markRead(uqRows.find((x) => x.id === Number(b.dataset.read)))));
     list.querySelectorAll("[data-gen]").forEach((b) =>
       b.addEventListener("click", () => openGenerateGuide(uqRows.find((x) => x.id === Number(b.dataset.gen)))));
     list.querySelectorAll("[data-del]").forEach((b) =>
@@ -244,6 +247,22 @@ const AdminFeedbackView = (() => {
         doRegenerate(q.id);
       });
     }});
+  }
+
+  async function markRead(q) {
+    if (!q) return;
+    const ok = await Common.confirmDialog({
+      title: "标记已读",
+      message: `将「${Common.escapeHtml(q.question)}」标记为已读，角标会相应减少，确认？`,
+      okText: "标为已读",
+    });
+    if (!ok) return;
+    try {
+      await API.request("POST", `/api/admin/unanswered/${q.id}/read`);
+      Common.toast("已标记为已读", "success");
+      loadUnanswered();
+      NotifyCenter.refresh();   // 标记已读后待处理未读数变化，刷新角标
+    } catch (err) { Common.toast(err.message, "error"); }
   }
 
   async function doRegenerate(qid) {

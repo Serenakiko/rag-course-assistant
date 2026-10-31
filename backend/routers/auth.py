@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -106,9 +107,9 @@ def _prune_expired(now: float) -> None:
             del store[key]
 
 
-def _login_key(request: Request, username: str) -> str:
+def _login_key(request: Request, account: str) -> str:
     client = request.client.host if request.client else "-"
-    return f"{client}|{username}"
+    return f"{client}|{account}"
 
 
 def _recent_fails(key: str) -> int:
@@ -171,17 +172,26 @@ def register(
             raise HTTPException(status_code=429, detail="注册过于频繁，请稍后再试")
         stamps.append(now)
         _reg_log[client] = stamps
-    exists = db.scalar(select(User).where(User.username == payload.username))
+    exists = db.scalar(select(User).where(User.account == payload.account))
     if exists:
         raise HTTPException(status_code=400, detail="账号已存在")
+    username = payload.username.strip() or payload.account
+    name_exists = db.scalar(select(User.id).where(User.username == username))
+    if name_exists:
+        raise HTTPException(status_code=400, detail="用户名已存在")
     user = User(
-        username=payload.username,
+        account=payload.account,
         password_hash=hash_password(payload.password),
-        real_name=payload.real_name.strip() or payload.username,
+        username=username,
         role="student",
     )
     db.add(user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # 并发下应用层预检被绕过时，唯一索引兜底拦截（account 或 username 撞库）
+        db.rollback()
+        raise HTTPException(status_code=400, detail="账号或用户名已存在")
     db.refresh(user)
     return user
 
@@ -193,24 +203,24 @@ def login(
     db: Session = Depends(get_db),
 ) -> LoginResponse:
     client = request.client.host if request.client else "-"
-    key = _login_key(request, payload.username)
+    key = _login_key(request, payload.account)
     if _recent_fails(key) >= _LOGIN_MAX_FAILS or _recent_ip_fails(client) >= _IP_MAX_FAILS:
         raise HTTPException(status_code=429, detail="登录失败次数过多，请 10 分钟后再试")
-    user = db.scalar(select(User).where(User.username == payload.username))
+    user = db.scalar(select(User).where(User.account == payload.account))
     if user is None:
         # 账号不存在也走一遍哈希，抹平「不存在的号返回更快」这个信号
         verify_password(payload.password, _DUMMY_HASH)
         _note_fail(key)
         _note_ip_fail(client)
-        raise HTTPException(status_code=401, detail="用户名或密码错误")
+        raise HTTPException(status_code=401, detail="账号或密码错误")
     if not verify_password(payload.password, user.password_hash):
         _note_fail(key)
         _note_ip_fail(client)
-        raise HTTPException(status_code=401, detail="用户名或密码错误")
+        raise HTTPException(status_code=401, detail="账号或密码错误")
     _clear_fails(key)
     _clear_ip_fails(client)
     token = create_access_token(
-        user.id, user.username, user.role, user.token_version or 0
+        user.id, user.account, user.role, user.token_version or 0
     )
     return LoginResponse(token=token, user=UserOut.model_validate(user))
 
@@ -241,19 +251,30 @@ def update_profile(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> User:
-    if payload.username is not None:
-        new_username = payload.username.strip()
-        if new_username and new_username != user.username:
-            exists = db.scalar(select(User.id).where(User.username == new_username))
+    if payload.account is not None:
+        new_account = payload.account.strip()
+        if new_account and new_account != user.account:
+            exists = db.scalar(select(User.id).where(User.account == new_account))
             if exists:
-                raise HTTPException(status_code=400, detail="该账号已被占用")
-            user.username = new_username
-    if payload.real_name is not None:
-        user.real_name = payload.real_name.strip() or user.real_name
+                raise HTTPException(status_code=400, detail="账号已存在")
+            user.account = new_account
+    if payload.username is not None:
+        new_username = payload.username.strip() or user.username
+        if new_username and new_username != user.username:
+            name_exists = db.scalar(
+                select(User.id).where(User.username == new_username)
+            )
+            if name_exists:
+                raise HTTPException(status_code=400, detail="用户名已存在")
+        user.username = new_username
     old_avatar = user.avatar
     if payload.avatar is not None:
         user.avatar = payload.avatar.strip()
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="账号或用户名已存在")
     db.refresh(user)
     # 数据库落定后再删旧文件：提交失败时头像字段还指向它，删了就成了破图
     if old_avatar and old_avatar != user.avatar:

@@ -29,7 +29,7 @@ def db():
 
 
 def _user(db: Session, username: str, role: str) -> User:
-    user = User(username=username, password_hash="x", real_name=username, role=role)
+    user = User(account=username, password_hash="x", username=username, role=role)
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -150,6 +150,132 @@ def test_unmatched_marker():
     assert not is_unmatched_answer("栈是后进先出的线性表")
 
 
+def test_smalltalk_short_circuits_without_search(monkeypatch):
+    """寒暄问题直接回引导语，不检索、不调模型、不发 unmatched 事件。"""
+    from backend.services import rag_service
+
+    searched: list[str] = []
+
+    def fake_search(*args, **kwargs):
+        searched.append(args[0] if args else "")
+        raise AssertionError("寒暄问题不该走到检索")
+
+    monkeypatch.setattr(rag_service, "vector_search", fake_search)
+
+    async def run():
+        events = []
+        async for event in rag_service._stream_answer_locked("你好"):
+            events.append(event)
+        return events
+
+    events = asyncio.run(run())
+    assert searched == []
+    assert events[0] == {"type": "token", "content": rag_service.SMALLTALK_REPLY}
+    assert events[-1] == {"type": "sources", "sources": [], "answer": rag_service.SMALLTALK_REPLY}
+    assert all(e["type"] != "unmatched" for e in events)
+
+
+def test_unmatched_gate_rejects_irrelevant_without_record(monkeypatch):
+    """距离超阈值 + 课程无关：拒答且不发 unmatched（不污染反馈列表）。"""
+    from langchain_core.documents import Document
+
+    from backend.services import rag_service
+
+    doc = Document(page_content="无关", metadata={"course": "公开库"})
+    monkeypatch.setattr(rag_service, "vector_search", lambda *a, **k: [(doc, 0.9)])  # 超过阈值
+    async def _unrelated(*a, **k):
+        return False
+    monkeypatch.setattr(rag_service, "is_course_related", _unrelated)
+
+    async def run():
+        events = []
+        async for event in rag_service._stream_answer_locked("今天天气如何"):
+            events.append(event)
+        return events
+
+    events = asyncio.run(run())
+    assert events[0]["type"] == "token"
+    assert "不在我的回答范围内" in events[0]["content"]
+    assert all(e["type"] != "unmatched" for e in events)
+
+
+def test_unmatched_gate_records_course_related(monkeypatch):
+    """距离超阈值 + 课程相关：拒答并发出 unmatched 事件供落库。"""
+    from langchain_core.documents import Document
+
+    from backend.services import rag_service
+
+    doc = Document(page_content="二叉树", metadata={"course": "数据结构", "title": "树.md"})
+    monkeypatch.setattr(rag_service, "vector_search", lambda *a, **k: [(doc, 0.9)])
+    async def _related(*a, **k):
+        return True
+    monkeypatch.setattr(rag_service, "is_course_related", _related)
+
+    async def run():
+        events = []
+        async for event in rag_service._stream_answer_locked("红黑树的插入过程"):
+            events.append(event)
+        return events
+
+    events = asyncio.run(run())
+    unmatched = [e for e in events if e["type"] == "unmatched"]
+    assert len(unmatched) == 1
+    assert unmatched[0]["course"] == "数据结构"
+    assert unmatched[0]["question"] == "红黑树的插入过程"
+    body = "".join(e["content"] for e in events if e["type"] == "token")
+    assert "【知识库未收录】" in body
+
+
+def test_answerability_gate_blocks_similar_but_uncovered(monkeypatch):
+    """距离门控通过、但可答性判定「没有」：仍走拒答 + unmatched。"""
+    from langchain_core.documents import Document
+
+    from backend.services import rag_service
+
+    doc = Document(page_content="二叉查找树", metadata={"course": "数据结构"})
+    monkeypatch.setattr(rag_service, "vector_search", lambda *a, **k: [(doc, 0.5)])
+    monkeypatch.setattr(rag_service.settings, "ANSWERABILITY_CHECK", True)
+    async def _cannot(*a, **k):
+        return False
+    monkeypatch.setattr(rag_service, "can_answer", _cannot)
+
+    async def run():
+        events = []
+        async for event in rag_service._stream_answer_locked("红黑树的性质"):
+            events.append(event)
+        return events
+
+    events = asyncio.run(run())
+    unmatched = [e for e in events if e["type"] == "unmatched"]
+    assert len(unmatched) == 1
+    assert all(e["type"] != "sources" for e in events)
+
+
+def test_empty_kb_short_circuits_without_llm(monkeypatch):
+    """知识库空时直接提示，不调用模型。"""
+    from backend.services import rag_service
+
+    monkeypatch.setattr(rag_service, "vector_search", lambda *a, **k: [])
+    called: list[str] = []
+
+    def boom():
+        called.append("llm")
+        raise AssertionError("空库不该调模型")
+
+    monkeypatch.setattr(rag_service, "get_llm", boom)
+
+    async def run():
+        events = []
+        async for event in rag_service._stream_answer_locked("进程和线程的区别"):
+            events.append(event)
+        return events
+
+    events = asyncio.run(run())
+    assert called == []
+    assert events[0]["type"] == "token"
+    assert "还没有相关内容" in events[0]["content"]
+
+
 def test_avatar_path_guard():
     from backend.routers.auth import _avatar_file
 
@@ -204,6 +330,40 @@ def test_prompt_messages_tolerate_braces_in_history():
     assert "资料【正文】" in out[0].content       # 系统提示里的 {context} 仍然被替换
 
 
+def test_gen_seq_bump_is_durable(monkeypatch):
+    """会话生成序号落库：新提问自增，顶掉旧流不再依赖进程内 dict。"""
+    from sqlalchemy import select
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from backend.models import Base, Conversation, User
+    from backend.routers import chat as chat_mod
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    TestSession = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+    with TestSession() as s:
+        user = User(account="10000095", password_hash="x", username="t", role="student")
+        s.add(user)
+        s.commit()
+        conv = Conversation(user_id=user.id, title="会话")
+        s.add(conv)
+        s.commit()
+        conv_id = conv.id
+
+    monkeypatch.setattr(chat_mod, "SessionLocal", TestSession)
+
+    # 序号从 0 起步，第一次自增为 1
+    assert chat_mod._bump_gen_seq(conv_id) == 1
+    assert chat_mod._bump_gen_seq(conv_id) == 2
+    assert chat_mod._current_gen_seq(conv_id) == 2
+
+    # 序号持久化在表里，任何会话都能读到最新值
+    with TestSession() as s:
+        assert s.scalar(select(Conversation.gen_seq).where(Conversation.id == conv_id)) == 2
+
+
 def test_save_answer_dropped_when_next_turn_started(monkeypatch):
     """上一轮的迟到回答不能落到下一轮后面。"""
     from sqlalchemy import func, select
@@ -218,7 +378,7 @@ def test_save_answer_dropped_when_next_turn_started(monkeypatch):
     TestSession = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
     with TestSession() as s:
-        user = User(username="10000098", password_hash="x", real_name="t", role="student")
+        user = User(account="10000098", password_hash="x", username="t", role="student")
         s.add(user)
         s.commit()
         conv = Conversation(user_id=user.id, title="会话")

@@ -293,19 +293,19 @@ def _rand_time(days_ago_max: int = 60, weight_recent: bool = False) -> datetime:
 
 
 def seed_users(db) -> tuple[User, list[User]]:
-    admin = db.scalar(select(User).where(User.username == "23040107")) or db.scalar(
+    admin = db.scalar(select(User).where(User.account == "23040107")) or db.scalar(
         select(User).where(User.role == "admin").order_by(User.id)
     )
     students: list[User] = []
 
     # 两个额外的管理员
     for uname, name in (("23040105", "李静怡"), ("23040106", "王博文")):
-        if db.scalar(select(User).where(User.username == uname)) is None:
+        if db.scalar(select(User).where(User.account == uname)) is None:
             db.add(
                 User(
-                    username=uname,
+                    account=uname,
                     password_hash=hash_password(DEMO_PASSWORD),
-                    real_name=name,
+                    username=name,
                     role="admin",
                     created_at=_rand_time(120),
                 )
@@ -313,7 +313,7 @@ def seed_users(db) -> tuple[User, list[User]]:
     db.commit()
 
     existing = {
-        u.username
+        u.account
         for u in db.scalars(select(User))
     }
     for i in range(45):
@@ -323,9 +323,9 @@ def seed_users(db) -> tuple[User, list[User]]:
         name = random.choice(SURNAMES) + random.choice(GIVEN)
         students.append(
             User(
-                username=uname,
+                account=uname,
                 password_hash=hash_password(DEMO_PASSWORD),
-                real_name=name,
+                username=name,
                 role="student",
                 created_at=_rand_time(90),
             )
@@ -417,7 +417,11 @@ def seed_documents(db, admin: User) -> int:
                     stored_path=str(path),
                     status="ready",
                     course=course,
-                    is_seed=0,
+                    # 这些是「展示壳」文档：正文已经通过 seed_points 以知识点形式写入向量库，
+                    # 文档记录只用于「文档管理」页展示，不能再切分入库（否则与知识点内容在
+                    # 向量库里重复命中）。is_seed=1 会让 rebuild_vectors.py / 回收站恢复
+                    # 都跳过它的文档向量入库。
+                    is_seed=1,
                     chunk_count=len(chunks),
                     error="",
                     uploaded_by=admin.id,

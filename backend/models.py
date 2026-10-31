@@ -21,11 +21,12 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    account: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(160))
     # 改密/降权时自增，旧的 JWT 立即失效（token 里带 ver 声明）
     token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
-    real_name: Mapped[str] = mapped_column(String(64), default="")
+    # 用户名要求唯一（应用层会预检，这里用唯一索引兜底并发场景）
+    username: Mapped[str] = mapped_column(String(64), default="", unique=True)
     avatar: Mapped[str] = mapped_column(String(255), default="")  # emoji:😀 / /static/avatars/x.png
     role: Mapped[str] = mapped_column(String(16), default="student", index=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -95,8 +96,7 @@ class KnowledgePoint(Base):
     content: Mapped[str] = mapped_column(Text)
     course: Mapped[str] = mapped_column(String(128), default="", index=True)
     tags: Mapped[str] = mapped_column(String(255), default="")  # 逗号分隔
-    # 文档上传自动生成的知识点：只作展示，重建向量时跳过，避免与文档分块重复。
-    # 不再靠“标题和文档同名”来猜，避免误伤同名的手工知识点。
+    # 文档上传自动生成的知识点：只作展示，重建向量时跳过
     is_auto: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_by: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
@@ -107,7 +107,7 @@ class KnowledgePoint(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
-    # 最后一次改内容的人：创建者与修改者可能不是同一个人，改了要能追到人
+    # 最后修改者（可能与创建者不同）
     updated_by: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
@@ -120,14 +120,14 @@ class KnowledgePoint(Base):
         """创建者显示名（未关联用户时返回空）。"""
         if self.creator is None:
             return ""
-        return self.creator.real_name or self.creator.username or ""
+        return self.creator.username or self.creator.account or ""
 
     @property
     def updater_name(self) -> str:
         """最后修改人显示名（没改过时为空）。"""
         if self.updater is None:
             return ""
-        return self.updater.real_name or self.updater.username or ""
+        return self.updater.username or self.updater.account or ""
 
 
 class UnansweredQuestion(Base):
@@ -136,8 +136,7 @@ class UnansweredQuestion(Base):
     __tablename__ = "unanswered_questions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    # 展示编号：删除后可以重排成 1..n，主键 id 永不变动。
-    # 以前直接重排主键，外部拿着旧编号去操作就会打偏（删错记录）。
+    # 展示编号：删除后重排成 1..n，主键 id 不动
     display_no: Mapped[int] = mapped_column(Integer, default=0, index=True)
     question: Mapped[str] = mapped_column(Text)
     course: Mapped[str] = mapped_column(String(128), default="", index=True)  # 推测的关联课程，可为空
@@ -151,6 +150,10 @@ class UnansweredQuestion(Base):
     )
     # 学生端“已读”标记：学生查看已解决答案后写入（NULL=未读），驱动未读角标
     read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # 管理员端“已读”标记（NULL=未读），与学生端 read_at 独立
+    admin_read_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     created_by: Mapped[int] = mapped_column(
@@ -170,7 +173,7 @@ class UnansweredQuestion(Base):
         """提问者显示名（未关联用户时返回空）。"""
         if self.creator is None:
             return ""
-        return self.creator.real_name or self.creator.username or ""
+        return self.creator.username or self.creator.account or ""
 
 
 class Conversation(Base):
@@ -183,13 +186,15 @@ class Conversation(Base):
         Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     title: Mapped[str] = mapped_column(String(255), default="新会话")
-    # 遗留列：以前用于「这次只在这几个知识库里检索」，前端从来没做过入口，
-    # 逻辑已从 /api/chat/ask 里删掉。列保留是为了不破坏已有数据库（NOT NULL
-    # 没服务器端默认值，删字段会让老库的 INSERT 直接失败）。新代码不再读写。
+    # 遗留列：新代码不再读写，保留只为兼容旧库
     knowledge_bases: Mapped[str] = mapped_column(Text, default="[]")
-    # 遗留列，同上（补生成曾按它限定范围），现在不再使用
+    # 遗留列，同上
     last_knowledge_bases: Mapped[str] = mapped_column(
         Text, default="[]", server_default="[]"
+    )
+    # 生成序号：新提问自增，用于同会话新提问顶掉旧流
+    gen_seq: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
@@ -215,6 +220,8 @@ class Message(Base):
     sources: Mapped[str] = mapped_column(Text, default="[]")  # JSON 数组
     # 生成中断（客户端断开 / 超时 / 报错）时保存的半截回答：1=中断，0=完整
     interrupted: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # 学生对这条回答的评价："" 未评 / "up" 有帮助 / "down" 没帮助（质量反馈信号）
+    feedback: Mapped[str] = mapped_column(String(8), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
     )
@@ -248,7 +255,7 @@ class RecycleItem(Base):
     def deleter_name(self) -> str:
         if self.deleter is None:
             return ""
-        return self.deleter.real_name or self.deleter.username or ""
+        return self.deleter.username or self.deleter.account or ""
 
 
 class QuestionVector(Base):

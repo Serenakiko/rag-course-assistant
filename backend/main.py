@@ -50,7 +50,7 @@ def _guard_default_admin() -> None:
         return
     if settings.HOST not in LOOPBACK_HOSTS:
         raise RuntimeError(
-            f"管理员账号 {admin.username} 仍在使用默认密码 111111，而 HOST={settings.HOST} "
+            f"管理员账号 {admin.account} 仍在使用默认密码 111111，而 HOST={settings.HOST} "
             "允许局域网访问，服务拒绝启动。\n"
             "先改密码再放开监听：\n"
             "  1) 把 .env 里的 HOST 改回 127.0.0.1 并启动服务；\n"
@@ -58,14 +58,14 @@ def _guard_default_admin() -> None:
             "  3) 再把 HOST 改成 0.0.0.0 启动。"
         )
     logger.warning(
-        "管理员账号 %s 仍在使用默认密码 111111，请立即登录后修改", admin.username
+        "管理员账号 %s 仍在使用默认密码 111111，请立即登录后修改", admin.account
     )
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
-    # 回收站超过保留期的内容顺手清掉（含 data/trash 下的源文件）
+    # 清理回收站超过保留期的内容（含 data/trash 下的源文件）
     with SessionLocal() as _db:
         removed = purge_expired(_db)
     if removed:

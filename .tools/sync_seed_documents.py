@@ -40,7 +40,7 @@ def main() -> None:
     settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     session = SessionLocal()
     try:
-        admin = session.scalar(select(User).where(User.username == "23040107"))
+        admin = session.scalar(select(User).where(User.account == "23040107"))
         if admin is None:
             print("未找到默认管理员账号，请先启动后端完成初始化")
             return

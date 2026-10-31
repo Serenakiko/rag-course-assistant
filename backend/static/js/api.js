@@ -42,8 +42,7 @@ const API = (() => {
     } catch {
       throw new Error("网络请求失败，请确认后端服务已启动");
     }
-    // 登录/注册接口的 401 是「账号密码错误」，不是会话过期，
-    // 顺手跳转会重载页面，把要提示的弹窗一起冲掉
+    // 登录/注册接口的 401 是「账号密码错误」，不跳转
     const isAuthEntry = url.startsWith("/api/auth/login") || url.startsWith("/api/auth/register");
     if (resp.status === 401 && !isAuthEntry) {
       goLogin();
@@ -156,6 +155,7 @@ const API = (() => {
                 if (evt.type === "token" && handlers.onToken) handlers.onToken(evt.content);
                 else if (evt.type === "sources" && handlers.onSources) handlers.onSources(evt.sources);
                 else if (evt.type === "unmatched" && handlers.onUnmatched) handlers.onUnmatched(evt);
+                else if (evt.type === "saved" && handlers.onSaved) handlers.onSaved(evt.message_id);
                 else if (evt.type === "error" && handlers.onError) handlers.onError(evt.message);
               } catch { /* 忽略无法解析的事件 */ }
             }

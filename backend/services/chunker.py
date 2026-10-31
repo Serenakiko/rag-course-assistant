@@ -9,9 +9,7 @@ def split_text(text: str) -> list[str]:
     if not text or not text.strip():
         return []
 
-    # 延迟导入：langchain_text_splitters 的 __init__/base 会顺手 import transformers
-    # （可选依赖，用 try/except 兜住）。机器上装了 torch 那套的话，这一下就是 20 秒，
-    # 而它只在真正解析文档时才需要——放在模块顶层等于每次启动都白等。
+    # 延迟导入，避免启动时拉起 transformers 白等 20 秒
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 
     splitter = RecursiveCharacterTextSplitter(

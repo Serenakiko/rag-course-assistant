@@ -22,7 +22,7 @@ const WorkbenchView = (() => {
         <div class="row" style="gap:20px;align-items:center">
           <div style="flex:1;min-width:0">
             <div class="wb-hero-title">欢迎使用智答系统</div>
-            <div class="wb-hero-sub">您好，${Common.escapeHtml(user.real_name || user.username)}，今天想学点什么？</div>
+            <div class="wb-hero-sub">您好，${Common.escapeHtml(user.username || user.account)}，今天想学点什么？</div>
             <div class="wb-hero-desc">基于 RAG 技术的智能课程助教平台，结合课程知识库，为你的学习提供精准的问答支持。</div>
           </div>
           <div class="wb-hero-side">
@@ -60,6 +60,8 @@ const WorkbenchView = (() => {
         </div>
       </div>
 
+      <div class="card wb-recent-card" id="wb-recent" style="display:none"></div>
+
       <div class="card wb-fb-card" id="wb-resolved">
         <div class="row-between mb-16">
           <b>我的反馈</b>
@@ -77,6 +79,7 @@ const WorkbenchView = (() => {
 
     wireRefresh();
     loadStats();
+    loadRecentConv();
   }
 
   /* 回到本页 / 窗口重新获得焦点时重拉一次：提问完切回来，数字要跟着变 */
@@ -91,15 +94,39 @@ const WorkbenchView = (() => {
     window.addEventListener("focus", refresh);
   }
 
-  async function loadStats() {
-    // 我的反馈：与管理员数据概览反馈区块同款行式列表（状态徽标 + 问题 + 时间），点击进入反馈页
+  /* 最近一次会话：没有则隐藏，有则给「继续上次对话」入口，一键回到上次聊到哪 */
+  async function loadRecentConv() {
+    const box = document.getElementById("wb-recent");
+    if (!box) return;
     try {
-      // 接口返回 {total, pending, resolved, items}，列表在 items 里（曾经这里直接
-      // 当数组用，改成对象之后这块一渲染就报「slice is not a function」）
+      const data = await API.request("GET", "/api/chat/sessions?limit=1");
+      const items = (data && data.items) || [];
+      if (!items.length) { box.style.display = "none"; return; }
+      const last = items[0];
+      box.style.display = "";
+      box.innerHTML = `
+        <div class="wb-recent-row">
+          <div class="wb-recent-icon">${S.chat}</div>
+          <div class="wb-recent-main">
+            <div class="wb-recent-label">继续上次对话</div>
+            <div class="wb-recent-title" title="${Common.escapeHtml(last.title)}">${Common.escapeHtml(last.title)}</div>
+          </div>
+          <button class="btn btn-sm btn-primary" id="wb-recent-go">继续 ›</button>
+        </div>`;
+      box.querySelector("#wb-recent-go").addEventListener("click", () => App.navigate("chat", { convId: last.id }));
+      box.addEventListener("click", (e) => {
+        if (e.target.closest("#wb-recent-go")) return;
+        App.navigate("chat", { convId: last.id });
+      });
+    } catch { box.style.display = "none"; }
+  }
+
+  async function loadStats() {
+    // 我的反馈：与管理员概览反馈区块同款行式列表，点击进入反馈页
+    try {
+      // 接口返回 {total, pending, resolved, items}，列表在 items 里
       const data = await API.request("GET", "/api/chat/unanswered/mine?limit=50");
-      // 服务端已按提交时间倒序（created_at desc），前几条就是最近的。
-      // 以前这里再按时间排一次，但接口当时是按 id 取「最新 50 条」，两者顺序
-      // 不一致时会取错「最近 5 条」——排序口径统一交给后端。
+      // 服务端已按提交时间倒序，前几条就是最近的
       const items = (data && data.items) || [];
       const listEl = document.getElementById("wb-resolved-list");
       if (listEl) {

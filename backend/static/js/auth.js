@@ -18,21 +18,21 @@
   });
 
   // 账号固定 8 位数字，密码至少 6 位
-  const USERNAME_RE = /^\d{8}$/;
+  const ACCOUNT_RE = /^\d{8}$/;
   const PWD_MIN = 6;
 
   // 逐项校验，返回第一条不通过的提示；null 表示全部通过
   function validate(mode, data) {
-    if (mode === "register" && !(data.real_name || "").trim()) {
+    if (mode === "register" && !(data.username || "").trim()) {
       return { title: "用户名不能为空", message: "请输入用户名，它会显示在问答界面和后台管理里。" };
     }
-    const username = (data.username || "").trim();
-    if (!username) {
+    const account = (data.account || "").trim();
+    if (!account) {
       return { title: "账号不能为空", message: "请输入 8 位数字账号。" };
     }
-    if (!USERNAME_RE.test(username)) {
-      const why = /^\d+$/.test(username)
-        ? `账号需要正好 8 位数字，当前是 ${username.length} 位。`
+    if (!ACCOUNT_RE.test(account)) {
+      const why = /^\d+$/.test(account)
+        ? `账号需要正好 8 位数字，当前是 ${account.length} 位。`
         : "账号只能由数字组成，不能包含字母、空格或符号。";
       return { title: "账号格式不正确", message: why };
     }
@@ -70,7 +70,7 @@
     try {
       if (mode === "login") {
         const resp = await API.request("POST", "/api/auth/login", {
-          username: data.username.trim(),
+          account: data.account.trim(),
           password: data.password,
         });
         API.saveSession(resp.token, resp.user);
@@ -78,12 +78,12 @@
         setTimeout(() => window.location.replace("/static/app.html"), 400);
       } else {
         await API.request("POST", "/api/auth/register", {
-          username: data.username.trim(),
+          account: data.account.trim(),
           password: data.password,
-          real_name: (data.real_name || "").trim(),
+          username: (data.username || "").trim(),
         });
         Common.toast("注册成功，请登录", "success");
-        setTimeout(() => window.location.replace("/static/index.html?username=" + encodeURIComponent(data.username.trim())), 400);
+        setTimeout(() => window.location.replace("/static/index.html?account=" + encodeURIComponent(data.account.trim())), 400);
       }
     } catch (err) {
       await Common.alertDialog({
@@ -103,9 +103,9 @@
   if (loginForm) {
     loginForm.addEventListener("submit", (e) => { e.preventDefault(); submit("login", loginForm); });
     const params = new URLSearchParams(window.location.search);
-    const uname = params.get("username");
-    if (uname) {
-      loginForm.querySelector('[name="username"]').value = uname;
+    const acct = params.get("account");
+    if (acct) {
+      loginForm.querySelector('[name="account"]').value = acct;
       loginForm.querySelector('[name="password"]').focus();
     }
   }

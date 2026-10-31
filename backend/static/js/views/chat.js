@@ -25,8 +25,7 @@ const ChatView = (() => {
     sendBtn.innerHTML = on ? ICON_STOP : ICON_SEND;
   }
 
-  // 中止当前生成（切换会话 / 新建对话 / 删除会话 / 点「停止生成」）。
-  // 顺手把 activeSeq 立刻放开：紧接着的补生成不会被这一轮的收尾卡住。
+  // 中止当前生成（切换会话 / 新建对话 / 删除会话 / 点「停止生成」）
   function stopStream() {
     if (abortController) abortController.abort();
     abortController = null;
@@ -36,7 +35,7 @@ const ChatView = (() => {
     }
   }
 
-  function render(container) {
+  function render(container, opts) {
     container.innerHTML = `
       <div class="chat-layout">
         <aside class="chat-side">
@@ -123,6 +122,9 @@ const ChatView = (() => {
       }
     });
 
+    // 从首页「继续上次对话」等入口带会话 id 进来：直接打开该会话
+    if (opts && opts.convId) currentConvId = opts.convId;
+
     loadSessions();
   }
 
@@ -143,7 +145,7 @@ const ChatView = (() => {
     }
   }
 
-  /* 只取当前这一页 + 总数：以前是全量拉下来再前端切，会话一多就要传几百 KB */
+  /* 只取当前这一页 + 总数（服务端分页） */
   async function fetchSessionPage() {
     const q = sessionQuery.trim();
     const params = new URLSearchParams({ limit: String(q ? SEARCH_LIMIT : SIDEBAR_LIMIT), offset: "0" });
@@ -153,7 +155,7 @@ const ChatView = (() => {
       sessionItems = (data && data.items) || [];
       sessionTotal = (data && data.total) || 0;
       sessionItems.forEach((it) => convMeta.set(it.id, it));
-      // 这个 Map 只用来「把正在看的会话钉在列表顶部」，没必要把几百个会话全记着
+      // 这个 Map 只用来「把正在看的会话钉在列表顶部」
       if (convMeta.size > 200) {
         const keep = new Set(sessionItems.map((it) => it.id));
         if (currentConvId) keep.add(currentConvId);
@@ -229,8 +231,7 @@ const ChatView = (() => {
       }</div>`;
       return;
     }
-    // 底部入口常驻：会话不足 20 条时以前这块是空的，列表又被容器底边截断，
-    // 最后一条看着像丢了。现在始终给一个明确的「查看全部会话」出口。
+    // 底部入口常驻，始终给「查看全部会话」出口
     footEl.innerHTML =
       `<button type="button" class="session-more" id="chat-more-btn">` +
       (sessionTotal > sessionItems.length
@@ -242,8 +243,8 @@ const ChatView = (() => {
 
   async function openSession(id) {
     if (activeSeq) {
-      pendingConvId = currentConvId;  // 切换会话时记录未完成生成的会话
-      stopStream();  // 先停止当前生成，避免占用模型
+      pendingConvId = currentConvId;  // 记录未完成生成的会话
+      stopStream();
     }
     currentConvId = id;
     document.querySelectorAll(".session-item").forEach((el) =>
@@ -253,19 +254,17 @@ const ChatView = (() => {
     try {
       const msgs = await API.request("GET", `/api/chat/sessions/${id}/messages`);
       messagesEl.innerHTML = "";
-      msgs.forEach((m) => renderMessage(m.role, m.content, m.sources, m.interrupted));
+      msgs.forEach((m) => renderMessage(m.role, m.content, m.sources, m.interrupted, m.id, m.feedback));
       scrollBottom();
-      // 返回“生成未完成”的会话：补生成。带 regenerate，后端不再重复落一条提问。
+      // 返回「生成未完成」的会话：带 regenerate 补生成
       const last = msgs[msgs.length - 1];
       if (last && last.role === "user" && !resumedConvs.has(id)) {
-        // 只有提问没有回答的会话（生成中断 / 失败没落库）：进来自动补一条回答。
-        // 以前只在本次页面里记着 pendingConvId，刷新后就永远停在空白。
+        // 只有提问没有回答的会话，进来自动补一条
         resumedConvs.add(id);
         pendingConvId = null;
         send(last.content, { silentUser: true, regenerate: true });
       } else if (last && last.role === "assistant" && last.interrupted && !resumedConvs.has(id)) {
-        // 上次生成到一半断了（刷新页面 / 切走 / 超时），半截答案既不能续写也没法用：
-        // 自动重新生成一遍（后端 regenerate 会先删掉这条半截回答）。
+        // 半截回答没法续写，重新生成一遍
         resumedConvs.add(id);
         pendingConvId = null;
         const lastUserMsg = [...msgs].reverse().find((m) => m.role === "user");
@@ -274,7 +273,7 @@ const ChatView = (() => {
           send(lastUserMsg.content, { silentUser: true, regenerate: true });
         }
       } else if (id === pendingConvId && last && last.role === "assistant") {
-        // 中断时半截回答已经落库，先去掉了这条再从头生成，避免出现两条回答
+        // 半截回答已落库，删掉这条再从头生成，避免两条回答
         pendingConvId = null;
         const lastUser = [...msgs].reverse().find((m) => m.role === "user");
         if (lastUser) {
@@ -365,7 +364,7 @@ const ChatView = (() => {
       <div class="src-item">
         <div class="src-item-head">
           <span class="src-title">${Common.escapeHtml(s.title || "未知来源")}</span>
-          ${s.course ? `<span class="src-course">${Common.escapeHtml(s.course)}</span>` : ""}
+          ${s.course ? `<button type="button" class="src-course" data-course="${Common.escapeHtml(s.course)}" title="查看《${Common.escapeHtml(s.course)}》知识库">${Common.escapeHtml(s.course)}</button>` : ""}
         </div>
         <div class="src-snippet">${Common.escapeHtml(s.content || "")}</div>
       </div>`).join("");
@@ -380,14 +379,22 @@ const ChatView = (() => {
       const opened = !list.classList.toggle("hidden");
       btn.classList.toggle("open", opened);
     });
+    // 点击来源里的课程名，跳到对应知识库（从答案回溯到课程资料）
+    wrap.querySelectorAll(".src-course").forEach((c) => {
+      c.addEventListener("click", (e) => {
+        e.stopPropagation();
+        App.navigate("knowledge", { course: c.dataset.course });
+      });
+    });
     bodyEl.appendChild(wrap);
   }
 
-  function renderMessage(role, content, sources, interrupted) {
+  function renderMessage(role, content, sources, interrupted, id, feedback) {
     const messagesEl = document.getElementById("chat-messages");
     if (!messagesEl) return;
     const div = document.createElement("div");
     div.className = "msg " + role;
+    if (id != null) div.dataset.msgId = id;
     div.innerHTML = `
       <div class="msg-avatar">${role === "user" ? Common.avatarContent(API.getUser()) : "AI"}</div>
       <div class="msg-body">
@@ -402,8 +409,48 @@ const ChatView = (() => {
         note.textContent = "这条回答生成时被中断了，内容可能不完整";
         div.querySelector(".msg-body").appendChild(note);
       }
+      // 评价按钮：只有落库后（有 message_id）才可评；历史消息带 feedback 状态
+      if (id != null) {
+        renderFeedbackBar(div.querySelector(".msg-body"), id, feedback);
+      }
     }
     return div;
+  }
+
+  /* 回答下方的点赞/点踩条：点一下提交评价，高亮当前选择 */
+  const ICON_UP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg>';
+  const ICON_DOWN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zM17 2h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3"/></svg>';
+
+  function renderFeedbackBar(bodyEl, id, feedback) {
+    if (!bodyEl || bodyEl.querySelector(".msg-feedback")) return;
+    const bar = document.createElement("div");
+    bar.className = "msg-feedback";
+    bar.innerHTML = `
+      <span class="mf-label">这条回答有帮助吗？</span>
+      <button type="button" class="mf-btn" data-v="up" title="有帮助">${ICON_UP}</button>
+      <button type="button" class="mf-btn" data-v="down" title="没帮助">${ICON_DOWN}</button>`;
+    const setActive = (v) => {
+      bar.querySelectorAll(".mf-btn").forEach((b) =>
+        b.classList.toggle("active", b.dataset.v === v));
+      const label = bar.querySelector(".mf-label");
+      if (label) label.textContent = v === "up" ? "感谢反馈！" : v === "down" ? "已记录，我们会改进" : "这条回答有帮助吗？";
+    };
+    if (feedback) setActive(feedback);
+    bar.querySelectorAll(".mf-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const v = btn.dataset.v;
+        // 再点同一档 = 取消评价，退回未评状态
+        const next = (btn.classList.contains("active")) ? "" : v;
+        try {
+          await API.request("POST", `/api/chat/messages/${id}/feedback`, { feedback: next });
+          setActive(next ? v : "");
+          if (!next) bar.querySelector(".mf-label").textContent = "这条回答有帮助吗？";
+        } catch (err) {
+          Common.toast("评价失败：" + err.message, "error");
+        }
+      });
+    });
+    bodyEl.appendChild(bar);
   }
 
   function showWelcome() {
@@ -418,7 +465,7 @@ const ChatView = (() => {
     messagesEl.innerHTML = `
       <div class="chat-welcome">
         <div class="w-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></div>
-        <h2>你好，${Common.escapeHtml(API.getUser()?.real_name || "同学")}</h2>
+        <h2>你好，${Common.escapeHtml(API.getUser()?.username || "同学")}</h2>
         <p>我是你的课程智能助教，会基于已有知识库回答你的问题，帮你梳理课程知识点、解析学习资料。</p>
         <div class="demo-questions">
           ${demos.map((q) => `<button type="button" class="demo-question">${Common.escapeHtml(q)}</button>`).join("")}
@@ -444,20 +491,19 @@ const ChatView = (() => {
   }
 
   async function send(text, opts) {
-    // 一轮没生成完就不允许再发。以前两轮能同时在跑：后一轮把前一轮顶掉，
-    // 前一轮既没答案也没收尾，气泡就一直转圈（下个问题答了、上个永远没有）。
+    // 一轮没生成完就不允许再发
     if (activeSeq) return;
     const messagesEl = document.getElementById("chat-messages");
     const inputEl = document.getElementById("chat-input");
-    const seq = ++streamSeq;  // 标记本次生成；切换会话后旧生成的回调将不再操作界面
+    const seq = ++streamSeq;  // 标记本次生成；切换会话后旧生成的回调不再操作界面
     activeSeq = seq;
-    const silentUser = !!(opts && opts.silentUser);  // 补生成模式：不重复渲染提问、不新建会话
+    const silentUser = !!(opts && opts.silentUser);  // 补生成模式：不重复渲染提问
     const regenerate = !!(opts && opts.regenerate);  // 重新生成：后端不重复落提问、先删旧回答
     let bubble = null;
     let hadError = false;
     let errorMsg = "";
 
-    setSending(true);  // 立刻切成「停止生成」：建连这段空窗期再点，只会停止，不会又发一轮
+    setSending(true);  // 立刻切成「停止生成」
 
     try {
       let convId;
@@ -533,6 +579,11 @@ const ChatView = (() => {
           renderSources(assistantDiv.querySelector(".msg-body"), sources);
           scrollBottom();
         },
+        onSaved: (msgId) => {
+          if (seq !== streamSeq) return;
+          assistantDiv.dataset.msgId = msgId;
+          renderFeedbackBar(assistantDiv.querySelector(".msg-body"), msgId, "");
+        },
         onDone: () => {
           if (seq !== streamSeq) return;
           if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
@@ -547,17 +598,15 @@ const ChatView = (() => {
         },
       }, {
         regenerate,
-        // 空闲超时必须**大于**后端的 LLM_TIMEOUT(180s)：这里等的是「一个字节都
-        // 没收到」，而排队段有 10 秒一次的心跳、生成段没有。冷启动加载本地模型
-        // 时首个 token 可能要一两分钟，120 秒会先把还在正常生成的请求掐掉。
+        // 空闲超时 > 后端 LLM_TIMEOUT(180s)：排队段有 10 秒心跳，生成段没有，
+        // 冷启动首 token 可能一两分钟
         idleTimeout: 200_000,
-        // 总超时 = 后端排队上限(120s) + LLM_TIMEOUT(180s) + 余量：排队超时由
-        // 后端给明确错误，这里只兜底「连接彻底不动了」这种真断网的情况
+        // 总超时 = 排队上限(120s) + LLM_TIMEOUT(180s) + 余量，兜底真断网
         totalTimeout: 320_000,
       });
 
-      abortController = req.controller;  // 同步拿到 controller：从这一刻起「停止生成」真的能停
-      await req.done;  // 本轮彻底结束（正常 / 出错 / 被停止）后才收尾
+      abortController = req.controller;  // 同步拿到 controller，从这一刻起「停止生成」能停
+      await req.done;  // 本轮彻底结束后才收尾
     } catch (err) {
       hadError = true;
       errorMsg = err.message;

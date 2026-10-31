@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session, joinedload
 from ..config import settings
 from ..database import get_db
 from ..deps import require_role
-from ..models import QuestionVector, UnansweredQuestion, User
+from ..models import QuestionVector, UnansweredQuestion, User, utcnow
 from ..services.embedding_service import get_embeddings
 
 router = APIRouter()
@@ -41,6 +41,7 @@ def _to_dict(q: UnansweredQuestion) -> dict:
         "created_by": q.created_by,
         "creator_name": q.creator_name,
         "created_at": q.created_at,
+        "admin_read": q.admin_read_at is not None,
     }
 
 
@@ -71,7 +72,18 @@ def list_unanswered(
         count_query = count_query.where(UnansweredQuestion.status == status)
     total = db.scalar(count_query) or 0
     rows = db.execute(query.limit(limit).offset(offset)).scalars().all()
-    return {"items": [_to_dict(q) for q in rows], "total": total}
+    # 管理员角标未读数：待处理且管理员尚未查看（admin_read_at 为空）的数量，
+    # 与 status 过滤无关，恒按全量算，供顶部铃铛角标使用。
+    admin_unread = (
+        db.scalar(
+            select(func.count(UnansweredQuestion.id)).where(
+                UnansweredQuestion.status == "pending",
+                UnansweredQuestion.admin_read_at.is_(None),
+            )
+        )
+        or 0
+    )
+    return {"items": [_to_dict(q) for q in rows], "total": total, "unread": admin_unread}
 
 
 def _bigrams(text: str) -> set[str]:
@@ -265,6 +277,25 @@ def unanswered_stats(
     }
 
 
+@router.post("/{qid}/read", summary="标记问题已读（管理员）")
+def mark_unanswered_admin_read(
+    qid: int,
+    admin: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+) -> dict:
+    """管理员查看待处理问题后标记已读，驱动管理员端铃铛角标减少。
+
+    仅对 pending 记录有意义：resolved 项不算待处理，不参与角标。
+    """
+    q = db.get(UnansweredQuestion, qid)
+    if q is None:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    if q.admin_read_at is None:
+        q.admin_read_at = utcnow()
+        db.commit()
+    return {"ok": True}
+
+
 @router.post("/{qid}/regenerate", summary="补充资料后重新生成回答（管理员）")
 async def regenerate_answer(
     qid: int,
@@ -283,8 +314,7 @@ async def regenerate_answer(
     from ..services.kb_scope import allowed_course_names
     from ..services.rag_service import generate_answer
 
-    # 按提问学生当时的可见范围重新检索。不限定范围的话，管理员一按「生成回答」，
-    # 检索会跨到别人的私有知识库，把那里的内容写进这个学生的反馈里。
+    # 按提问学生的可见范围重新检索，避免跨到别人的私有知识库
     scope = allowed_course_names(q.creator, db) if q.creator is not None else None
     result = await generate_answer(q.question, courses=scope)
     if result.get("error"):
@@ -347,11 +377,7 @@ def update_unanswered(
 
 
 def _renumber_unanswered(db: Session) -> None:
-    """删除后把展示编号重排成 1..n，主键 id 一律不动。
-
-    以前是直接改主键：删掉一条之后其余记录的 id 全部前移，前端或脚本手里的
-    旧编号就指向了别人，删起来会打偏（之前就是这么误删过反馈记录）。
-    """
+    """删除后把展示编号重排成 1..n，主键 id 一律不动。"""
     rows = db.scalars(
         select(UnansweredQuestion).order_by(UnansweredQuestion.id.asc())
     ).all()

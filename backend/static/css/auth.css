@@ -1,19 +1,19 @@
-/* 登录页：暖纸底 + 细边框卡片。不用光斑、不用大投影 */
+/* 登录页：暖纸底 + 细边框卡片。不用光斑、不用大投影、不用实景大图 */
 .auth-page {
   min-height: 100vh; display: flex; align-items: center; justify-content: center;
-  background: #e8e4dc url("/static/img/auth-bg.jpg") center / cover no-repeat;
+  background: var(--bg);
   padding: 20px;
 }
 
 .auth-card {
   width: 100%; max-width: 400px;
-  background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-lg);
   box-shadow: var(--shadow);
   padding: 32px 32px 28px;
 }
 
 .auth-logo { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 0; margin-bottom: 26px; }
-.auth-logo .mark { width: 48px; height: 48px; border-radius: 12px; margin-bottom: 14px; display: block; }
+.auth-logo .mark { width: 48px; height: 48px; border-radius: var(--radius-lg); margin-bottom: 14px; display: block; }
 .auth-logo .title { font-size: 22px; font-weight: 600; color: var(--text-1); letter-spacing: .5px; line-height: 1.3; }
 .auth-logo .subtitle { font-size: 12.5px; color: var(--text-3); margin-top: 3px; letter-spacing: .2px; }
 
@@ -33,17 +33,17 @@
 
 .auth-card .form-control {
   width: 100%; height: 48px; padding: 0 46px 0 44px;
-  border: 1.5px solid var(--border); border-radius: 8px;
-  background: #faf9f7; outline: none; font-size: 14px;
+  border: 1.5px solid var(--border); border-radius: var(--radius);
+  background: var(--surface-1); outline: none; font-size: 14px;
   transition: border-color .2s, box-shadow .2s, background .2s;
 }
 .auth-card .form-control:focus {
-  border-color: var(--primary); background: #fff;
-  box-shadow: 0 0 0 4px rgba(23, 80, 94, .12);
+  border-color: var(--primary); background: var(--card);
+  box-shadow: var(--focus-ring);
 }
-.auth-card .form-control::placeholder { color: #a9a49b; }
+.auth-card .form-control::placeholder { color: var(--text-3); }
 .auth-card input:-webkit-autofill {
-  -webkit-box-shadow: 0 0 0 1000px #fff inset;
+  -webkit-box-shadow: 0 0 0 1000px var(--card) inset;
   -webkit-text-fill-color: var(--text-1);
 }
 
@@ -70,8 +70,8 @@
 .auth-card .btn-primary {
   display: flex; align-items: center; justify-content: center; gap: 8px;
   background: var(--primary);
-  border: none; border-radius: 8px; padding: 12px; margin-top: 8px;
-  font-size: 14.5px; font-weight: 600; letter-spacing: 2px; color: #fff;
+  border: none; border-radius: var(--radius); padding: 12px; margin-top: 8px;
+  font-size: 14.5px; font-weight: 600; letter-spacing: 2px; color: var(--text-inverse);
   transition: background .15s;
 }
 .auth-card .btn-primary:hover {
@@ -80,7 +80,7 @@
 .auth-card .btn-primary:active { transform: translateY(0); }
 .auth-card .btn-primary.loading::after {
   content: ""; width: 16px; height: 16px;
-  border: 2.5px solid rgba(255, 255, 255, .45); border-top-color: #fff;
+  border: 2.5px solid rgba(255, 255, 255, .45); border-top-color: var(--text-inverse);
   border-radius: 50%; animation: spin .7s linear infinite;
 }
 

@@ -3,37 +3,44 @@
 # Python 3.10+ recommended (3.11 / 3.12 both fine)
 # Install: pip install -r requirements.txt
 # NOTE: keep this file ASCII-only (Windows GBK console compatibility)
+#
+# 版本策略：下限取「实测通过的版本」，上限 <2.0 防止 langchain 2.x
+# 破坏性升级。已验证：langchain 1.x 全家桶（core 1.6.9 / chroma 1.1.0）
+# 下 29 个测试全部通过。
 # ============================================================
 
 # ---- Web framework ----
 fastapi>=0.110,<1.0
-uvicorn[standard]>=0.29
-python-multipart>=0.0.9
-pydantic>=2.6
+uvicorn[standard]>=0.29,<1.0
+python-multipart>=0.0.9,<1.0
+pydantic>=2.6,<3.0
 
 # ---- Database ----
-SQLAlchemy>=2.0.25
+SQLAlchemy>=2.0.25,<3.0
+# 版本化迁移：未来 schema 变更走 alembic（历史遗留库仍由 database.init_db 补列对齐）
+alembic>=1.13,<2.0
 
 # ---- Auth ----
-PyJWT>=2.8
+PyJWT>=2.8,<3.0
 
 # ---- Config ----
-python-dotenv>=1.0
+python-dotenv>=1.0,<2.0
 
 # ---- LangChain ecosystem ----
-langchain-core>=0.2.20
-langchain-chroma>=0.1.1
-langchain-ollama>=0.1.0
-langchain-openai>=0.1.10
-langchain-text-splitters>=0.2.0
+# 各子包版本需保持同一大版本，避免混装 0.x / 1.x 导致 API 冲突。
+langchain-core>=0.2.20,<2.0
+langchain-chroma>=0.1.1,<2.0
+langchain-ollama>=0.1.0,<2.0
+langchain-openai>=0.1.10,<2.0
+langchain-text-splitters>=0.2.0,<2.0
 
 # ---- Vector database ----
-chromadb>=0.4.24
+chromadb>=0.4.24,<2.0
 
 # ---- Document parsing ----
-pypdf>=4.0
+pypdf>=4.0,<6.0
 
 # ---- Dev / tools ----
 # tests/test_core.py 用 pytest 跑；.tools/make_demo_avatar.py 需要 Pillow（运行时不需要）
-pytest>=8.0
-Pillow>=10.0
+pytest>=8.0,<10.0
+Pillow>=10.0,<12.0

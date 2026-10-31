@@ -16,6 +16,7 @@ const AdminView = (() => {
       <div class="stat-grid" id="stat-grid">
         <div style="grid-column:1/-1;text-align:center;padding:40px"><span class="loading-spinner"></span></div>
       </div>
+      <div class="quality-grid" id="quality-grid"></div>
       <div class="chart-row">
         <div class="chart-card">
           <h3>近7天提问趋势</h3>
@@ -26,14 +27,29 @@ const AdminView = (() => {
           <div id="chart-donut"></div>
         </div>
       </div>
-      <div class="card mt-16" id="fb-card" style="display:none">
-        <div class="row-between mb-16">
-          <b>问题反馈</b>
-          <button class="btn btn-sm" id="fb-all">查看全部</button>
+      <div class="overview-bottom">
+        <div class="card" id="usage-card">
+          <div class="row-between mb-16">
+            <b>文档引用排行</b>
+          </div>
+          <div id="usage-list"><div class="fb-loading"><span class="loading-spinner"></span></div></div>
         </div>
-        <div id="fb-list"></div>
+        <div class="card" id="hot-card">
+          <div class="row-between mb-16">
+            <b>热门问题</b>
+          </div>
+          <div id="hot-list"><div class="fb-loading"><span class="loading-spinner"></span></div></div>
+        </div>
+        <div class="card" id="fb-card" style="display:none">
+          <div class="row-between mb-16">
+            <b>问题反馈</b>
+            <button class="btn btn-sm" id="fb-all">查看全部</button>
+          </div>
+          <div id="fb-list"></div>
+        </div>
       </div>`;
     loadStats();
+    loadDocUsage();
   }
 
   async function loadStats() {
@@ -60,6 +76,8 @@ const AdminView = (() => {
       renderTrend(s.daily_questions || []);
       renderDonut(s.kb_doc_distribution || []);
       renderFeedback(s);
+      renderQuality(s);
+      renderHotQuestions(s);
     } catch (err) {
       grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1"><p>${Common.escapeHtml(err.message)}</p></div>`;
     }
@@ -71,7 +89,7 @@ const AdminView = (() => {
     const listEl = document.getElementById("fb-list");
     if (!box || !listEl) return;
     box.style.display = "";
-    const recent = (s.recent_unanswered || []).slice(0, 4);
+    const recent = (s.recent_unanswered || []).slice(0, 5);
 
     const rows = recent.length
       ? recent.map((r) => `
@@ -88,12 +106,104 @@ const AdminView = (() => {
     document.getElementById("fb-all").addEventListener("click", () => App.navigate("unanswered"));
   }
 
+  /* 质量指标卡：命中率 / 拒答率 / 平均解决时长 / 评价分布 */
+  function renderQuality(s) {
+    const el = document.getElementById("quality-grid");
+    if (!el) return;
+    const hit = s.hit_rate != null ? (s.hit_rate * 100).toFixed(1) + "%" : "—";
+    const reject = s.reject_rate != null ? (s.reject_rate * 100).toFixed(1) + "%" : "—";
+    const resolve = s.avg_resolve_hours != null
+      ? (s.avg_resolve_hours >= 24 ? (s.avg_resolve_hours / 24).toFixed(1) + " 天" : s.avg_resolve_hours + " 小时")
+      : "—";
+    const totalFb = (s.feedback_up || 0) + (s.feedback_down || 0);
+    const upRate = totalFb > 0 ? Math.round((s.feedback_up / totalFb) * 100) : null;
+
+    const items = [
+      { label: "回答命中率", value: hit, hint: "知识库覆盖的问题占比", cls: "green" },
+      { label: "拒答率", value: reject, hint: "未命中自动反馈占比", cls: "red" },
+      { label: "平均解决时长", value: resolve, hint: "反馈从提交到解答", cls: "blue" },
+      { label: "回答好评率", value: upRate != null ? upRate + "%" : "—", hint: `学生点赞 ${s.feedback_up || 0} · 点踩 ${s.feedback_down || 0}`, cls: "orange" },
+    ];
+    el.innerHTML = items.map((it) => `
+      <div class="quality-item">
+        <div class="quality-value ${it.cls}">${it.value}</div>
+        <div class="quality-meta">
+          <div class="quality-label">${it.label}</div>
+          <div class="quality-hint" title="${Common.escapeHtml(it.hint)}">${Common.escapeHtml(it.hint)}</div>
+        </div>
+      </div>`).join("");
+  }
+
+  /* 热门问题：学生被问得最多的问题（原问去重计数），反映高频困惑点 */
+  function renderHotQuestions(s) {
+    const list = document.getElementById("hot-list");
+    if (!list) return;
+    const hot = (s.hot_questions || []).slice(0, 5);
+    if (!hot.length) {
+      list.innerHTML = `<div class="empty-state"><p>暂无提问数据</p></div>`;
+      return;
+    }
+    const maxCount = Math.max(1, ...hot.map((r) => r.count));
+    list.innerHTML = hot.map((r, i) => `
+      <div class="hot-row">
+        <span class="hot-rank ${i < 3 ? "top" : ""}">${i + 1}</span>
+        <span class="hot-q" title="${Common.escapeHtml(r.question)}">${Common.escapeHtml(r.question)}</span>
+        <span class="hot-count">${r.count} 次</span>
+      </div>`).join("");
+  }
+
+  /* 文档引用排行：按被回答引用的次数排序，附死资料列表 */
+  async function loadDocUsage() {
+    const list = document.getElementById("usage-list");
+    if (!list) return;
+    try {
+      const d = await API.request("GET", "/api/stats/admin/doc-usage");
+      const ranked = d.ranked || [];
+      const dead = d.dead_docs || [];
+      if (!ranked.length && !dead.length) {
+        list.innerHTML = `<div class="empty-state"><p>暂无引用数据，回答产生后会统计到这里</p></div>`;
+        return;
+      }
+      const top = ranked.slice(0, 8);
+      const deadTop = dead.slice(0, 5);
+      const maxCount = Math.max(1, ...top.map((r) => r.count));
+      let html = "";
+      if (top.length) {
+        html += `<div class="usage-title muted">被引用最多的资料</div>`;
+        html += top.map((r) => {
+          const tag = r.source_type === "knowledge_point"
+            ? `<span class="usage-tag kp">知识点</span>`
+            : `<span class="usage-tag doc">文档</span>`;
+          return `
+          <div class="usage-row">
+            <span class="usage-name" title="${Common.escapeHtml(r.title)}">${Common.escapeHtml(r.title)}${tag}</span>
+            <span class="usage-bar"><span class="usage-bar-fill" style="width:${Math.round((r.count / maxCount) * 100)}%"></span></span>
+            <span class="usage-count">${r.count} 次</span>
+          </div>`;
+        }).join("");
+      }
+      if (deadTop.length) {
+        html += `<div class="usage-title muted" style="margin-top:14px">从未被引用</div>`;
+        html += deadTop.map((r) => `
+          <div class="usage-row dead">
+            <span class="usage-name" title="${Common.escapeHtml(r.title)}">${Common.escapeHtml(r.title)}</span>
+            <span class="usage-count">${Common.escapeHtml(r.course || "")}</span>
+          </div>`).join("");
+        if (dead.length > deadTop.length) {
+          html += `<div class="muted" style="font-size:12px;margin-top:6px">另有 ${dead.length - deadTop.length} 份资料未被引用</div>`;
+        }
+      }
+      list.innerHTML = html;
+    } catch (err) {
+      list.innerHTML = `<div class="empty-state"><p style="color:var(--danger)">${Common.escapeHtml(err.message)}</p></div>`;
+    }
+  }
+
   /* 折线图（带面积填充） */
   function renderTrend(daily) {
     const el = document.getElementById("chart-trend");
     if (!el) return;
-    // 没有数据就直接收工：后面 points[points.length - 1].x 在空数组上会抛异常，
-    // 异常一旦冒出去，整个数据概览就白屏了（后端还没重启、字段对不上时就会这样）
+    // 没数据直接收工，避免空数组上取 x 抛异常导致整页白屏
     if (!daily.length) {
       el.innerHTML = `<div style="padding:40px 0;text-align:center;color:var(--text-3);font-size:13px">最近 7 天还没有提问数据</div>`;
       return;
@@ -115,8 +225,8 @@ const AdminView = (() => {
     for (let g = 0; g <= 4; g++) {
       const gy = padT + (innerH / 4) * g;
       const val = Math.round(max - (max / 4) * g);
-      grid += `<line x1="${padL}" y1="${gy}" x2="${w - padR}" y2="${gy}" stroke="#e3e0d9" stroke-width="1"/>`;
-      grid += `<text x="${padL - 8}" y="${gy + 4}" text-anchor="end" font-size="12" fill="#6f6a61">${val}</text>`;
+      grid += `<line x1="${padL}" y1="${gy}" x2="${w - padR}" y2="${gy}" stroke="var(--border)" stroke-width="1"/>`;
+      grid += `<text x="${padL - 8}" y="${gy + 4}" text-anchor="end" font-size="12" fill="var(--text-3)">${val}</text>`;
     }
 
     // 折线 path
@@ -128,20 +238,20 @@ const AdminView = (() => {
     let dots = "";
     let labels = "";
     points.forEach((p, i) => {
-      dots += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4" fill="#fff" stroke="#17505e" stroke-width="2"><title>${p.date}：${p.count} 次</title></circle>`;
-      labels += `<text x="${p.x.toFixed(1)}" y="${h - 10}" text-anchor="middle" font-size="12" fill="#6f6a61">${p.date.slice(5)}</text>`;
+      dots += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4" fill="var(--card)" stroke="var(--primary)" stroke-width="2"><title>${p.date}：${p.count} 次</title></circle>`;
+      labels += `<text x="${p.x.toFixed(1)}" y="${h - 10}" text-anchor="middle" font-size="12" fill="var(--text-3)">${p.date.slice(5)}</text>`;
     });
 
     el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto" role="img" aria-label="近7天提问趋势">
       <defs>
         <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="#17505e" stop-opacity="0.35"/>
-          <stop offset="100%" stop-color="#17505e" stop-opacity="0.02"/>
+          <stop offset="0%" stop-color="var(--primary)" stop-opacity="0.35"/>
+          <stop offset="100%" stop-color="var(--primary)" stop-opacity="0.02"/>
         </linearGradient>
       </defs>
       ${grid}
       <path d="${areaPath}" fill="url(#trendFill)"/>
-      <path d="${linePath}" fill="none" stroke="#17505e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="${linePath}" fill="none" stroke="var(--primary)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
       ${dots}
       ${labels}
     </svg>`;
@@ -254,7 +364,7 @@ const AdminView = (() => {
             <option value="role">角色</option>
           </select>
           <div class="search-box" id="users-search-box">
-            <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8b867d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
             <input class="form-control" id="users-search" placeholder="搜索账号">
             <button type="button" class="search-clear" id="users-search-clear" title="清空"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
           </div>
@@ -332,8 +442,8 @@ const AdminView = (() => {
       tbody.innerHTML = usersRows.map((u, i) => `
         <tr>
           <td>${(usersPage - 1) * usersPageSize + i + 1}</td>
-          <td>${Common.escapeHtml(u.username)}${u.id === me.id ? ' <span class="badge" style="background:#e7eff1;color:#17505e">我</span>' : ""}</td>
-          <td>${Common.escapeHtml(u.real_name || "-")}</td>
+          <td>${Common.escapeHtml(u.account)}${u.id === me.id ? ' <span class="badge badge-student">我</span>' : ""}</td>
+          <td>${Common.escapeHtml(u.username || "-")}</td>
           <td><span class="role-badge ${u.role}">${u.role === "admin" ? "管理员" : "学生"}</span></td>
           <td class="muted">${u.question_count || 0}</td>
           <td class="muted">${Common.fmtTime(u.created_at)}</td>
@@ -367,11 +477,11 @@ const AdminView = (() => {
       ${!isEdit ? `
       <div class="form-group">
         <label>账号</label>
-        <input class="form-control" id="u-username" placeholder="请输入账号" autocomplete="off">
+        <input class="form-control" id="u-account" placeholder="请输入账号" autocomplete="off">
       </div>` : ""}
       <div class="form-group">
         <label>用户名</label>
-        <input class="form-control" id="u-name" value="${isEdit ? Common.escapeHtml(user.real_name || "") : ""}" placeholder="请输入用户名">
+        <input class="form-control" id="u-name" value="${isEdit ? Common.escapeHtml(user.username || "") : ""}" placeholder="请输入用户名">
       </div>
       <div class="form-group">
         <label>角色</label>
@@ -392,7 +502,7 @@ const AdminView = (() => {
       box.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", Common.closeModal));
       box.querySelector("#u-save").addEventListener("click", async () => {
         const payload = {
-          real_name: box.querySelector("#u-name").value.trim(),
+          username: box.querySelector("#u-name").value.trim(),
           role: box.querySelector("#u-role").value,
         };
         const pwd = box.querySelector("#u-pwd").value;
@@ -401,11 +511,11 @@ const AdminView = (() => {
           if (isEdit) {
             await API.request("PATCH", `/api/admin/users/${user.id}`, payload);
           } else {
-            const username = box.querySelector("#u-username").value.trim();
-            if (!username) return Common.toast("请输入账号", "error");
+            const account = box.querySelector("#u-account").value.trim();
+            if (!account) return Common.toast("请输入账号", "error");
             if (!pwd) return Common.toast("请输入初始密码", "error");
             await API.request("POST", "/api/admin/users", {
-              username, password: pwd, real_name: payload.real_name, role: payload.role,
+              account, password: pwd, username: payload.username, role: payload.role,
             });
           }
           Common.toast(isEdit ? "已保存" : "已创建", "success");
@@ -419,7 +529,7 @@ const AdminView = (() => {
 
   async function removeUser(user) {
     if (!user) return;
-    // 名下有知识库：必须先转移，否则删完会变成无主库，学生端直接看不到
+    // 名下有知识库：必须先转移
     let owned = [];
     try {
       const bases = await API.request("GET", "/api/knowledge/bases");
@@ -431,7 +541,7 @@ const AdminView = (() => {
     }
     const ok = await Common.confirmDialog({
       title: "删除用户",
-      message: `将删除用户「${Common.escapeHtml(user.real_name || user.username)}」及其全部会话记录，不可恢复。确认？`,
+      message: `将删除用户「${Common.escapeHtml(user.username || user.account)}」及其全部会话记录，不可恢复。确认？`,
       okText: "删除",
     });
     if (!ok) return;
@@ -459,7 +569,7 @@ const AdminView = (() => {
     const defaultTo = others.find((u) => me && Number(u.id) === Number(me.id)) || others[0];
     const options = others.map((u) => `
       <option value="${u.id}" ${defaultTo && u.id === defaultTo.id ? "selected" : ""}>
-        ${Common.escapeHtml(u.real_name || u.username)}（${u.role === "admin" ? "管理员" : "学生"}）
+        ${Common.escapeHtml(u.username || u.account)}（${u.role === "admin" ? "管理员" : "学生"}）
       </option>`).join("");
     Common.openModal(`
       <div class="modal-header">
@@ -467,7 +577,7 @@ const AdminView = (() => {
         <button class="modal-close" data-close>×</button>
       </div>
       <p style="margin:0 0 12px;line-height:1.7">
-        「${Common.escapeHtml(user.real_name || user.username)}」名下还有
+        「${Common.escapeHtml(user.username || user.account)}」名下还有
         <strong>${owned.length}</strong> 个知识库：
         ${owned.map((b) => Common.escapeHtml(b.name)).join("、")}
       </p>
@@ -547,7 +657,7 @@ const AdminView = (() => {
             <option value="creator">创建者</option>
           </select>
           <div class="search-box" id="kb-search-box">
-            <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8b867d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
             <input class="form-control" id="kb-search" placeholder="搜索知识库名称">
             <button type="button" class="search-clear" id="kb-search-clear" title="清空"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
           </div>
@@ -642,7 +752,7 @@ const AdminView = (() => {
     });
   }
 
-  /* 新增/编辑知识库：编辑态里直接能上传文档（原来的「上传资料」按钮并进来了） */
+  /* 新增/编辑知识库：编辑态里直接能上传文档 */
   function openKbEditor(base) {
     const isEdit = !!base;
     Common.openModal(`
@@ -790,7 +900,7 @@ const AdminView = (() => {
             <option value="user">提问者</option>
           </select>
           <div class="search-box" id="conv-search-box">
-            <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6f6a61" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
             <input class="form-control" id="conv-search" placeholder="搜索会话标题">
             <button type="button" class="search-clear" id="conv-search-clear" title="清空"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
           </div>
@@ -888,7 +998,7 @@ const AdminView = (() => {
           <td>${start + i + 1}</td>
           <td title="${Common.escapeHtml(c.title)}" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Common.escapeHtml(c.title)}</td>
           <td class="muted">${c.message_count || 0}</td>
-          <td>${Common.escapeHtml(c.real_name || c.username || "-")}</td>
+          <td>${Common.escapeHtml(c.username || c.account || "-")}</td>
           <td class="muted">${Common.fmtTime(c.created_at)}</td>
           <td>
             <button class="ops-link edit" data-view="${c.id}">查看</button>

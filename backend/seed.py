@@ -26,12 +26,12 @@ def init_seed() -> None:
     session = SessionLocal()
     try:
         # 1. 默认管理员
-        admin = session.scalar(select(User).where(User.username == DEFAULT_ADMIN[0]))
+        admin = session.scalar(select(User).where(User.account == DEFAULT_ADMIN[0]))
         if admin is None:
             admin = User(
-                username=DEFAULT_ADMIN[0],
+                account=DEFAULT_ADMIN[0],
                 password_hash=hash_password(DEFAULT_ADMIN[1]),
-                real_name=DEFAULT_ADMIN[2],
+                username=DEFAULT_ADMIN[2],
                 role="admin",
             )
             session.add(admin)

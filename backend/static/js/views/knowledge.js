@@ -25,14 +25,27 @@ const KnowledgeView = (() => {
   function searchBoxHtml(id, placeholder) {
     return `
       <div class="search-box" id="${id}-box">
-        <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6b675f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
         <input class="form-control" id="${id}" placeholder="${placeholder}">
         <button type="button" class="search-clear" id="${id}-clear" title="清空"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
       </div>`;
   }
 
   /* ==================== 渲染入口 ==================== */
-  function render(container) {
+  function render(container, opts) {
+    // 从问答来源跳进来：按课程名直接打开对应知识库详情
+    if (opts && opts.course) {
+      API.request("GET", "/api/knowledge/bases").then((bases) => {
+        const base = bases.find((x) => x.name === opts.course);
+        if (base) {
+          currentBase = base;
+          renderDetail(container);
+        } else {
+          renderOverview(container);
+        }
+      }).catch(() => renderOverview(container));
+      return;
+    }
     if (currentBase) renderDetail(container);
     else renderOverview(container);
   }
@@ -107,7 +120,7 @@ const KnowledgeView = (() => {
 
     if (!kbCache.length) {
       grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1">
-        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#8b867d" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
         <p>${keyword ? "没搜到相关的知识库，换个关键词试试" : "还没有知识库"}</p>
         ${!keyword ? `<p class="mt-8">点击右上角「新建知识库」，创建第一个课程知识库</p>` : ""}
       </div>`;
@@ -360,7 +373,7 @@ const KnowledgeView = (() => {
       grid.innerHTML = keyword
         ? `<div class="empty-state" style="grid-column:1/-1"><p>没搜到相关的知识点，换个关键词试试</p></div>`
         : `<div class="empty-state" style="grid-column:1/-1">
-          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#8b867d" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
           <p>这个知识库还没有知识点</p>
           <p class="mt-8">点击右上角「上传文档」添加课程资料</p>
         </div>`;

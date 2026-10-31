@@ -1,7 +1,6 @@
 /* ============ 视图：我的反馈（学生端） ============ */
 /* 待处理 / 已解决 分区展示；统计卡 + Tab 切换；未读高亮；点击条目后标记已读。
- * 分页在服务端做：以前一次最多拉 50 条再在前端切片，第 51 条以后学生永远看不到，
- * 统计卡的数字也只按这 50 条算。现在每页按需取，两个统计数字由后端按全量返回。 */
+ * 服务端分页，两个统计数字由后端按全量返回。 */
 const FeedbackView = (() => {
   let rows = [];          // 当前这一页
   let total = 0;          // 当前 Tab 的匹配总数
@@ -99,21 +98,26 @@ const FeedbackView = (() => {
       return;
     }
     list.innerHTML = rows.map((it) => `
-      <div class="fb-item ${it.status === "resolved" && !it.read ? "fb-unread" : ""}" data-id="${it.id}">
+      <div class="fb-item" data-id="${it.id}">
         <div class="fb-head">
           ${it.status === "resolved" ? `<span class="fb-badge fb-badge-done">已解决</span>` : ""}
-          ${it.status === "resolved" && !it.read ? `<span class="fb-badge fb-badge-new" title="点击这条反馈标为已读">新回答</span>` : ""}
           <b class="fb-q" title="${Common.escapeHtml(it.question)}">${Common.escapeHtml(it.question)}</b>
           <span class="fb-time">${Common.fmtTime(it.status === "resolved" ? it.answered_at : it.created_at)}</span>
         </div>
         ${it.status === "resolved"
           ? `<div class="fb-answer md-body">${Markdown.render(it.answer)}</div>`
           : `<div class="fb-wait-tip"><span>已提交跟进，解决后会通知你</span></div>`}
+        ${it.status === "resolved" && !it.read
+          ? `<div class="fb-ops"><button class="btn btn-sm" data-read="${it.id}">标为已读</button></div>`
+          : ""}
       </div>`).join("");
 
-    // 点击这条反馈才标已读：进页面就全标掉的话，未读高亮和角标等于白做
-    list.querySelectorAll(".fb-item").forEach((el) =>
-      el.addEventListener("click", () => markRead(Number(el.dataset.id))));
+    // 点「标为已读」按钮才标已读：进页面就全标掉的话，未读高亮和角标等于白做
+    list.querySelectorAll("[data-read]").forEach((btn) =>
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        markRead(Number(btn.dataset.read));
+      }));
     renderPager();
   }
 
@@ -131,10 +135,17 @@ const FeedbackView = (() => {
   async function markRead(id) {
     const item = rows.find((x) => x.id === id);
     if (!item || item.status !== "resolved" || item.read) return;
+    const ok = await Common.confirmDialog({
+      title: "标记已读",
+      message: `将「${Common.escapeHtml(item.question)}」标记为已读，角标会相应减少，确认？`,
+      okText: "标为已读",
+    });
+    if (!ok) return;
     try {
       await API.request("POST", `/api/chat/unanswered/${id}/read`);
       item.read = true;
       renderList();
+      await NotifyCenter.refresh();   // 已读后立即刷新顶部未读角标
     } catch { /* 忽略：下次再点 */ }
   }
 

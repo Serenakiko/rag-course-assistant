@@ -96,7 +96,7 @@ def page_bases(
             conditions.append(contains(KnowledgeBase.description, kw))
         elif field == "creator":
             conditions.append(
-                or_(contains(User.real_name, kw), contains(User.username, kw))
+                or_(contains(User.username, kw), contains(User.account, kw))
             )
         else:
             conditions.append(contains(KnowledgeBase.name, kw))
@@ -153,7 +153,7 @@ def page_bases(
         summary.point_count = counts.get(b.name, 0)
         summary.document_count, summary.chunk_count = doc_stats.get(b.name, (0, 0))
         summary.creator_name = (
-            b.creator.real_name or b.creator.username if b.creator else ""
+            b.creator.username or b.creator.account if b.creator else ""
         )
         items.append(summary)
     return {"total": total, "items": items}
@@ -197,7 +197,7 @@ def list_bases(
         summary = KnowledgeBaseSummary.model_validate(b)
         summary.point_count = counts.get(b.name, 0)
         summary.creator_name = (
-            b.creator.real_name or b.creator.username if b.creator else ""
+            b.creator.username or b.creator.account if b.creator else ""
         )
         result.append(summary)
     return result
@@ -254,9 +254,7 @@ def update_base(
             db.scalars(select(KnowledgePoint).where(KnowledgePoint.course == old_name))
         )
         docs = list(db.scalars(select(Document).where(Document.course == old_name)))
-        # 先把数据库里的归属改定并提交，再重建向量。以前是逐条重建完才 commit：
-        # 中途一次 embedding 失败就抛 500，数据库还停在旧名，前面几条向量却已经
-        # 换成新名 —— 这批资料按旧名再也检索不到。现在单条失败只记日志。
+        # 先改库并提交，再重建向量；单条失败只记日志
         for p in points:
             p.course = name
         for d in docs:
@@ -410,9 +408,7 @@ def update_point(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> KnowledgePoint:
-    # 只有创建者本人或管理员能改内容：以前所有登录用户都能编辑，
-    # 改错了既没有留痕也追不回来。改挂知识库同样要目标库可写，
-    # 否则等于借编辑把自己挪进别人的库。
+    # 只有创建者本人或管理员能改；改挂知识库同样要目标库可写
     point = db.get(KnowledgePoint, point_id)
     if point is None:
         raise HTTPException(status_code=404, detail="知识点不存在")
@@ -430,8 +426,7 @@ def update_point(
     )
     old_values = (point.title, point.content, point.course, point.tags)
 
-    # 先写向量再提交数据库：向量失败时数据库还停在旧值，rollback 即可；
-    # 数据库提交失败则把向量恢复成旧内容，避免两边不一致。
+    # 先写向量再提交数据库；失败时数据库回滚，向量恢复旧值
     try:
         update_knowledge_point(point_id, *new_values)
     except Exception:  # noqa: BLE001
@@ -441,9 +436,9 @@ def update_point(
             detail="向量库更新失败，请确认大模型服务已启动",
         )
     point.title, point.content, point.course, point.tags = new_values
-    # 改过内容就不再是“自动生成”的展示记录，重建时要重新入库
+    # 改过内容就不再是自动生成的展示记录
     point.is_auto = 0
-    # 留痕：谁改的，前端知识点卡片上直接显示
+    # 记录最后修改者
     point.updated_by = user.id
     try:
         db.commit()
@@ -469,8 +464,7 @@ def remove_point(
         raise HTTPException(status_code=404, detail="知识点不存在")
     if not can_manage(user, point.created_by):
         raise HTTPException(status_code=403, detail="只能删除自己创建的知识点")
-    # 联动：文档自动生成的知识点被删除时，一并删除对应文档
-    # （原始文件 + 文档分块向量 + 文档记录），避免学生端删除后管理员端仍残留文档
+    # 联动：自动生成的知识点被删时，一并删除对应文档
     removed_doc = None
     auto_doc = _find_auto_doc(db, point)
     if auto_doc is not None:
@@ -488,14 +482,8 @@ def remove_point(
 def _find_auto_doc(db: Session, point: KnowledgePoint) -> Document | None:
     """查找与知识点同名的「上传时自动生成」文档。
 
-    匹配条件：标题 = 文档名去扩展名、同课程、同上传者，且正文前 2000 字与知识点内容一致
-    （上传时自动生成的知识点，内容就是正文前 2000 字）。
-
-    两处保护：
-      1) 先按文件名筛，再解析那一篇——以前对该课程每篇文档都 parse_file，
-         文档多的课程删一个知识点要解析几十次；
-      2) 解析失败/正文为空就放弃联动。以前 `not text` 也算匹配，
-         文件被挪走或 PDF 突然解析不了时，会把整篇文档连带向量一起删掉。
+    匹配条件：标题 = 文档名去扩展名、同课程、同上传者，正文前 2000 字与知识点内容一致。
+    先按文件名筛再解析，解析失败/正文为空就放弃联动。
     """
     stem = (point.title or "").strip()
     if not stem:

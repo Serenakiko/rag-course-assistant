@@ -28,6 +28,15 @@ def _get_client() -> chromadb.ClientAPI:
     return _client
 
 
+def get_collection() -> chromadb.Collection:
+    """返回底层 Chroma collection（供需要直接按 metadata 查询的场景使用）。
+
+    优先用 get_vector_store() 做常规读写；只有像「按 doc_id 取某文档全部分块」
+    这种 Chroma 原生 where 查询才直接拿 collection，避免让调用方 import 私有 _get_client。
+    """
+    return _get_client().get_collection(settings.COLLECTION_NAME)
+
+
 def get_vector_store() -> Chroma:
     """懒加载向量库（首次调用时创建 collection）。"""
     global _vector_store
@@ -46,9 +55,14 @@ def _doc(text: str, metadata: dict) -> Document:
 
 # ---------- 文档 ----------
 def add_document_chunks(doc_id: int, filename: str, course: str, chunks: list[str]) -> int:
-    """文档分块入库，返回写入块数。"""
+    """文档分块入库，返回写入块数。
+
+    先按 doc_id 清掉旧向量再写入：重新解析同一文档时，旧的块不会残留在库里
+    （否则检索会同时命中新旧两份，甚至重名内容去重后仍多占条目）。
+    """
     if not chunks:
         return 0
+    delete_document(doc_id)
     docs = [
         _doc(
             text,
@@ -82,6 +96,7 @@ def delete_document(doc_id: int) -> None:
 
 # ---------- 知识点 ----------
 def add_knowledge_point(point_id: int, title: str, content: str, course: str, tags: str) -> None:
+    delete_knowledge_point(point_id)
     doc = _doc(
         f"{title}\n{content}",
         {
@@ -96,7 +111,7 @@ def add_knowledge_point(point_id: int, title: str, content: str, course: str, ta
 
 
 def update_knowledge_point(point_id: int, title: str, content: str, course: str, tags: str) -> None:
-    delete_knowledge_point(point_id)
+    # add_knowledge_point 内部会先清旧向量，这里直接重写即可
     add_knowledge_point(point_id, title, content, course, tags)
 
 

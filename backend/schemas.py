@@ -10,14 +10,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # ---------- 认证 ----------
 class RegisterRequest(BaseModel):
     # 账号固定 8 位数字（前端同规则）
-    username: str = Field(min_length=8, max_length=8, pattern=r"^\d{8}$")
+    account: str = Field(min_length=8, max_length=8, pattern=r"^\d{8}$")
     password: str = Field(min_length=6, max_length=64)
-    real_name: str = Field(default="", max_length=32)
+    username: str = Field(default="", max_length=32)
     role: str = Field(default="student", pattern=r"^student$")
 
 
 class LoginRequest(BaseModel):
-    username: str
+    account: str
     password: str
 
 
@@ -25,8 +25,8 @@ class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    account: str
     username: str
-    real_name: str
     avatar: str = ""
     role: str
     created_at: datetime
@@ -43,8 +43,8 @@ class ChangePasswordRequest(BaseModel):
 
 
 class UpdateProfileRequest(BaseModel):
-    username: str | None = Field(default=None, pattern=r"^\d{8}$")
-    real_name: str | None = Field(default=None, max_length=32)
+    account: str | None = Field(default=None, pattern=r"^\d{8}$")
+    username: str | None = Field(default=None, max_length=32)
     avatar: str | None = Field(default=None, max_length=512)
 
 
@@ -72,6 +72,7 @@ class MessageOut(BaseModel):
     content: str
     sources: list = Field(default_factory=list)
     interrupted: bool = False
+    feedback: str = ""
     created_at: datetime
 
     @field_validator("sources", mode="before")
@@ -96,6 +97,12 @@ class AskRequest(BaseModel):
 
 class RenameConversationRequest(BaseModel):
     title: str = Field(min_length=1, max_length=255)
+
+
+class FeedbackRequest(BaseModel):
+    """学生对回答的评价：up=有帮助 / down=没帮助 / 空串=取消评价。"""
+
+    feedback: str = Field(pattern=r"^(up|down|)$")
 
 
 # ---------- 知识点 ----------
@@ -172,7 +179,7 @@ class DocumentDetailOut(DocumentOut):
 # ---------- 用户管理 ----------
 class AdminUserUpdate(BaseModel):
     role: str | None = Field(default=None, pattern=r"^(student|admin)$")
-    real_name: str | None = Field(default=None, max_length=32)
+    username: str | None = Field(default=None, max_length=32)
     new_password: str | None = Field(default=None, min_length=6, max_length=64)
 
 
@@ -193,3 +200,10 @@ class StatsOut(BaseModel):
     unanswered_pending: int = 0        # 待处理反馈数
     unanswered_resolved: int = 0       # 已解答反馈数
     recent_unanswered: list[dict] = [] # [{id, question, status, created_at, answered_at}] 最近反馈
+    # 质量指标（拒答率 = 未命中 / 提问总数；命中率 = 1 - 拒答率）
+    hit_rate: float | None = None      # 命中率 0~1
+    reject_rate: float | None = None   # 拒答率 0~1
+    avg_resolve_hours: float | None = None  # 反馈平均解决时长（小时）
+    feedback_up: int = 0               # 学生点「有帮助」次数
+    feedback_down: int = 0             # 学生点「没帮助」次数
+    hot_questions: list[dict] = []     # [{question, count}] 高频提问 Top N（学生原问去重计数）

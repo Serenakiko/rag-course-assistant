@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -18,9 +19,9 @@ router = APIRouter()
 
 class AdminUserCreate(BaseModel):
     # 和注册同规则：账号固定 8 位数字
-    username: str = Field(min_length=8, max_length=8, pattern=r"^\d{8}$")
+    account: str = Field(min_length=8, max_length=8, pattern=r"^\d{8}$")
     password: str = Field(min_length=6, max_length=64)
-    real_name: str = Field(default="", max_length=32)
+    username: str = Field(default="", max_length=32)
     role: str = Field(default="student", pattern=r"^(student|admin)$")
 
 
@@ -43,7 +44,7 @@ def admin_list_users(
     keyword = q.strip()
     if keyword:
         if field == "name":
-            conditions.append(contains(User.real_name, keyword))
+            conditions.append(contains(User.username, keyword))
         elif field == "role":
             # 支持“学生 / student / 管理员 / admin”，也支持只输入一个字
             key = keyword.lower()
@@ -54,7 +55,7 @@ def admin_list_users(
                 role_conds.append(User.role == "admin")
             conditions.append(or_(*role_conds) if role_conds else User.id < 0)
         else:
-            conditions.append(contains(User.username, keyword))
+            conditions.append(contains(User.account, keyword))
 
     total = db.scalar(select(func.count(User.id)).where(*conditions)) or 0
     rows = db.scalars(
@@ -89,7 +90,7 @@ def admin_user_options(
     """转移知识库等场景只需要 id / 名字 / 角色，不必拉整张用户表。"""
     rows = db.scalars(select(User).order_by(User.id)).all()
     return [
-        {"id": u.id, "username": u.username, "real_name": u.real_name, "role": u.role}
+        {"id": u.id, "account": u.account, "username": u.username, "role": u.role}
         for u in rows
     ]
 
@@ -100,20 +101,29 @@ def admin_create_user(
     admin: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
 ) -> User:
-    username = payload.username.strip()
-    if not username:
-        raise HTTPException(status_code=400, detail="用户名不能为空")
-    exists = db.scalar(select(User).where(User.username == username))
+    account = payload.account.strip()
+    if not account:
+        raise HTTPException(status_code=400, detail="账号不能为空")
+    exists = db.scalar(select(User).where(User.account == account))
     if exists is not None:
-        raise HTTPException(status_code=409, detail="用户名已存在")
+        raise HTTPException(status_code=409, detail="账号已存在")
+    username = payload.username.strip()
+    if username:
+        name_exists = db.scalar(select(User.id).where(User.username == username))
+        if name_exists is not None:
+            raise HTTPException(status_code=409, detail="用户名已存在")
     user = User(
-        username=username,
+        account=account,
         password_hash=hash_password(payload.password),
-        real_name=payload.real_name.strip(),
+        username=username,
         role=payload.role,
     )
     db.add(user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="账号或用户名已存在")
     db.refresh(user)
     return user
 
@@ -135,14 +145,25 @@ def admin_update_user(
         if target.role != payload.role:
             changed_auth = True
         target.role = payload.role
-    if payload.real_name is not None:
-        target.real_name = payload.real_name.strip() or target.real_name
+    if payload.username is not None:
+        new_username = payload.username.strip() or target.username
+        if new_username and new_username != target.username:
+            name_exists = db.scalar(
+                select(User.id).where(User.username == new_username)
+            )
+            if name_exists is not None:
+                raise HTTPException(status_code=409, detail="用户名已存在")
+        target.username = new_username
     if payload.new_password:
         target.password_hash = hash_password(payload.new_password)
         changed_auth = True
     if changed_auth:
         target.token_version = int(target.token_version or 0) + 1
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="用户名已存在")
     db.refresh(target)
     return target
 
@@ -174,7 +195,7 @@ def admin_delete_user(
         raise HTTPException(
             status_code=400,
             detail=(
-                f"该用户名下有 {len(owned)} 个知识库（{names}），"
+                f"该用户下有 {len(owned)} 个知识库（{names}），"
                 "删除后会变成无主知识库、学生端不可见。"
                 "请先指定接收人转移，或先删除这些知识库。"
             ),

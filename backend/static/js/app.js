@@ -1,3 +1,96 @@
+/* ============ 主题切换：浅色 / 深色 两态切换，持久化到 localStorage ============ */
+const ThemeCenter = (() => {
+  const KEY = "app-theme";               // 存储值：light | dark
+  const SUN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="M4.93 4.93l1.41 1.41"/><path d="M17.66 17.66l1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="M6.34 17.66l-1.41 1.41"/><path d="M19.07 4.93l-1.41 1.41"/></svg>';
+  const MOON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+
+  function isDark() {
+    const pref = localStorage.getItem(KEY);
+    if (pref === "light") return false;
+    if (pref === "dark") return true;
+    // 首次无记录：跟随系统偏好
+    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  }
+
+  function apply() {
+    const dark = isDark();
+    document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+    const btn = document.getElementById("theme-btn");
+    if (btn) {
+      btn.innerHTML = dark ? MOON : SUN;  // 状态指示：晚上（深色）月亮，白天（浅色）太阳
+      btn.title = dark ? "切换到浅色模式" : "切换到深色模式";
+      btn.setAttribute("aria-label", btn.title);
+    }
+  }
+
+  function init() {
+    apply();
+    const btn = document.getElementById("theme-btn");
+    if (!btn) return;
+    btn.addEventListener("click", () => {
+      localStorage.setItem(KEY, isDark() ? "light" : "dark");
+      apply();
+    });
+  }
+
+  return { init, apply };
+})();
+
+/* ============ 全局通知：右上角铃铛 + 未读角标（点击直达对应页面，无下拉） ============ */
+const NotifyCenter = (() => {
+  const BELL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>';
+  let unread = 0;      // 未读角标数
+  let pollTimer = null;
+
+  function init() {
+    const host = document.getElementById("header-notify");
+    if (!host) return;
+    host.innerHTML = `
+      <button type="button" class="notify-btn" id="notify-btn" aria-label="通知" title="查看通知">
+        ${BELL}<span class="notify-dot" id="notify-dot" style="display:none"></span>
+      </button>`;
+    // 点击铃铛直达对应页面：管理员→问题反馈，学生→我的反馈
+    document.getElementById("notify-btn").addEventListener("click", () => {
+      App.navigate(API.getUser()?.role === "admin" ? "unanswered" : "feedback");
+    });
+    refresh();
+    pollTimer = setInterval(refresh, 30000);  // 每 30s 拉一次角标
+  }
+
+  async function refresh() {
+    try {
+      const role = API.getUser()?.role;
+      if (role === "admin") {
+        // 管理员：待处理且尚未查看的反馈数（后端 unread 字段，全量口径）
+        const data = await API.request("GET", "/api/admin/unanswered?status=pending&limit=1");
+        unread = data.unread || 0;
+      } else {
+        // 学生：已解决但尚未查看的回答数（后端新增 unread 字段，全量口径）
+        const data = await API.request("GET", "/api/chat/unanswered/mine?limit=1");
+        unread = data.unread || 0;
+      }
+      renderDot();
+    } catch { /* 静默失败，不打断页面 */ }
+  }
+
+  function renderDot() {
+    const dot = document.getElementById("notify-dot");
+    if (!dot) return;
+    if (unread > 0) {
+      dot.textContent = unread > 99 ? "99+" : String(unread);
+      dot.style.display = "";
+    } else {
+      dot.style.display = "none";
+    }
+  }
+
+  function destroy() {
+    if (pollTimer) clearInterval(pollTimer);
+  }
+
+  return { init, refresh, destroy };
+})();
+
 /* ============ 主应用装配：导航、路由、状态检测 ============ */
 const App = (() => {
   // 线性 SVG 图标（stroke=currentColor，颜色跟随菜单项文字色）
@@ -14,6 +107,7 @@ const App = (() => {
     trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
     unanswered: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>',
     user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+    bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>',
   };
 
   // 侧边栏顺序：高频核心动作在前，账号类（个人中心）放在最后一组，不要单独沉底。
@@ -83,6 +177,8 @@ const App = (() => {
     refreshUserInfo();
     renderNav();
     setupMobileNav();
+    ThemeCenter.init();
+    NotifyCenter.init();
     // 退出登录：点一下弹确认框；长按 0.65 秒直接退出，不弹任何提示
     const logoutBtn = document.getElementById("logout-btn");
     function doLogout() {
@@ -136,7 +232,7 @@ const App = (() => {
   function refreshUserInfo() {
     const user = API.getUser();
     document.getElementById("user-avatar").innerHTML = Common.avatarContent(user);
-    document.getElementById("user-name").textContent = user.real_name || user.username;
+    document.getElementById("user-name").textContent = user.username || user.account;
     const roleEl = document.getElementById("user-role");
     if (roleEl) roleEl.style.display = "none";  // 侧边栏用户区不显示角色小字
   }
@@ -182,8 +278,8 @@ const App = (() => {
 
     switch (key) {
       case "workbench": WorkbenchView.render(container); break;
-      case "knowledge": KnowledgeView.render(container); break;
-      case "chat": ChatView.render(container); break;
+      case "knowledge": KnowledgeView.render(container, opts); break;
+      case "chat": ChatView.render(container, opts); break;
       case "settings": ProfileView.render(container); break;
       case "content": ContentView.render(container); break;
       case "kb":
@@ -211,6 +307,8 @@ const App = (() => {
       default: container.innerHTML = `<div class="empty-state"><p>页面不存在</p></div>`;
     }
     currentView = key;
+    // 切页后刷新通知角标（读反馈/处理问题后未读数会变）
+    NotifyCenter.refresh();
   }
 
   // 侧边栏不再显示反馈角标：新回答直接在「我的反馈」列表里标「新回答」

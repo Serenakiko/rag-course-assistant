@@ -102,8 +102,10 @@ def main() -> None:
             daemon=True,
         ).start()
 
-    # 必须是单进程：会话的「新请求顶掉旧请求」靠进程内字典（chat._gen_seq），
-    # 多 worker 时每个 worker 各记一份，会退化成两条答案、顺序错乱。
+    # 会话的「新请求顶掉旧请求」靠 conversations.gen_seq 落库（见 chat._bump_gen_seq），
+    # 多 worker 也能正确工作；但本机模型一次只吐一路 token，实际并发由服务端的
+    # 生成闸门（rag_service 的 _SLOT_COUNT）控制，多 worker 并不会变快，反而每个
+    # worker 各建一套 SQLite 连接、Chroma 句柄。默认仍单进程。
     try:
         uvicorn.run(
             "backend.main:app",
