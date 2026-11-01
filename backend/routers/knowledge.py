@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from ..database import get_db
 from ..deps import get_current_user
-from ..models import Document, KnowledgeBase, KnowledgePoint, User
+from ..models import Document, KnowledgeBase, KnowledgePoint, UnansweredQuestion, User
 from ..schemas import (
     KnowledgeBaseIn,
     KnowledgeBaseOut,
@@ -37,7 +37,7 @@ from ..services.kb_scope import (
     can_view_point,
     point_scope_condition,
 )
-from ..services.like import contains
+from ..services.like import LIKE_ESCAPE, contains, escape_like
 from ..services.recycle import snapshot_base
 from ..services.vector_store import (
     add_document_chunks,
@@ -268,6 +268,9 @@ def update_base(
                 update_knowledge_point(p.id, p.title, p.content, name, p.tags)
             except Exception:  # noqa: BLE001
                 logger.exception("改名后重建知识点向量失败 point_id=%s", p.id)
+                # 旧课程名的向量必须清掉，否则 metadata 停在旧 course，
+                # 而检索 filter 是 {course: {$in: courses}} → 这条知识点改名后静默查不到。
+                delete_knowledge_point(p.id)
         for d in docs:
             try:
                 text = parse_file(Path(d.stored_path))
@@ -416,7 +419,11 @@ def update_point(
         raise HTTPException(status_code=403, detail="只能编辑自己能访问的知识库下的知识点")
     if not can_manage(user, point.created_by):
         raise HTTPException(status_code=403, detail="只能编辑自己创建的知识点")
+    # 目标库要可写，**源库也要可写**：只校验新 course，学生会把自己放在公共库里的
+    # 知识点「搬」进自己的私库，公共库资料被无写权限的人单方面抽走。
     assert_writable_course(user, db, payload.course)
+    if point.course and point.course != payload.course.strip():
+        assert_writable_course(user, db, point.course)
 
     new_values = (
         payload.title.strip(),
@@ -453,7 +460,7 @@ def update_point(
     return point
 
 
-@router.delete("/points/{point_id}", summary="删除知识点（若为文档自动生成的知识点，联动删除对应文档）")
+@router.delete("/points/{point_id}", summary="删除知识点")
 def remove_point(
     point_id: int,
     user: User = Depends(get_current_user),
@@ -464,44 +471,29 @@ def remove_point(
         raise HTTPException(status_code=404, detail="知识点不存在")
     if not can_manage(user, point.created_by):
         raise HTTPException(status_code=403, detail="只能删除自己创建的知识点")
-    # 联动：自动生成的知识点被删时，一并删除对应文档
-    removed_doc = None
-    auto_doc = _find_auto_doc(db, point)
-    if auto_doc is not None:
-        removed_doc = auto_doc.filename
-        if auto_doc.stored_path:
-            Path(auto_doc.stored_path).unlink(missing_ok=True)
-        delete_document(auto_doc.id)
-        db.delete(auto_doc)
+
+    # 删除顺序：先删向量、再删 DB 记录。反过来的话，向量删除抛异常（模型服务挂了）
+    # 会返回 500，但 DB 已经删了——前端提示失败、刷新一看记录已没，两头不一致。
+    # 先删向量失败时这里直接抛错，DB 记录原样保留，用户可以重试。
+    delete_knowledge_point(point_id)
+
+    # 联动：被删知识点曾是某条反馈的推荐来源时，打回待处理。
+    # related_points 里知识点条目存的是 title（见 recommend_titles），这里按标题精确匹配。
+    if point.course:
+        resolved_rows = db.scalars(
+            select(UnansweredQuestion).where(
+                UnansweredQuestion.course == point.course,
+                UnansweredQuestion.status == "resolved",
+                UnansweredQuestion.related_points.like(
+                    f"%{escape_like(point.title)}%", escape=LIKE_ESCAPE
+                ),
+            )
+        ).all()
+        for q in resolved_rows:
+            q.status = "pending"
+            q.answer = ""
+            q.answered_at = None
+            q.read_at = None
     db.delete(point)
     db.commit()
-    delete_knowledge_point(point_id)
-    return {"ok": True, "removed_doc": removed_doc}
-
-
-def _find_auto_doc(db: Session, point: KnowledgePoint) -> Document | None:
-    """查找与知识点同名的「上传时自动生成」文档。
-
-    匹配条件：标题 = 文档名去扩展名、同课程、同上传者，正文前 2000 字与知识点内容一致。
-    先按文件名筛再解析，解析失败/正文为空就放弃联动。
-    """
-    stem = (point.title or "").strip()
-    if not stem:
-        return None
-    docs = db.scalars(
-        select(Document).where(
-            Document.course == (point.course or ""),
-            Document.uploaded_by == point.created_by,
-        )
-    ).all()
-    for d in docs:
-        if Path(d.filename).stem != stem:
-            continue
-        try:
-            text = parse_file(Path(d.stored_path))
-        except Exception:  # noqa: BLE001
-            logger.warning("联动删除前解析文档失败，这次只删知识点 doc_id=%s", d.id)
-            return None
-        if text and text[:2000] == (point.content or ""):
-            return d
-    return None
+    return {"ok": True}

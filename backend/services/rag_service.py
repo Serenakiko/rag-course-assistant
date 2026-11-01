@@ -22,6 +22,7 @@ from .rag_prompts import (
     COURSE_STRONG_KEYWORDS,
     IRRELEVANT_KEYWORDS,
     OVERVIEW_PROMPT,
+    QUERY_REWRITE_PROMPT,
     SMALLTALK_REPLY,
     SYSTEM_PROMPT,
     feedback_lines,
@@ -32,6 +33,20 @@ from .rag_prompts import (
 from .vector_store import search as vector_search
 
 logger = logging.getLogger(__name__)
+
+
+def _est_tokens(text: str) -> int:
+    """粗估 token 数（中西文分开估）。用于上下文预算，不要求精确。
+
+    中文约 1.5~2 token/字（取 1.6），英文约 0.25 token/字符（一个词约 1 token，
+    平均词长 4~5 字符）。之前全用 len×1.6，英文资料预算被高估 6 倍而过度裁剪。
+    """
+    if not text:
+        return 0
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    ascii_chars = len(text) - cjk
+    est = cjk * settings.CHAR_TO_TOKEN + ascii_chars / 4.0
+    return max(1, int(est))
 
 
 async def _astream_with_deadline(chain, inputs: dict, timeout: float) -> AsyncGenerator:
@@ -86,20 +101,123 @@ def _format_sources(docs: list[tuple[Document, float]]) -> list[dict]:
     return out
 
 
+async def _rewrite_query(question: str, history: list[tuple[str, str]]) -> str:
+    """多轮追问的检索 query 改写：把指代补全，避免「它」「这个」召回失败。
+
+    有历史时优先用模型把指代补全成独立可检索的问句；模型不可用或超时就退化为
+    纯文本拼接（最近若干轮 user 问题 + 本轮问题），至少比只拿「它」去检索强。
+    """
+    if not history:
+        return question
+    recent = history[-settings.QUERY_REWRITE_HISTORY_TURNS * 2 :]
+    if not recent:
+        return question
+    hist_text = "\n".join(f"{'学生' if r == 'user' else '助教'}：{c}" for r, c in recent)
+    try:
+        llm = get_llm()
+        # QUERY_REWRITE_PROMPT 里带 {history}/{question} 占位符，必须 format 后再当 system 传，
+        # 否则 4B 模型收到的是字面 "{history}" 残缺指令，真实历史反而被当 human 消息重复喂了一遍。
+        system = QUERY_REWRITE_PROMPT.format(history=hist_text, question=question)
+        resp = await asyncio.wait_for(
+            llm.ainvoke(
+                [
+                    ("system", system),
+                    ("human", question),
+                ]
+            ),
+            timeout=8.0,
+        )
+        text = (getattr(resp, "content", "") or "").strip()
+        if text and text != question:
+            return text[:500]
+    except Exception:  # noqa: BLE001
+        logger.warning("查询改写失败，退化为文本拼接：%s", question[:30])
+    # 退化：拼接最近的 user 问题作为上下文
+    parts = [c for r, c in recent if r == "user"]
+    parts.append(question)
+    return " ".join(parts)[:500]
+
+
+def _context_budget() -> int:
+    """可用于「系统提示 + 历史 + 检索资料」的 token 预算。
+
+    num_ctx 是 prompt + 输出总窗口，减去 num_predict 再留 20% 安全边际。
+    """
+    usable = settings.LLM_CTX - settings.LLM_MAX_TOKENS
+    return int(usable * 0.8)
+
+
+def _trim_history_to_budget(history: list[tuple[str, str]], budget: int) -> list[tuple[str, str]]:
+    """按 token 预算从旧到新裁剪历史（保留最近轮次）。"""
+    if not history:
+        return []
+    kept: list[tuple[str, str]] = []
+    used = 0
+    for role, content in reversed(history):  # 从新到旧挑
+        size = _est_tokens(content)
+        if kept and used + size > budget:
+            break
+        kept.append((role, content))
+        used += size
+    return list(reversed(kept))
+
+
+def _trim_context_to_budget(context: str, budget: int) -> str:
+    """按 token 预算裁剪检索资料正文（保留开头，截断尾部）。"""
+    if not context:
+        return context
+    if _est_tokens(context) <= budget:
+        return context
+    # 粗裁：按比例截字符
+    ratio = budget / _est_tokens(context)
+    limit = max(1, int(len(context) * ratio))
+    return context[:limit] + "\n…（因超出上下文预算，部分资料已截断）"
+
+
+def _build_messages(
+    system_prompt: str,
+    context: str,
+    question: str,
+    history: list[tuple[str, str]],
+) -> tuple[str, list[tuple[str, str]]]:
+    """按 token 预算一次性分配 system + history + context，返回 (裁剪后的 context, 裁剪后的 history)。
+
+    之前三块预算各自取百分比再相加，单看每行都合理，加一起却超窗 40%（sys≈1900 +
+    0.5B + 0.4B > B）。这里改成**一次分配**：先扣 system 提示与输出预留，剩余额度
+    按比例分给 history 与 context，两者之和 + system 不再超过可用窗口。
+
+    返回的 context 已经截到预算内，history 也按预算裁剪；调用方直接用返回值装配消息。
+    """
+    budget = _context_budget()  # 可用总预算（已扣输出预留 + 20% 安全边际）
+    sys_tokens = _est_tokens(system_prompt)
+    # 剩余额度 = 总预算 - system 提示；至少留一点给正文，避免 system 本身就把窗口吃光
+    remaining = max(budget - sys_tokens, int(budget * 0.3))
+    # history 与 context 按 4:6 分剩余额度（资料是回答依据，优先保证；历史只辅助追问）
+    hist_budget = int(remaining * 0.4)
+    ctx_budget = remaining - hist_budget
+    history = _trim_history_to_budget(history, hist_budget)
+    context = _trim_context_to_budget(context, ctx_budget)
+    return context, history
+
+
 def recommend_titles(docs: list[tuple[Document, float]], limit: int = 3, spread: float = 0.15) -> list[str]:
     """从检索结果提取相近资料标题，用于拒答时引导换问法。
 
-    只取与首选结果距离接近的；首选结果离题太远（超过阈值 + spread）说明整批是噪声。
+    只取与首选结果相似度接近的（相似度差异不超过 spread）；首选相似度过低说明整批是噪声。
     """
     if not docs:
         return []
     top = docs[0][1]
-    if top > settings.UNMATCHED_DISTANCE + 0.15:
+    # 只拦「整批是噪声」：top1 相似度连阈值下限都够不到，说明库里没有相近内容。
+    # 之前用 top >= UNMATCHED_SIMILARITY + 0.15 当门槛，而门控拒答是 top < UNMATCHED_SIMILARITY，
+    # 两个区间不相交 → 拒答时 recommended 恒空，「拒答推荐相近资料」功能形同虚设。
+    # 这里改成阈值下侧：只要 top1 不低于「阈值 - 0.1」，就说明有沾边的资料，值得推荐。
+    if top < settings.UNMATCHED_SIMILARITY - 0.1:
         return []
     seen: set[str] = set()
     out: list[str] = []
     for doc, score in docs:
-        if score > top + spread:
+        if score < top - spread:
             continue
         src = doc.metadata
         title = (src.get("title") or src.get("filename") or "").strip()
@@ -172,16 +290,20 @@ async def can_answer(question: str, docs: list[tuple[Document, float]], timeout:
         return False
 
 
-def _trim_docs(docs: list[tuple[Document, float]], spread: float = 0.25) -> list[tuple[Document, float]]:
-    """只保留与首选结果距离接近的资料。
+def _trim_docs(docs: list[tuple[Document, float]], ratio: float | None = None) -> list[tuple[Document, float]]:
+    """只保留与首选结果相似度接近的资料。
 
-    门控只看 top1，后面几条可能是离题内容（问死锁却引用"无穷级数"），
-    拿去拼提示词和引用来源只会干扰回答。至少保留一条。
+    用相对判据（与 top1 相似度之比）而非绝对加法：绝对 spread 在余弦相似度空间里
+    物理含义随 embedding 模型漂移，换模型必然失效；比值/分位数才跨模型稳定。
+    至少保留一条。
     """
     if not docs:
         return []
+    ratio = ratio if ratio is not None else settings.TRIM_RATIO
     top = docs[0][1]
-    kept = [d for d in docs if d[1] <= top + spread]
+    if top <= 0:
+        return docs[:1]
+    kept = [d for d in docs if d[1] >= top * ratio]
     return kept or docs[:1]
 
 
@@ -239,19 +361,32 @@ async def _generate_stream(
     context: str,
     question: str,
     history: list[tuple[str, str]],
+    finish_info: dict | None = None,
 ) -> AsyncGenerator[str, None]:
-    """按给定提示词流式产出文本（超时抛 asyncio.TimeoutError，由调用方处理）。"""
+    """按给定提示词流式产出文本（超时抛 asyncio.TimeoutError，由调用方处理）。
+
+    finish_info：可选的可变容器，生成结束后写入 {"finish_reason": ...}。
+    finish_reason == "length" 表示被 num_predict 硬切，回答可能不完整。
+    """
     chain = ChatPromptTemplate.from_messages(
         build_prompt_messages(system_prompt, history, question)
     ) | get_llm()
+    last_meta: dict = {}
     async for chunk in _astream_with_deadline(
         chain,
         {"context": context, "question": question},
         settings.LLM_TIMEOUT,
     ):
         text = getattr(chunk, "content", "")
+        meta = getattr(chunk, "response_metadata", None) or {}
+        if meta:
+            last_meta = meta
         if isinstance(text, str) and text:
             yield text
+    if finish_info is not None:
+        # langchain_ollama 的 response_metadata 里完成原因是 done_reason（取值 stop/length/load），
+        # 不是 finish_reason。之前拼错字段名，truncated 恒为 False，「回答可能不完整」永远不提示。
+        finish_info["finish_reason"] = last_meta.get("done_reason")
 
 
 def _unmatched_result(question: str, docs: list[tuple[Document, float]]) -> dict:
@@ -279,16 +414,18 @@ async def _generate_answer_locked(
             "recommended": [],
             "matched": False,
         }
-    if docs[0][1] > settings.UNMATCHED_DISTANCE:
+    if docs[0][1] < settings.UNMATCHED_SIMILARITY:
         return _unmatched_result(question, docs)
     if settings.ANSWERABILITY_CHECK and not await can_answer(question, docs):
         return _unmatched_result(question, docs)
 
     kept = _trim_docs(docs)
     context = _format_context(kept)
+    # token 预算：一次性分配 system + history + context（history 此路径为空，但统一走 _build_messages）
+    context, history = _build_messages(SYSTEM_PROMPT, context, question, [])
     answer_parts: list[str] = []
     try:
-        async for chunk in _generate_stream(SYSTEM_PROMPT, context, question, []):
+        async for chunk in _generate_stream(SYSTEM_PROMPT, context, question, history):
             answer_parts.append(chunk)
     except asyncio.TimeoutError:
         # 超时提示不是答案，不混进 answer
@@ -468,9 +605,12 @@ async def _handle_generate(
 ) -> AsyncGenerator[dict, None]:
     """基于检索资料流式生成回答，并在模型判「未收录」时追加推荐与反馈。"""
     context = _format_context(kept)
+    # token 预算：一次性分配 system + history + context，三者之和不再超窗。
+    context, history = _build_messages(SYSTEM_PROMPT, context, question, history)
     answer_parts: list[str] = []
+    finish_info: dict = {}
     try:
-        async for chunk in _generate_stream(SYSTEM_PROMPT, context, question, history):
+        async for chunk in _generate_stream(SYSTEM_PROMPT, context, question, history, finish_info):
             answer_parts.append(chunk)
             yield {"type": "token", "content": chunk}
     except asyncio.TimeoutError:
@@ -479,6 +619,8 @@ async def _handle_generate(
         return
 
     answer = "".join(answer_parts).strip()
+    # 被 num_predict 硬切：回答可能不完整，前端应提示而非当完整答案
+    truncated = finish_info.get("finish_reason") == "length"
     if not answer:
         answer = "这次没生成出有效回答。检查一下模型服务，或者换个问法再问。"
         yield {"type": "token", "content": answer}
@@ -490,7 +632,12 @@ async def _handle_generate(
         yield {"type": "token", "content": suffix}
         yield _unmatched_event(question, kept[0][0].metadata.get("course") or "", recommended)
 
-    yield {"type": "sources", "sources": _format_sources(kept), "answer": answer}
+    yield {
+        "type": "sources",
+        "sources": _format_sources(kept),
+        "answer": answer,
+        "truncated": truncated,
+    }
 
 
 async def _stream_answer_locked(
@@ -521,8 +668,11 @@ async def _stream_answer_locked(
                 yield event
             return
 
-        # 1. 检索
-        docs = await asyncio.to_thread(vector_search, question, settings.TOP_K, courses)
+        # 1. 检索（多轮追问先做 query 改写，把指代补全再检索）
+        search_query = await _rewrite_query(question, history)
+        if search_query != question:
+            logger.info("查询改写：%s → %s", question[:30], search_query[:30])
+        docs = await asyncio.to_thread(vector_search, search_query, settings.TOP_K, courses)
         # 知识库没有任何内容时直接拒绝，不调模型
         if not docs:
             yield {
@@ -531,8 +681,8 @@ async def _stream_answer_locked(
             }
             return
 
-        # 2. 无匹配门控：最相似资料的距离仍超过阈值 → 知识库未覆盖该问题
-        if docs[0][1] > settings.UNMATCHED_DISTANCE:
+        # 2. 无匹配门控：最相似资料的相似度仍低于阈值 → 知识库未覆盖该问题
+        if docs[0][1] < settings.UNMATCHED_SIMILARITY:
             async for event in _handle_unmatched(question, docs):
                 yield event
             return

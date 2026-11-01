@@ -31,7 +31,7 @@ def _to_dict(q: UnansweredQuestion) -> dict:
         pass
     return {
         "id": q.id,
-        "no": q.display_no or q.id,
+        "no": q.id,
         "question": q.question,
         "course": q.course or "",
         "status": q.status,
@@ -368,23 +368,20 @@ def update_unanswered(
         raise HTTPException(status_code=404, detail="记录不存在")
     if status not in ("pending", "resolved"):
         raise HTTPException(status_code=400, detail="status 仅支持 pending / resolved")
+    # 手工置为「已解决」时必须已有答案：否则学生端点开是空白，还因为 read_at=None
+    # 冒出红点。regenerate_answer 里已经为这个场景写过保护（未收录时退回 pending），
+    # 这里补上同一规则，避免 UI 手点绕过。
+    if status == "resolved" and not (q.answer or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="这条反馈还没有生成回答，不能直接标记为已解决（请先补充资料并重新生成）",
+        )
     if q.status != status:
         # 状态变了旧答案就不再作数，重置已读让新结果重新提醒
         q.read_at = None
     q.status = status
     db.commit()
     return {"ok": True}
-
-
-def _renumber_unanswered(db: Session) -> None:
-    """删除后把展示编号重排成 1..n，主键 id 一律不动。"""
-    rows = db.scalars(
-        select(UnansweredQuestion).order_by(UnansweredQuestion.id.asc())
-    ).all()
-    for i, r in enumerate(rows, start=1):
-        if r.display_no != i:
-            r.display_no = i
-    db.flush()
 
 
 @router.delete("/{qid}", summary="删除未命中问题记录（管理员）")
@@ -397,7 +394,5 @@ def delete_unanswered(
     if q is None:
         raise HTTPException(status_code=404, detail="记录不存在")
     db.delete(q)
-    db.flush()
-    _renumber_unanswered(db)
     db.commit()
     return {"ok": True}

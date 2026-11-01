@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -32,6 +35,41 @@ logger = logging.getLogger(__name__)
 
 # 一个字都没生成就结束时落库的占位提示，不当作回答喂给模型
 _NO_ANSWER_HINT = "（这条提问没有生成出回答，可能被中断了，重新发一次试试。）"
+
+# ---------- 每用户问答限流 ----------
+# 单机本地模型一次只吐一路 token，一个学生连点就能把闸门与排队打满。
+# 这里给 ask 加「每用户并发上限 + 时间窗口频率上限」，与 rag_service 的全局闸门互补。
+_ASK_MAX_CONCURRENT = 2          # 同一用户同时进行的生成路数上限
+_ASK_WINDOW_SECONDS = 60.0       # 频率窗口
+_ASK_MAX_PER_WINDOW = 20         # 窗口内最多提问次数
+_user_ask_state: dict[int, dict] = {}
+_ask_lock = threading.Lock()
+
+
+def _ask_allow(user_id: int) -> tuple[bool, str]:
+    """判断该用户这一问是否放行；返回 (是否放行, 拒绝原因)。"""
+    now = time.monotonic()
+    with _ask_lock:
+        st = _user_ask_state.get(user_id)
+        if st is None:
+            st = {"active": 0, "stamps": []}
+            _user_ask_state[user_id] = st
+        # 清过期时间戳
+        st["stamps"] = [t for t in st["stamps"] if now - t < _ASK_WINDOW_SECONDS]
+        if st["active"] >= _ASK_MAX_CONCURRENT:
+            return False, "你还有回答正在生成，请等它完成后再提问"
+        if len(st["stamps"]) >= _ASK_MAX_PER_WINDOW:
+            return False, f"提问太频繁，请 {_ASK_WINDOW_SECONDS:.0f} 秒后再试"
+        st["active"] += 1
+        st["stamps"].append(now)
+        return True, ""
+
+
+def _ask_release(user_id: int) -> None:
+    with _ask_lock:
+        st = _user_ask_state.get(user_id)
+        if st is not None:
+            st["active"] = max(0, st["active"] - 1)
 
 
 def _bump_gen_seq(conversation_id: int) -> int:
@@ -62,10 +100,12 @@ def _save_answer(
     content: str,
     sources: str,
     interrupted: int,
+    rejected: int = 0,
 ) -> int | None:
     """把一轮回答落库并返回 message.id。
 
     这一轮之后已有新消息就不再落库，避免出现两条答案；失败只记日志。
+    rejected：这一轮是否拒答（1=是），供统计拒答率直接读字段。
     """
     session = SessionLocal()
     try:
@@ -81,6 +121,7 @@ def _save_answer(
             content=content,
             sources=sources,
             interrupted=interrupted,
+            rejected=rejected,
         )
         session.add(msg)
         session.commit()
@@ -94,7 +135,10 @@ def _save_answer(
 
 
 def _load_history(db: Session, conversation_id: int, limit: int) -> list[tuple[str, str]]:
-    """按时间升序取最近 limit 轮对话，并按字符预算从旧到新丢弃。"""
+    """按时间升序取最近 limit 轮对话，并按 token 预算从旧到新丢弃。
+
+    这里做粗裁（省内存），最终由 rag_service 按 token 预算精裁（防超窗）。
+    """
     msgs = (
         db.execute(
             select(Message)
@@ -105,6 +149,8 @@ def _load_history(db: Session, conversation_id: int, limit: int) -> list[tuple[s
         .scalars()
         .all()
     )
+    # 粗裁预算：与 rag_service 的 token 预算同量级（char × CHAR_TO_TOKEN）
+    budget_chars = int((settings.LLM_CTX - settings.LLM_MAX_TOKENS) * 0.8 / settings.CHAR_TO_TOKEN)
     picked: list[tuple[str, str]] = []
     used = 0
     for m in msgs:  # 从最新往前挑
@@ -112,16 +158,11 @@ def _load_history(db: Session, conversation_id: int, limit: int) -> list[tuple[s
         if m.role == "assistant" and (m.interrupted or (m.content or "").startswith(_NO_ANSWER_HINT)):
             continue
         size = len(m.content or "")
-        if picked and used + size > settings.HISTORY_CHAR_BUDGET:
+        if picked and used + size > budget_chars:
             break
         picked.append((m.role, m.content))
         used += size
     return list(reversed(picked))
-
-
-def _next_unanswered_no(db: Session) -> int:
-    """反馈的下一个展示编号；删除后会被重排，不依赖主键。"""
-    return (db.scalar(select(func.max(UnansweredQuestion.display_no))) or 0) + 1
 
 
 def _record_unmatched(
@@ -129,7 +170,12 @@ def _record_unmatched(
     user_id: int,
     unmatched: dict | None,
 ) -> None:
-    """把未命中问题落库（同人同问题去重：已解决的保留，待处理的更新关联信息）。"""
+    """把未命中问题落库（同人同问题去重：已解决的保留，待处理的更新关联信息）。
+
+    并发下同一学生几乎同时问同一个未命中问题，可能出现两条重复记录：
+    这里在唯一索引（question + created_by）基础上用 on_conflict_do_nothing 兜底，
+    落在后面的那条直接忽略，不再产生重复。
+    """
     course = (unmatched or {}).get("course", "") or ""
     related = json.dumps((unmatched or {}).get("recommended", []), ensure_ascii=False)
     session = SessionLocal()
@@ -148,18 +194,26 @@ def _record_unmatched(
             if existing.status == "pending":
                 existing.course = course
                 existing.related_points = related
-        else:
-            session.add(
-                UnansweredQuestion(
-                    display_no=_next_unanswered_no(session),
-                    question=question_text,
-                    course=course,
-                    related_points=related,
-                    status="pending",
-                    created_by=user_id,
-                )
+            session.commit()
+            return
+        # 不存在时用 upsert 语义插入，避免「先查后插」的竞态窗口产生重复。
+        # display_no 不再维护（展示编号统一用主键 id），避免 max(display_no)+1 与
+        # 删除时的全表重排两套机制打架：并发拿到同号、编号漂移。
+        session.execute(
+            sqlite_insert(UnansweredQuestion)
+            .values(
+                question=question_text,
+                course=course,
+                related_points=related,
+                status="pending",
+                created_by=user_id,
             )
+            .on_conflict_do_nothing(index_elements=["question", "created_by"])
+        )
         session.commit()
+    except Exception:  # noqa: BLE001
+        session.rollback()
+        logger.exception("记录未命中问题失败 question=%s", question_text)
     finally:
         session.close()
 
@@ -488,12 +542,14 @@ def admin_delete_conversation(
     return {"ok": True}
 
 
-@router.post("/ask", summary="智能问答（SSE 流式）")
-async def ask(
-    payload: AskRequest,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> StreamingResponse:
+async def _prepare_ask(
+    payload: AskRequest, user: User, db: Session
+) -> tuple[int, int, int | None, list[tuple[str, str]], list[str] | None]:
+    """ask 的同步准备阶段：定位/创建会话、记录提问、确定课程检索范围。
+
+    返回 (conversation_id, gen_token, turn_user_id, history, courses)。
+    任何一步抛异常（会话 404、非本人 403、DB 失败）都会向上传播，由调用方负责释放限流计数。
+    """
     # 1. 定位或创建会话
     conversation_id = payload.conversation_id
     if conversation_id is None:
@@ -553,8 +609,55 @@ async def ask(
         )
     )
 
-    # 检索范围：学生只能在可见知识库内检索，管理员不限制（None）
-    courses = allowed_course_names(user, db)
+    # 检索范围：学生只能在可见知识库内检索，管理员不限制（None）。
+    # 前端传了 courses（本轮选定课程）则优先用，但学生仍需落到可见范围内，
+    # 防止越权指定一个自己看不到的库。
+    visible_courses = allowed_course_names(user, db)
+    requested = [c for c in (payload.courses or []) if c]
+    if requested:
+        if visible_courses is None:
+            courses = requested  # 管理员不限制
+        else:
+            visible_set = set(visible_courses)
+            courses = [c for c in requested if c in visible_set]
+            if not courses:
+                # 前端传的课程一个都不可见，退回可见范围兜底（None 表示全部可见）
+                courses = visible_courses or []
+    else:
+        courses = visible_courses
+
+    return conversation_id, gen_token, turn_user_id, history, courses
+
+
+@router.post("/ask", summary="智能问答（SSE 流式）")
+async def ask(
+    payload: AskRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    # 0. 每用户限流：并发 + 频率，防单点连点打满闸门与排队
+    allowed, reason = _ask_allow(user.id)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=reason)
+
+    # 限流计数一旦自增，就必须在**所有**退出路径释放：事件流结束时释放，以及
+    # 下面 return StreamingResponse 之前抛异常（会话 404 / 403 / DB 提交失败）也要释放，
+    # 否则累计 2 次失败请求就把该用户永久锁死。用一个幂等标志，事件流 finally 与
+    # 异常处理共用，保证只减一次。
+    released = [False]
+
+    def release() -> None:
+        if not released[0]:
+            released[0] = True
+            _ask_release(user.id)
+
+    try:
+        conversation_id, gen_token, turn_user_id, history, courses = await _prepare_ask(
+            payload, user, db
+        )
+    except Exception:
+        release()
+        raise
 
     # 3. SSE 流式生成（结束时把助手回答落库）
     async def event_gen() -> AsyncGenerator[str, None]:
@@ -591,14 +694,16 @@ async def ask(
                 return
             # 记录未命中：距离门控（unmatched 事件）或模型判定未收录
             full_answer = "".join(answer_parts) or ""
-            if unmatched or is_unmatched_answer(full_answer):
+            is_rejected = bool(unmatched) or is_unmatched_answer(full_answer)
+            if is_rejected:
                 _record_unmatched(payload.message, user.id, unmatched)
 
             # 正常结束：先落库拿 id，再告诉前端（评价按钮要用）
             partial = "".join(answer_parts).strip()
             if partial:
                 saved_id = _save_answer(
-                    conversation_id, turn_user_id, partial, sources_json, 0
+                    conversation_id, turn_user_id, partial, sources_json, 0,
+                    rejected=1 if is_rejected else 0,
                 )
                 if saved_id:
                     saved = True
@@ -606,6 +711,7 @@ async def ask(
         except Exception as exc:  # noqa: BLE001
             yield _sse({"type": "error", "message": f"服务异常：{exc}"})
         finally:
+            release()
             if _current_gen_seq(conversation_id) != gen_token:
                 # 已被新请求取代，丢弃旧流的部分回答
                 logger.info("会话 %s 的生成已被新请求取代，丢弃旧的部分回答", conversation_id)

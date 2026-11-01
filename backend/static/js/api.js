@@ -79,7 +79,10 @@ const API = (() => {
    */
   function streamAsk(conversationId, message, handlers, opts = {}) {
     const idleTimeout = opts.idleTimeout != null ? opts.idleTimeout : 60_000;  // 60s 无新内容
-    const totalTimeout = opts.totalTimeout != null ? opts.totalTimeout : 180_000; // 总时长 3 分钟
+    // 总时长必须比后端 LLM_TIMEOUT（180s）**略长**：两者相等时，前端会在后端收尾前后
+    // 抢跑 abort，最后一段 token 和 saved 事件（message_id）被丢掉，而 AbortError 走
+    // finish() 不报错，用户以为正常结束，被截掉的那半句就当没发生。
+    const totalTimeout = opts.totalTimeout != null ? opts.totalTimeout : 200_000; // 后端 180s + 20s 余量
     const controller = new AbortController();
     let finished = false;
     let idleTimer = null;
@@ -97,7 +100,14 @@ const API = (() => {
     };
     const fail = (msg) => {
       if (finished) return;
+      // 置 finished：后端超时是「先发 error 事件再 close」，前端 evt.type==="error"
+      // 直接调 onError，若不拦后续 token，「已超时」提示会与继续吐字同时出现，
+      // 且 idle 超时 + 异常会重复触发 onError。
+      finished = true;
+      clearTimeout(idleTimer);
+      clearTimeout(totalTimer);
       if (handlers.onError) handlers.onError(msg);
+      resolveDone();
     };
     const resetIdle = () => {
       clearTimeout(idleTimer);
@@ -156,7 +166,13 @@ const API = (() => {
                 else if (evt.type === "sources" && handlers.onSources) handlers.onSources(evt.sources);
                 else if (evt.type === "unmatched" && handlers.onUnmatched) handlers.onUnmatched(evt);
                 else if (evt.type === "saved" && handlers.onSaved) handlers.onSaved(evt.message_id);
-                else if (evt.type === "error" && handlers.onError) handlers.onError(evt.message);
+                else if (evt.type === "error") {
+                  // 后端超时/失败：收到 error 后立即中止读取，避免「已超时」提示
+                  // 与后续 token 同时出现、onError 被重复触发。
+                  fail(evt.message);
+                  controller.abort();
+                  return;
+                }
               } catch { /* 忽略无法解析的事件 */ }
             }
           }

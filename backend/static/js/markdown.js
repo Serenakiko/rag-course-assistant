@@ -1,7 +1,11 @@
 /* ============ 轻量 Markdown 渲染（离线可用，无第三方依赖） ============ */
 const Markdown = (() => {
   // 只放行安全协议，挡掉 javascript: / data: 这类可执行 URL
+  // 注意：不能放行「协议相对 URL」（//evil.com），否则会绕过协议白名单跳到外部站点。
+  // 结尾的 $ 保证 ^/ 只匹配「站内绝对路径」，不匹配以 // 开头的协议相对地址。
   const SAFE_URL = /^(https?:|mailto:|\/|#)|^[^:]*$/i;
+  // 单独拦截协议相对 URL：以 // 开头的一律不放行
+  const isProtocolRelative = (u) => /^\/\//.test(u);
 
   function inline(text) {
     // 先整体转义，之后的正则只在纯文本上工作，输出标签全部由本函数拼接
@@ -10,12 +14,12 @@ const Markdown = (() => {
     t = t.replace(/`([^`]+)`/g, (_, code) => `<code>${code}</code>`);
     // 图片
     t = t.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+[^)\s]+)?\)/g,
-      (_, alt, src) => (SAFE_URL.test(src)
+      (_, alt, src) => (SAFE_URL.test(src) && !isProtocolRelative(src)
         ? `<img src="${src}" alt="${alt}" style="max-width:100%;border-radius:8px">`
         : `![${alt}](${src})`));
     // 链接
     t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,
-      (_, label, href) => (SAFE_URL.test(href)
+      (_, label, href) => (SAFE_URL.test(href) && !isProtocolRelative(href)
         ? `<a href="${href}" target="_blank" rel="noopener">${label}</a>`
         : `[${label}](${href})`));
     // 粗体

@@ -93,6 +93,9 @@ class AskRequest(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
     # 重新生成模式：不重复保存提问，并删除会话中上一条助手回答（供前端“重新生成”刷新键使用）
     regenerate: bool = False
+    # 本轮检索限定的课程范围（可选）：前端从知识库选择器传入。空/缺省表示不限定，
+    # 由后端按用户可见范围兜底。传了就按会话落库，恢复会话级课程隔离。
+    courses: list[str] = Field(default_factory=list)
 
 
 class RenameConversationRequest(BaseModel):
@@ -108,7 +111,9 @@ class FeedbackRequest(BaseModel):
 # ---------- 知识点 ----------
 class KnowledgePointIn(BaseModel):
     title: str = Field(min_length=1, max_length=255)
-    content: str = Field(min_length=1)
+    # 上限 20000 字：知识点整段入向量（不经 split_text 分段），bge-m3 输入窗口约 8192 token，
+    # 一条 10 万字的知识点要么报错要么被截断，且作为巨型 chunk 命中时直接把 num_ctx 顶满。
+    content: str = Field(min_length=1, max_length=20000)
     course: str = Field(default="", max_length=128)
     tags: str = Field(default="", max_length=255)
 

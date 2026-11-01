@@ -211,7 +211,7 @@ const App = (() => {
       if (held) { held = false; return; }  // 长按已经退出了，忽略随后的 click
       const ok = await Common.confirmDialog({
         title: "退出登录",
-        message: "确定要退出当前账号吗？",
+        message: "退出后需重新登录才能继续使用，确定退出吗？",
         okText: "退出登录",
         icon: "logout",
         danger: false,  // 退出不是破坏性操作，按钮跟随图标用主色

@@ -216,7 +216,7 @@ const DocumentsView = (() => {
           <td>
             <button class="ops-link" data-view="${d.id}">查看</button>
             ${d.status === "failed" ? `<button class="ops-link" data-retry="${d.id}">重新解析</button>` : ""}
-            <button class="ops-link del" data-del="${d.id}">删除</button>
+            <button class="ops-link del" data-del="${d.id}" data-name="${Common.escapeHtml(d.filename)}">删除</button>
           </td>
         </tr>`).join("");
     }
@@ -224,7 +224,7 @@ const DocumentsView = (() => {
     tbody.querySelectorAll("[data-view]").forEach((b) =>
       b.addEventListener("click", () => openDocDetail(Number(b.dataset.view))));
     tbody.querySelectorAll("[data-del]").forEach((b) =>
-      b.addEventListener("click", () => removeDoc(Number(b.dataset.del))));
+      b.addEventListener("click", () => removeDoc(Number(b.dataset.del), b.dataset.name)));
     tbody.querySelectorAll("[data-retry]").forEach((b) =>
       b.addEventListener("click", () => retryDoc(Number(b.dataset.retry))));
 
@@ -297,10 +297,10 @@ const DocumentsView = (() => {
     } catch (err) { Common.toast(err.message, "error"); }
   }
 
-  async function removeDoc(id) {
+  async function removeDoc(id, name) {
     const ok = await Common.confirmDialog({
       title: "删除文档",
-      message: "将删除该文档及其全部向量索引，删除后不可恢复。确认？",
+      message: `将删除文档「${Common.escapeHtml(name || "#" + id)}」及其全部向量索引，删除后不可恢复。确认？`,
       okText: "删除",
     });
     if (!ok) return;

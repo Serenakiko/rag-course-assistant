@@ -220,6 +220,10 @@ class Message(Base):
     sources: Mapped[str] = mapped_column(Text, default="[]")  # JSON 数组
     # 生成中断（客户端断开 / 超时 / 报错）时保存的半截回答：1=中断，0=完整
     interrupted: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # 这一轮是否拒答（知识库未覆盖）：1=拒答，0=正常回答。
+    # 统计拒答率直接读这个字段，而不是拿中文文案 LIKE（门控拒答与模型拒答的措辞不同，
+    # LIKE 会漏掉最主要的一类拒答，导致 hit_rate 系统性虚高）。
+    rejected: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # 学生对这条回答的评价："" 未评 / "up" 有帮助 / "down" 没帮助（质量反馈信号）
     feedback: Mapped[str] = mapped_column(String(8), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(

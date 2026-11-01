@@ -102,6 +102,29 @@ def restore_item(
     origin = (base_info.get("name") or item.name or "已恢复的知识库").strip()
     origin = origin or "已恢复的知识库"
 
+    # 快照里 created_by / uploaded_by 指向的用户可能已删，恢复时直接传那个 id 会
+    # 因外键违约 500（且此时库已 commit，留下空壳）。这里先查出还存在的用户 id，
+    # 不存在的置 None（原用户已删），避免半套恢复。
+    creator_ids = {
+        int(x) for x in (item.deleted_by,) if x is not None
+    }
+    for p in data.get("points") or []:
+        if p.get("created_by") is not None:
+            creator_ids.add(int(p["created_by"]))
+    for d in data.get("docs") or []:
+        if d.get("uploaded_by") is not None:
+            creator_ids.add(int(d["uploaded_by"]))
+    existing_ids: set[int] = set()
+    if creator_ids:
+        existing_ids = set(
+            db.scalars(select(User.id).where(User.id.in_(sorted(creator_ids))))
+        )
+
+    def _safe_uid(uid) -> int | None:
+        if uid is None:
+            return None
+        return int(uid) if int(uid) in existing_ids else None
+
     name = origin
     suffix = 0
     while db.scalar(select(KnowledgeBase.id).where(KnowledgeBase.name == name)) is not None:
@@ -111,13 +134,12 @@ def restore_item(
     base = KnowledgeBase(
         name=name,
         description=base_info.get("description") or "",
-        created_by=item.deleted_by or admin.id,
+        created_by=_safe_uid(item.deleted_by) or admin.id,
     )
     db.add(base)
-    db.commit()
+    db.flush()  # 拿到 base.id，暂不 commit——整个恢复尽量在一个事务里，中途失败不留半套
 
-    # 知识点先全部 add、一次 commit 拿到 id，再统一写向量。
-    # 逐个 commit 时恢复 100 个知识点要等 100 次落盘。
+    # 知识点先全部 add、一次 flush 拿到 id，再统一写向量。
     new_points: list[KnowledgePoint] = []
     for p in data.get("points") or []:
         kp = KnowledgePoint(
@@ -125,16 +147,15 @@ def restore_item(
             content=p.get("content") or "",
             course=name,
             tags=p.get("tags") or "",
-            created_by=p.get("created_by"),
+            created_by=_safe_uid(p.get("created_by")),
             is_auto=int(p.get("is_auto") or 0),
         )
         db.add(kp)
         new_points.append(kp)
-    db.commit()
+    db.flush()
 
     restored_points = failed_points = 0
     for kp in new_points:
-        db.refresh(kp)
         restored_points += 1
         # 文档自动生成的知识点只作展示，不重复入向量（和重建脚本保持一致）
         if kp.is_auto:
@@ -167,17 +188,15 @@ def restore_item(
             stored_path=str(dest),
             status="processing",
             course=name,
-            uploaded_by=d.get("uploaded_by"),
+            uploaded_by=_safe_uid(d.get("uploaded_by")),
             is_seed=int(d.get("is_seed") or 0),
         )
         db.add(doc)
-        db.commit()
-        db.refresh(doc)
+        db.flush()
 
         if doc.is_seed:
             # 种子展示文档的正文已经作为知识点入过库，不再重复切分入库
             doc.status = "ready"
-            db.commit()
             restored_docs += 1
             continue
         try:
@@ -195,10 +214,18 @@ def restore_item(
             doc.error = str(exc)[:500]
             failed_docs += 1
             logger.exception("恢复文档向量失败 doc_id=%s", doc.id)
-        db.commit()
 
+    # 最后统一提交：库 + 知识点 + 文档一次落库，中间失败整体回滚不留半套。
+    # 注意 created_by 指向的用户若已被删，这里会因 FK 违约抛 500——所以先校验，
+    # 用户没了就落到当前管理员名下，避免空库已经 commit 进去。
     db.delete(item)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        logger.exception("恢复知识库提交失败，已整体回滚 item_id=%s", item_id)
+        raise HTTPException(status_code=500, detail="恢复失败，已回滚，请重试") from None
+
     shutil.rmtree(item_dir(item_id), ignore_errors=True)
 
     return {

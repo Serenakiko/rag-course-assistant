@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
@@ -149,15 +150,26 @@ def admin_stats(
         ).scalars()
     ]
 
-    # 质量指标：拒答率 = 未命中反馈数 / 提问总数；命中率 = 1 - 拒答率
+    # 质量指标：统一到 message 级事件口径。
+    # 拒答率 = 拒答的 assistant 回答数 / 用户提问总数（user 消息条数）。
+    # 分子分母都是 message 级：分子是「这一轮是否拒答」，直接读落库时写好的 rejected 字段，
+    # 而不是拿中文文案 LIKE（门控拒答与模型拒答的措辞不同，LIKE 会漏掉最主要的一类拒答，
+    # 导致 hit_rate 系统性虚高）。
     total_questions = db.scalar(
         select(func.count(Message.id)).where(Message.role == "user")
     ) or 0
-    unanswered_total = db.scalar(select(func.count(UnansweredQuestion.id))) or 0
+
+    rejected = db.scalar(
+        select(func.count(Message.id)).where(
+            Message.role == "assistant", Message.rejected == 1
+        )
+    ) or 0
+
     hit_rate = None
     reject_rate = None
     if total_questions > 0:
-        reject_rate = round(min(unanswered_total / total_questions, 1.0), 4)
+        # 拒答率按 message 级事件：拒答轮次 / 提问总数（同一学生同一问题问两次算两次提问）
+        reject_rate = round(min(rejected / total_questions, 1.0), 4)
         hit_rate = round(1 - reject_rate, 4)
 
     # 反馈平均解决时长（小时）：已解决反馈的 answered_at - created_at 均值
@@ -251,9 +263,12 @@ def doc_usage_stats(
         )
     ).scalars().all()
 
-    title_count: dict[str, int] = {}
-    title_course: dict[str, str] = {}
-    title_type: dict[str, str] = {}
+    # 用 (source_type, doc_id/point_id) 作为统计键，而不是标题字符串：
+    # 不同课程的文档可能同名（都叫「第一章.pdf」），按标题统计会把它们的引用
+    # 互相叠加、死资料判断也误判。id 才是资料在向量库里的唯一身份。
+    key_count: dict[tuple, int] = {}
+    key_course: dict[tuple, str] = {}
+    key_title: dict[tuple, str] = {}
     for raw in rows:
         try:
             sources = json.loads(raw or "[]")
@@ -264,59 +279,63 @@ def doc_usage_stats(
         for src in sources:
             if not isinstance(src, dict):
                 continue
-            # 只统计有明确来源类型的条目，排除未命中的「相近资料推荐」
             source_type = src.get("source_type")
             if source_type not in ("document", "knowledge_point"):
                 continue
-            title = (src.get("title") or "").strip()
-            if not title:
-                continue
-            title_count[title] = title_count.get(title, 0) + 1
-            if not title_course.get(title) and src.get("course"):
-                title_course[title] = src.get("course")
-            title_type.setdefault(title, source_type)
+            oid = src.get("doc_id") if source_type == "document" else src.get("point_id")
+            if oid is None:
+                # 老数据可能没有 id（只有 title），退回用 title 兜底，保证不丢历史计数
+                oid = src.get("title") or ""
+            key = (source_type, str(oid))
+            title = (src.get("title") or "").strip() or str(oid)
+            key_count[key] = key_count.get(key, 0) + 1
+            if not key_course.get(key) and src.get("course"):
+                key_course[key] = src.get("course")
+            key_title[key] = title
 
     # 全量资料（文档 + 手工知识点），用于找「从未被引用」的死资料
     docs = db.execute(
-        select(Document.filename, Document.course).where(Document.status == "ready")
+        select(Document.id, Document.filename, Document.course).where(Document.status == "ready")
     ).all()
-    points = db.execute(select(KnowledgePoint.title, KnowledgePoint.course)).all()
+    points = db.execute(
+        select(KnowledgePoint.id, KnowledgePoint.title, KnowledgePoint.course).where(
+            KnowledgePoint.is_auto == 0
+        )
+    ).all()
+
+    cited_keys = set(key_count.keys())
+    # 每份资料的「展示名」：文档去扩展名，知识点用标题
+    doc_display = {("document", str(d)): (Path(f).stem or f, c or "") for d, f, c in docs}
+    point_display = {("knowledge_point", str(p)): (t, c or "") for p, t, c in points}
+    display = {**doc_display, **point_display}
 
     ranked = [
         {
-            "title": t,
+            "title": key_title.get(k) or display.get(k, (str(k[1]), ""))[0],
             "count": c,
-            "course": title_course.get(t, ""),
-            "source_type": title_type.get(t, ""),
+            "course": key_course.get(k) or display.get(k, ("", ""))[1],
+            "source_type": k[0],
         }
-        for t, c in title_count.items()
+        for k, c in key_count.items()
     ]
     ranked.sort(key=lambda x: (-x["count"], x["title"]))
 
-    cited_titles = set(title_count.keys())
+    # 死资料 = 从未作为真实来源被引用的文档（ready）+ 手工知识点（is_auto=0）
     dead_docs = [
-        {"title": filename, "course": course or ""}
-        for filename, course in docs
-        if filename not in cited_titles
+        {"title": name, "course": course}
+        for (key, (name, course)) in doc_display.items()
+        if key not in cited_keys
     ]
     dead_docs += [
-        {"title": title, "course": course or ""}
-        for title, course in points
-        if title not in cited_titles
+        {"title": name, "course": course}
+        for (key, (name, course)) in point_display.items()
+        if key not in cited_keys
     ]
-    # 按标题去重并排序，保持稳定输出
-    seen: set[str] = set()
-    dead_unique: list[dict] = []
-    for item in dead_docs:
-        if item["title"] in seen:
-            continue
-        seen.add(item["title"])
-        dead_unique.append(item)
-    dead_unique.sort(key=lambda x: x["title"])
+    dead_docs.sort(key=lambda x: x["title"])
 
     return {
         "ranked": ranked,          # 引用排行（降序）
-        "dead_docs": dead_unique,  # 从未被引用的资料（文档+知识点）
+        "dead_docs": dead_docs,    # 从未被引用的资料（文档+知识点）
         "cited_count": len(ranked),
-        "dead_count": len(dead_unique),
+        "dead_count": len(dead_docs),
     }

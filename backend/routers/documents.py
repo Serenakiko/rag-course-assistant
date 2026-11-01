@@ -62,6 +62,22 @@ async def upload_document(
     course_name = course.strip()
     assert_writable_course(user, db, course_name)
 
+    # 内容去重：同一文件名、同一知识库、同一上传者的文档只保留一份。
+    # 不拦的话，同一份课件反复上传会往向量库里灌进多份近乎相同的块，
+    # 检索 Top-K 被重复内容挤占，真正相关的资料反而排不进来。
+    dup = db.scalar(
+        select(Document.id).where(
+            Document.filename == filename,
+            Document.course == course_name,
+            Document.uploaded_by == user.id,
+        )
+    )
+    if dup is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="这个知识库里已经上传过同名文档，请先删除旧文档或改用其他文件名",
+        )
+
     # 保存原始文件
     ext = Path(filename).suffix.lower()
     stored_name = f"{uuid.uuid4().hex}{ext}"
@@ -113,6 +129,11 @@ def process_document(doc_id: int, course: str) -> None:
             session.commit()
             return
         count = add_document_chunks(doc.id, doc.filename, course, chunks)
+        # 写向量期间文档可能被删除：DB 行没了但向量已入库，留下检索得到、点开 404 的
+        # 无主分块。落库前先确认行还在，没了就把刚写入的向量清掉再退出。
+        if session.get(Document, doc_id) is None:
+            delete_document(doc.id)
+            return
         doc.status = "ready"
         doc.chunk_count = count
         doc.error = ""
@@ -292,31 +313,27 @@ def remove_document(
         raise HTTPException(status_code=404, detail="文档不存在")
     if user.role != "admin" and doc.uploaded_by != user.id:
         raise HTTPException(status_code=403, detail="只能删除自己上传的文档")
-    # 删除原始文件与文档向量
-    if doc.stored_path:
-        Path(doc.stored_path).unlink(missing_ok=True)
-    delete_document(doc.id)
-    # 联动 1：删除上传时自动生成的同名知识点（标题=文件名去扩展名，同课程、同上传者）
+
+    # 联动 1：先收集要删除的自动知识点（在删 DB 前确定，避免顺序影响匹配）
     stem = Path(doc.filename).stem
-    auto_kps = db.scalars(
-        select(KnowledgePoint).where(
-            KnowledgePoint.title == stem,
-            KnowledgePoint.course == (doc.course or ""),
-            KnowledgePoint.created_by == doc.uploaded_by,
-            KnowledgePoint.is_auto == 1,
+    auto_kps = list(
+        db.scalars(
+            select(KnowledgePoint).where(
+                KnowledgePoint.title == stem,
+                KnowledgePoint.course == (doc.course or ""),
+                KnowledgePoint.created_by == doc.uploaded_by,
+                KnowledgePoint.is_auto == 1,
+            )
         )
-    ).all()
-    for kp in auto_kps:
-        delete_knowledge_point(kp.id)
-        db.delete(kp)
-    # 联动：被删文档曾是某条反馈的推荐来源时，打回待处理（按课程+文档名精确定位）
+    )
+    # 联动：被删文档曾是某条反馈的推荐来源时，打回待处理。
     if doc.course:
         resolved_rows = db.scalars(
             select(UnansweredQuestion).where(
                 UnansweredQuestion.course == doc.course,
                 UnansweredQuestion.status == "resolved",
                 UnansweredQuestion.related_points.like(
-                    f"%{escape_like(stem)}%", escape=LIKE_ESCAPE
+                    f"%{escape_like(doc.filename)}%", escape=LIKE_ESCAPE
                 ),
             )
         ).all()
@@ -325,6 +342,19 @@ def remove_document(
             q.answer = ""
             q.answered_at = None
             q.read_at = None
+
+    # 先删 DB 记录（事务），成功后再异步清理向量与文件。
+    # 反过来的话：文件/向量删了、DB 删除失败，就出现「文件没了引用还在」或「向量没了记录还在」。
+    stored_path = doc.stored_path
+    for kp in auto_kps:
+        db.delete(kp)
     db.delete(doc)
     db.commit()
+
+    # DB 已删，向量与文件清理失败可重试（不影响主流程），只记日志。
+    delete_document(doc.id)
+    for kp in auto_kps:
+        delete_knowledge_point(kp.id)
+    if stored_path:
+        Path(stored_path).unlink(missing_ok=True)
     return {"ok": True}

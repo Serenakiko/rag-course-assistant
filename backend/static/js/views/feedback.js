@@ -137,7 +137,7 @@ const FeedbackView = (() => {
     if (!item || item.status !== "resolved" || item.read) return;
     const ok = await Common.confirmDialog({
       title: "标记已读",
-      message: `将「${Common.escapeHtml(item.question)}」标记为已读，角标会相应减少，确认？`,
+      message: `将「${Common.escapeHtml(item.question)}」标记为已读，确认？`,
       okText: "标为已读",
     });
     if (!ok) return;

@@ -111,17 +111,39 @@ def init_db() -> None:
                 "WHERE display_no IS NULL OR display_no = 0"
             )
         )
+        # (question, created_by) 唯一约束：先清掉历史竞态可能留下的重复行，再建唯一索引。
+        # 保留每组里 id 最小（最早）的一条，删除其余重复；否则唯一索引建不起来。
+        conn.execute(
+            text(
+                "DELETE FROM unanswered_questions WHERE id NOT IN ("
+                "  SELECT MIN(id) FROM unanswered_questions "
+                "  WHERE created_by IS NOT NULL "
+                "  GROUP BY question, created_by"
+                ") AND created_by IS NOT NULL"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_unanswered_question_user "
+                "ON unanswered_questions (question, created_by)"
+            )
+        )
         # documents 增量迁移：标记种子展示文档，重建向量时跳过
         doc_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(documents)"))]
         if "is_seed" not in doc_cols:
             conn.execute(text("ALTER TABLE documents ADD COLUMN is_seed INTEGER DEFAULT 0"))
-        # 后台解析任务不会跨进程存活：启动时把上次残留的“解析中”标成失败，
+        # 后台解析任务不会跨进程存活：启动时把上次残留的「解析中」标成失败，
         # 否则文档会永远停在 processing，前端也一直轮询。
+        # 但热重载 / 多 worker 下，新进程启动时旧进程可能还在正常解析——无条件改 failed
+        # 会把正在解析的文档误杀，几秒后旧进程又改回 ready，状态来回跳、前端误弹「失败」。
+        # 所以只改「创建时间早于 30 分钟」的 processing 记录：正常解析几秒~几分钟内完成，
+        # 残留这么久的一定是进程已死、任务丢失的孤儿。
         conn.execute(
             text(
                 "UPDATE documents SET status = 'failed', "
                 "error = '服务重启，解析中断，请重新上传' "
-                "WHERE status = 'processing'"
+                "WHERE status = 'processing' "
+                "AND created_at < datetime('now', '-30 minutes')"
             )
         )
         # conversations 增量迁移：记录会话使用的知识库（历史会话按库筛选）
@@ -140,6 +162,9 @@ def init_db() -> None:
             conn.execute(text("ALTER TABLE messages ADD COLUMN interrupted INTEGER DEFAULT 0"))
         if "feedback" not in msg_cols:
             conn.execute(text("ALTER TABLE messages ADD COLUMN feedback VARCHAR(8) DEFAULT ''"))
+        # 这一轮是否拒答：1=拒答。统计拒答率直接读这个字段，不用中文文案 LIKE。
+        if "rejected" not in msg_cols:
+            conn.execute(text("ALTER TABLE messages ADD COLUMN rejected INTEGER DEFAULT 0"))
         # knowledge_points 增量迁移：文档自动生成的知识点标记
         kp_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(knowledge_points)"))]
         if "is_auto" not in kp_cols:

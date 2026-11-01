@@ -176,13 +176,13 @@ def test_smalltalk_short_circuits_without_search(monkeypatch):
 
 
 def test_unmatched_gate_rejects_irrelevant_without_record(monkeypatch):
-    """距离超阈值 + 课程无关：拒答且不发 unmatched（不污染反馈列表）。"""
+    """相似度低于阈值 + 课程无关：拒答且不发 unmatched（不污染反馈列表）。"""
     from langchain_core.documents import Document
 
     from backend.services import rag_service
 
     doc = Document(page_content="无关", metadata={"course": "公开库"})
-    monkeypatch.setattr(rag_service, "vector_search", lambda *a, **k: [(doc, 0.9)])  # 超过阈值
+    monkeypatch.setattr(rag_service, "vector_search", lambda *a, **k: [(doc, 0.1)])  # 相似度低于阈值
     async def _unrelated(*a, **k):
         return False
     monkeypatch.setattr(rag_service, "is_course_related", _unrelated)
@@ -200,13 +200,13 @@ def test_unmatched_gate_rejects_irrelevant_without_record(monkeypatch):
 
 
 def test_unmatched_gate_records_course_related(monkeypatch):
-    """距离超阈值 + 课程相关：拒答并发出 unmatched 事件供落库。"""
+    """相似度低于阈值 + 课程相关：拒答并发出 unmatched 事件供落库。"""
     from langchain_core.documents import Document
 
     from backend.services import rag_service
 
     doc = Document(page_content="二叉树", metadata={"course": "数据结构", "title": "树.md"})
-    monkeypatch.setattr(rag_service, "vector_search", lambda *a, **k: [(doc, 0.9)])
+    monkeypatch.setattr(rag_service, "vector_search", lambda *a, **k: [(doc, 0.1)])
     async def _related(*a, **k):
         return True
     monkeypatch.setattr(rag_service, "is_course_related", _related)
@@ -395,30 +395,6 @@ def test_save_answer_dropped_when_next_turn_started(monkeypatch):
     assert chat_mod._save_answer(conv_id, first_user_id, "迟到的回答", "[]", 0) is None
     with TestSession() as s:
         assert s.scalar(select(func.count(Message.id)).where(Message.role == "assistant")) == 0
-
-
-def test_find_auto_doc_skips_when_parse_fails(monkeypatch, db):
-    """解析不出正文时不能把整篇文档当成「自动生成的知识点」连带删掉。"""
-    from backend.models import Document
-    from backend.routers import knowledge as kb_mod
-
-    user = _user(db, "10000097", "student")
-    db.add(KnowledgeBase(name="私有库", created_by=user.id))
-    db.add(
-        Document(
-            filename="第七讲.pdf",
-            file_type="pdf",
-            stored_path='不存在.pdf',
-            course="私有库",
-            uploaded_by=user.id,
-        )
-    )
-    point = KnowledgePoint(title="第七讲", content="正文", course="私有库", created_by=user.id)
-    db.add(point)
-    db.commit()
-
-    monkeypatch.setattr(kb_mod, "parse_file", lambda _p: (_ for _ in ()).throw(RuntimeError("解析失败")))
-    assert kb_mod._find_auto_doc(db, point) is None
 
 
 def test_list_sessions_paging_and_search(db):

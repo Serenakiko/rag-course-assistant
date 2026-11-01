@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 # 项目根目录 = backend 的上一级
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / ".env")
+load_dotenv(BASE_DIR / ".env", encoding="utf-8")
 
 
 def _get(key: str, default: str = "") -> str:
@@ -31,7 +31,7 @@ class Settings:
     # 避免用公开的默认密钥签发令牌（否则任何人都能伪造管理员 token）。
     JWT_SECRET: str = _get("JWT_SECRET", "")
     JWT_ALGORITHM: str = "HS256"
-    JWT_EXPIRE_HOURS: int = int(_get("JWT_EXPIRE_HOURS", "72"))
+    JWT_EXPIRE_HOURS: int = int(_get("JWT_EXPIRE_HOURS", "24"))
 
     # ---------- 数据目录 ----------
     DATA_DIR: Path = BASE_DIR / "data"
@@ -67,15 +67,28 @@ class Settings:
 
     # ---------- 对话 ----------
     HISTORY_LIMIT: int = 6  # 拼入提示词的历史轮数上限
-    HISTORY_CHAR_BUDGET: int = 6000  # 历史文本总长度上限，防止把 8192 上下文挤爆
     # 大模型单次回答的超时上限（秒）：超过即停止生成并返回错误提示，防止回答卡死
     LLM_TIMEOUT: float = float(_get("LLM_TIMEOUT", "180"))
-    # 知识库无匹配判定阈值（L2 距离）：检索最相似资料的距离超过该值，判定知识库未覆盖该问题，
-    # 直接拒绝回答并记录“未命中问题”。该值越小越严格（更多问题被判未覆盖）。
-    UNMATCHED_DISTANCE: float = float(_get("UNMATCHED_DISTANCE", "0.85"))
+    # 模型上下文窗口（token 总数，prompt + 输出共用）；Ollama num_ctx 取同一值。
+    # 预留输出额度与安全边际，超长时先裁历史、再裁检索段落（见 rag_service）。
+    LLM_CTX: int = int(_get("LLM_CTX", "8192"))
+    # 预留的输出 token 上限（对应 num_predict）；可用上下文 = LLM_CTX - LLM_MAX_TOKENS - 安全边际。
+    LLM_MAX_TOKENS: int = int(_get("LLM_MAX_TOKENS", "1024"))
+    # 中文按「1 字符 ≈ 1.5 token」粗估，取 1.6 留余量（纯汉字最多约 2 token/字）。
+    CHAR_TO_TOKEN: float = 1.6
+    # 知识库无匹配判定阈值（余弦相似度）：检索最相似资料与问题的相似度低于该值，
+    # 判定知识库未覆盖该问题，直接拒绝回答并记录“未命中问题”。
+    # 该值越小越宽松（放行越多）。实测 bge-m3 余弦：完全无关 <0.46，库内有答案多数 >0.5，
+    # 「相近但未覆盖」（红黑树 vs 二叉树）可达 0.6~0.7——这类必须靠 ANSWERABILITY_CHECK 兜底，
+    # 相似度阈值只负责拦「明显无关」。默认 0.40 落在两个空带之间。
+    UNMATCHED_SIMILARITY: float = float(_get("UNMATCHED_SIMILARITY", "0.40"))
     # 二次可答性判定：距离门控通过后，再让模型只回答"有/没有"，判断资料里是否直接讲了这个问题。
     # 防的是"资料讲二叉树、学生问红黑树"这类相近但未覆盖的情况；代价是每次提问多一次模型调用。
     ANSWERABILITY_CHECK: bool = _get("ANSWERABILITY_CHECK", "false").lower() in ("1", "true", "yes")
+    # 多轮追问的检索 query 改写：把最近的历史轮拼接进 query，让「它」「这个」类指代能召回对的内容。
+    QUERY_REWRITE_HISTORY_TURNS: int = 3  # 拼入检索的最近历史轮数
+    # 引用资料相对裁剪：只保留与 top1 相似度之比不低于该值的资料（相对判据，跨模型稳定）。
+    TRIM_RATIO: float = 0.85
 
     # ---------- 系统角色 ----------
     ROLES: tuple = ("student", "admin")
@@ -87,6 +100,23 @@ class Settings:
 
 
 settings = Settings()
+
+
+def _compat_unmatched_similarity() -> None:
+    """旧配置迁移提示：早期版本用「平方 L2 距离」作未匹配阈值（UNMATCHED_DISTANCE）。
+
+    距离与余弦相似度的量纲不同（旧命中 0.46~0.78、无关 1.19~1.21；余弦命中 >0.5、
+    无关 <0.46），无法用 1-值 精确换算。若 .env 仍残留旧键而没写新键，
+    就回落到保守默认 0.40（拦明显无关），并提示重新标定。
+    """
+    if os.getenv("UNMATCHED_SIMILARITY") is not None:
+        return  # 已显式配置新阈值
+    if os.getenv("UNMATCHED_DISTANCE") is not None:
+        # 旧键还在、新键缺失：用保守默认，别拿旧距离值当相似度用
+        settings.UNMATCHED_SIMILARITY = 0.40
+
+
+_compat_unmatched_similarity()
 
 
 def _check_secret(secret: str) -> None:

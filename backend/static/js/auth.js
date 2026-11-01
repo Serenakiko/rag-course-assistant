@@ -89,7 +89,7 @@
       await Common.alertDialog({
         type: "error",
         title: mode === "login" ? "登录失败" : "注册失败",
-        message: err.message || "请稍后重试。",
+        message: err.message || (mode === "login" ? "登录失败，请检查账号和密码是否正确。" : "注册失败，请稍后重试。"),
       });
     } finally {
       btn.disabled = false;

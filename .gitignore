@@ -18,6 +18,7 @@ data/
 # 本地运行日志与运维产物（.tools 下的 Python 脚本仍入库）
 .tools/*
 !.tools/*.py
+*.log
 
 # IDE
 .vscode/

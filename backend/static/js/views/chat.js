@@ -213,7 +213,7 @@ const ChatView = (() => {
         });
         item.querySelector('[data-op="delete"]').addEventListener("click", (e) => {
           e.stopPropagation();
-          deleteSession(Number(item.dataset.id));
+          deleteSession(Number(item.dataset.id), s.title);
         });
       });
     }
@@ -319,10 +319,11 @@ const ChatView = (() => {
     };
   }
 
-  async function deleteSession(id) {
+  async function deleteSession(id, title) {
     const ok = await Common.confirmDialog({
       title: "删除会话",
-      message: "删除后该会话的对话记录将无法恢复，确定删除吗？",
+      message: `将删除会话「${Common.escapeHtml(title || "#" + id)}」及其全部消息，不可恢复。确认？`,
+      okText: "删除",
     });
     if (!ok) return;
     try {

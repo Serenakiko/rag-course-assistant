@@ -25,7 +25,14 @@ config = context.config
 config.set_main_option("sqlalchemy.url", f"sqlite:///{settings.DB_PATH}")
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # 注意：fileConfig 会重置整个 logging 系统（关闭 uvicorn 的 handler），
+    # 在 uvicorn 的 async lifespan 里执行会干扰启动。这里仅用于命令行 alembic
+    # 迁移时的日志，启动时 stamp 不需要它，改为 disable_existing_loggers=False
+    # 也不够干净，干脆跳过（stamp 本身不依赖 logging 配置）。
+    try:
+        fileConfig(config.config_file_name, disable_existing_loggers=False)
+    except Exception:
+        pass
 
 target_metadata = Base.metadata
 

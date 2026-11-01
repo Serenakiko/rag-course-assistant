@@ -253,7 +253,7 @@ const AdminFeedbackView = (() => {
     if (!q) return;
     const ok = await Common.confirmDialog({
       title: "标记已读",
-      message: `将「${Common.escapeHtml(q.question)}」标记为已读，角标会相应减少，确认？`,
+      message: `将「${Common.escapeHtml(q.question)}」标记为已读，确认？`,
       okText: "标为已读",
     });
     if (!ok) return;
@@ -278,7 +278,7 @@ const AdminFeedbackView = (() => {
     if (!q) return;
     const ok = await Common.confirmDialog({
       title: "删除记录",
-      message: `将删除问题「${Common.escapeHtml(q.question)}」的记录，确认？`,
+      message: `将删除问题「${Common.escapeHtml(q.question)}」的记录，不可恢复。确认？`,
       okText: "删除",
     });
     if (!ok) return;

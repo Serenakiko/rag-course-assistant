@@ -1,6 +1,7 @@
 """认证路由：注册 / 登录 / 个人信息。"""
 from __future__ import annotations
 
+import ipaddress
 import threading
 import time
 import uuid
@@ -22,7 +23,12 @@ from ..schemas import (
     UpdateProfileRequest,
     UserOut,
 )
-from ..security import create_access_token, hash_password, verify_password
+from ..security import (
+    _needs_upgrade,
+    create_access_token,
+    hash_password,
+    verify_password,
+)
 
 router = APIRouter()
 
@@ -107,8 +113,29 @@ def _prune_expired(now: float) -> None:
             del store[key]
 
 
+def _client_ip(request: Request) -> str:
+    """取客户端真实 IP。
+
+    反向代理 / cpolar 隧道下，request.client.host 永远是 127.0.0.1，
+    所有公网用户会被当成同一个 IP，限流会误伤全班。优先读 X-Forwarded-For
+    的第一个值（离客户端最近的一跳），并做白名单过滤防伪造。
+    """
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        # 只取最靠客户端的一跳；每跳都必须是合法 IP，否则整个回退
+        candidates = [p.strip() for p in xff.split(",") if p.strip()]
+        if candidates:
+            first = candidates[0]
+            try:
+                ipaddress.ip_address(first)
+                return first
+            except ValueError:
+                pass
+    return request.client.host if request.client else "-"
+
+
 def _login_key(request: Request, account: str) -> str:
-    client = request.client.host if request.client else "-"
+    client = _client_ip(request)
     return f"{client}|{account}"
 
 
@@ -163,7 +190,7 @@ def register(
     request: Request,
     db: Session = Depends(get_db),
 ) -> User:
-    client = request.client.host if request.client else "-"
+    client = _client_ip(request)
     now = time.monotonic()
     with _login_lock:
         _prune_expired(now)
@@ -202,23 +229,31 @@ def login(
     request: Request,
     db: Session = Depends(get_db),
 ) -> LoginResponse:
-    client = request.client.host if request.client else "-"
+    client = _client_ip(request)
     key = _login_key(request, payload.account)
-    if _recent_fails(key) >= _LOGIN_MAX_FAILS or _recent_ip_fails(client) >= _IP_MAX_FAILS:
-        raise HTTPException(status_code=429, detail="登录失败次数过多，请 10 分钟后再试")
+    # 先验密，再按失败次数限流：限流必须在「确认这是一次失败尝试」之后，
+    # 否则隧道下共用一个 IP 时，恶意方连错 10 次就能把别人正确的密码也挡在门外。
     user = db.scalar(select(User).where(User.account == payload.account))
     if user is None:
         # 账号不存在也走一遍哈希，抹平「不存在的号返回更快」这个信号
         verify_password(payload.password, _DUMMY_HASH)
+        if _recent_fails(key) >= _LOGIN_MAX_FAILS or _recent_ip_fails(client) >= _IP_MAX_FAILS:
+            raise HTTPException(status_code=429, detail="登录失败次数过多，请 10 分钟后再试")
         _note_fail(key)
         _note_ip_fail(client)
         raise HTTPException(status_code=401, detail="账号或密码错误")
     if not verify_password(payload.password, user.password_hash):
+        if _recent_fails(key) >= _LOGIN_MAX_FAILS or _recent_ip_fails(client) >= _IP_MAX_FAILS:
+            raise HTTPException(status_code=429, detail="登录失败次数过多，请 10 分钟后再试")
         _note_fail(key)
         _note_ip_fail(client)
         raise HTTPException(status_code=401, detail="账号或密码错误")
     _clear_fails(key)
     _clear_ip_fails(client)
+    # 旧哈希（低迭代次数）登录成功后自动升级到当前强度，静默重哈希
+    if _needs_upgrade(user.password_hash):
+        user.password_hash = hash_password(payload.password)
+        db.commit()
     token = create_access_token(
         user.id, user.account, user.role, user.token_version or 0
     )
@@ -239,7 +274,7 @@ def change_password(
     if not verify_password(payload.old_password, user.password_hash):
         raise HTTPException(status_code=400, detail="原密码错误")
     user.password_hash = hash_password(payload.new_password)
-    # 让所有已签发的令牌失效，避免旧 token 在 72 小时内继续可用
+    # 让所有已签发的令牌失效，避免旧 token 在有效期内继续可用
     user.token_version = int(user.token_version or 0) + 1
     db.commit()
     return {"ok": True}
