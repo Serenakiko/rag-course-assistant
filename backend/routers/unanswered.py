@@ -53,7 +53,10 @@ def list_unanswered(
     admin: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
 ) -> dict:
-    """按 id 升序（1→n）返回记录；status 可选过滤 pending / resolved。
+    """按 status 区分排序返回记录；status 可选过滤 pending / resolved。
+
+    排序规则：处理中按提问时间从旧到新（最早待处理的排最前），已解决按解决
+    时间从新到旧（最新解决的排最前），全部按提问时间从新到旧。
 
     total 必须单独 count：之前直接返回本页条数（最多 500），
     前端拿它当总数展示就会少算。creator 用 joinedload 一次查出来，
@@ -61,10 +64,17 @@ def list_unanswered(
     """
     limit = min(max(limit, 1), 200)
     offset = max(offset, 0)
+    if status == "pending":
+        order = UnansweredQuestion.created_at.asc()
+    elif status == "resolved":
+        # 按解决时间倒序；历史脏数据可能 answered_at 为空，落到末尾
+        order = UnansweredQuestion.answered_at.desc().nullslast()
+    else:
+        order = UnansweredQuestion.created_at.desc()
     query = (
         select(UnansweredQuestion)
         .options(joinedload(UnansweredQuestion.creator))
-        .order_by(UnansweredQuestion.id.asc())
+        .order_by(order)
     )
     count_query = select(func.count(UnansweredQuestion.id))
     if status in ("pending", "resolved"):
@@ -72,13 +82,12 @@ def list_unanswered(
         count_query = count_query.where(UnansweredQuestion.status == status)
     total = db.scalar(count_query) or 0
     rows = db.execute(query.limit(limit).offset(offset)).scalars().all()
-    # 管理员角标未读数：待处理且管理员尚未查看（admin_read_at 为空）的数量，
-    # 与 status 过滤无关，恒按全量算，供顶部铃铛角标使用。
+    # 管理员角标未读数：待处理（pending）的总数，与 status 过滤无关、恒按全量算，
+    # 供顶部铃铛角标使用。生成回答解决掉一条（pending→resolved）即减一。
     admin_unread = (
         db.scalar(
             select(func.count(UnansweredQuestion.id)).where(
                 UnansweredQuestion.status == "pending",
-                UnansweredQuestion.admin_read_at.is_(None),
             )
         )
         or 0
@@ -212,6 +221,7 @@ def cluster_unanswered(
                 ),
             }
         )
+    # 高频问题靠前：先按人数从多到少，人数相同再按时间从新到旧
     out.sort(
         key=lambda x: (
             -x["count"],
@@ -277,25 +287,6 @@ def unanswered_stats(
     }
 
 
-@router.post("/{qid}/read", summary="标记问题已读（管理员）")
-def mark_unanswered_admin_read(
-    qid: int,
-    admin: User = Depends(require_role("admin")),
-    db: Session = Depends(get_db),
-) -> dict:
-    """管理员查看待处理问题后标记已读，驱动管理员端铃铛角标减少。
-
-    仅对 pending 记录有意义：resolved 项不算待处理，不参与角标。
-    """
-    q = db.get(UnansweredQuestion, qid)
-    if q is None:
-        raise HTTPException(status_code=404, detail="记录不存在")
-    if q.admin_read_at is None:
-        q.admin_read_at = utcnow()
-        db.commit()
-    return {"ok": True}
-
-
 @router.post("/{qid}/regenerate", summary="补充资料后重新生成回答（管理员）")
 async def regenerate_answer(
     qid: int,
@@ -332,6 +323,9 @@ async def regenerate_answer(
         q.answer = result["answer"]
         q.status = "resolved"
         q.answered_at = utcnow()
+        # 生成回答即代表这条已处理完，管理员端铃铛角标应随之减一；
+        # 若未置 admin_read_at，生成后角标仍会把它算作待处理未读。
+        q.admin_read_at = q.admin_read_at or utcnow()
         message = "回答已生成，学生那边能看到了"
         answer = result["answer"]
     else:

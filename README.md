@@ -42,7 +42,7 @@
 
 ```bash
 # 1. 拉取模型
-ollama pull qwen3.5:4b    # 对话模型
+ollama pull qwen3:8b      # 对话模型
 ollama pull bge-m3        # 向量模型
 
 # 2. 安装依赖
@@ -95,7 +95,7 @@ OPENAI_API_KEY=你的密钥
 | 元数据库 | SQLite（WAL） | 单机零部署，读写并发不阻塞 |
 | 向量库 | ChromaDB | 嵌入式持久化，metadata 过滤按课程隔离 |
 | 模型胶水 | LangChain（core/chroma/ollama/openai） | 统一 Ollama 与 OpenAI 接口，切换模型只改 `.env` |
-| 本地推理 | Ollama | 数据不出口，4B 模型 16G 内存可跑 |
+| 本地推理 | Ollama | 数据不出口，8B 模型 16G 内存可跑 |
 | 认证 | PyJWT + PBKDF2 | 标准库实现，免 bcrypt 编译依赖 |
 | 前端 | 原生 HTML/CSS/JS | 零构建、断网可用 |
 
@@ -134,8 +134,6 @@ python -m ruff check .        # 静态检查
 ```
 
 测试分四层：后端单元（pytest，模型用 fake）、前端纯函数（node 回归）、端到端（`.tools/kb_e2e.py`）、性能与安全。阈值标定用 `python evaluate.py`，基于 `data/golden.json` 标注集复现。
-
-> 另有一个 `一键启动.bat`，用于个人环境：自动拉起后端 + cpolar 内网穿透生成公网链接（含本机绝对路径，其他环境不适用）。
 
 ## 🔧 常见问题
 

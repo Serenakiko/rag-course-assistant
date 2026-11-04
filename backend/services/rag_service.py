@@ -116,7 +116,7 @@ async def _rewrite_query(question: str, history: list[tuple[str, str]]) -> str:
     try:
         llm = get_llm()
         # QUERY_REWRITE_PROMPT 里带 {history}/{question} 占位符，必须 format 后再当 system 传，
-        # 否则 4B 模型收到的是字面 "{history}" 残缺指令，真实历史反而被当 human 消息重复喂了一遍。
+        # 否则小模型收到的是字面 "{history}" 残缺指令，真实历史反而被当 human 消息重复喂了一遍。
         system = QUERY_REWRITE_PROMPT.format(history=hist_text, question=question)
         resp = await asyncio.wait_for(
             llm.ainvoke(

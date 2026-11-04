@@ -35,6 +35,8 @@ const KnowledgeView = (() => {
   function render(container, opts) {
     // 从问答来源跳进来：按课程名直接打开对应知识库详情
     if (opts && opts.course) {
+      // 异步查询期间先给 loading 占位，避免白屏
+      container.innerHTML = `<div class="fb-loading"><span class="loading-spinner"></span></div>`;
       API.request("GET", "/api/knowledge/bases").then((bases) => {
         const base = bases.find((x) => x.name === opts.course);
         if (base) {
@@ -313,8 +315,15 @@ const KnowledgeView = (() => {
       box.querySelector("#up-submit").addEventListener("click", async () => {
         const files = Array.from(input.files || []);
         if (!files.length) return;
-        Common.closeModal();
-        await uploadToBase(files, target.name);
+        const submit = box.querySelector("#up-submit");
+        submit.disabled = true;
+        submit.textContent = "上传中…";
+        try {
+          await uploadToBase(files, target.name);
+        } finally {
+          // 无论成败都关闭弹窗并恢复按钮，避免卡在「上传中」态
+          Common.closeModal();
+        }
       });
     }});
   }

@@ -156,8 +156,8 @@ const DocumentsView = (() => {
         }
         if (ok) Common.toast(`已提交 ${ok} 个文件，正在解析入库…`, "success");
         Common.closeModal();
-        // 新文档按 id 排在最末页，而且当前搜索词通常也匹配不上它：既回第一页、
-        // 又清掉搜索，否则刚传完还是「没有匹配的文档」，看着像没传成功
+        // 后端文档列表按 id 倒序（最新在前），回第一页即可直接看到刚上传的文档；
+        // 同时清掉搜索词，否则当前搜索词匹配不上新文档，会误以为没传成功
         docPage = 1;
         const searchEl = document.getElementById("doc-search");
         if (searchEl) searchEl.value = "";
@@ -208,7 +208,7 @@ const DocumentsView = (() => {
       tbody.innerHTML = docRows.map((d, i) => `
         <tr>
           <td>${start + i + 1}</td>
-          <td title="${Common.escapeHtml(d.error || "")}" style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Common.escapeHtml(d.filename)}${d.status === "failed" ? ' <span class="file-type-badge" style="background:#f7ebe8;color:#a4442f">解析失败</span>' : d.status === "processing" ? ' <span class="file-type-badge">解析中</span>' : ""}</td>
+          <td title="${Common.escapeHtml(d.error || "")}" style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Common.escapeHtml(d.filename)}${d.status === "failed" ? ' <span class="file-type-badge" style="background:var(--danger-bg);color:var(--danger)">解析失败</span>' : d.status === "processing" ? ' <span class="file-type-badge">解析中</span>' : ""}</td>
           <td>${Common.escapeHtml(d.course || "-")}</td>
           <td><span class="file-type-badge">${Common.escapeHtml(d.file_type.toUpperCase())}</span></td>
           <td>${Common.fmtSize(d.file_size)}</td>

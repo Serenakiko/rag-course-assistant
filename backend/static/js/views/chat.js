@@ -309,12 +309,17 @@ const ChatView = (() => {
     box.querySelector("[data-ok]").onclick = async () => {
       const title = input.value.trim();
       if (!title) return;
+      const okBtn = box.querySelector("[data-ok]");
+      okBtn.disabled = true;
+      okBtn.textContent = "保存中…";
       try {
         await API.request("PATCH", `/api/chat/sessions/${id}`, { title });
         Common.closeModal();
         loadSessions();
       } catch (err) {
         Common.toast("重命名失败：" + err.message, "error");
+        okBtn.disabled = false;
+        okBtn.textContent = "保存";
       }
     };
   }

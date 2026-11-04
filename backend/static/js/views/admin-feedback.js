@@ -114,7 +114,7 @@ const AdminFeedbackView = (() => {
     list.innerHTML = pageRows.map((g) => `
       <div class="fb-item">
         <div class="fb-head">
-          <span class="fb-badge" style="background:#e7eff1;color:#17505e">${g.count} 人问过</span>
+          <span class="fb-badge fb-badge-count">${g.count} 人问过</span>
           <b class="fb-q" title="${Common.escapeHtml(g.question)}">${Common.escapeHtml(g.question)}</b>
           <span class="fb-time">${Common.fmtTime(g.latest_at)}</span>
         </div>
@@ -123,7 +123,7 @@ const AdminFeedbackView = (() => {
           ${g.creators && g.creators.length ? ` · 提问者：${g.creators.map((c) => Common.escapeHtml(c)).join("、")}` : ""}
         </div>
         ${g.count > 1
-          ? `<div class="fb-answer" style="background:#faf9f7;line-height:1.9">${g.variants.map((v) => `<div style="font-size:13px">· ${Common.escapeHtml(v)}</div>`).join("")}</div>`
+          ? `<div class="fb-answer" style="line-height:1.9">${g.variants.map((v) => `<div style="font-size:13px">· ${Common.escapeHtml(v)}</div>`).join("")}</div>`
           : `<div class="fb-wait-tip"><span>只有一个人问过</span></div>`}
       </div>`).join("");
 
@@ -193,16 +193,11 @@ const AdminFeedbackView = (() => {
           ? `<div class="fb-answer md-body">${Markdown.render(q.answer)}</div>`
           : `<div class="fb-wait-tip"><span>待补充资料并生成回答，解决后学生端会收到通知</span></div>`}
         <div class="fb-ops">
-          ${q.status === "pending" && !q.admin_read
-            ? `<button class="btn btn-sm" data-read="${q.id}">标为已读</button>`
-            : ""}
           <button class="btn btn-sm" data-gen="${q.id}">${q.status === "resolved" ? "重新生成" : "生成回答"}</button>
           <button class="btn btn-sm btn-danger" data-del="${q.id}">删除</button>
         </div>
       </div>`).join("");
 
-    list.querySelectorAll("[data-read]").forEach((b) =>
-      b.addEventListener("click", () => markRead(uqRows.find((x) => x.id === Number(b.dataset.read)))));
     list.querySelectorAll("[data-gen]").forEach((b) =>
       b.addEventListener("click", () => openGenerateGuide(uqRows.find((x) => x.id === Number(b.dataset.gen)))));
     list.querySelectorAll("[data-del]").forEach((b) =>
@@ -224,54 +219,79 @@ const AdminFeedbackView = (() => {
         <h3 style="font-size:17px;margin:0">生成回答</h3>
         <button class="modal-close" data-close>×</button>
       </div>
-      <div style="background:#faf9f7;border:1px solid #e6e3dc;border-radius:10px;padding:14px 16px;font-size:15px;line-height:1.75">${Common.escapeHtml(q.question)}</div>
-      <div class="modal-footer" style="margin-top:20px;justify-content:flex-end;gap:10px">
+      <div style="background:var(--surface-1);border:1px solid var(--border);border-radius:10px;padding:14px 16px;font-size:15px;line-height:1.75">${Common.escapeHtml(q.question)}</div>
+      <div id="gen-result" style="margin-top:14px"></div>
+      <div class="modal-footer" id="gen-footer" style="margin-top:20px;justify-content:flex-end;gap:10px">
         <button class="btn" data-go-doc>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           去上传文档
         </button>
-        <button class="btn" data-do-gen>
+        <button class="btn btn-primary" data-do-gen>
           我已上传，生成
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
         </button>
       </div>
     `, { onOpen: (box) => {
-      box.style.maxWidth = "460px";
+      box.style.maxWidth = "520px";
       box.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", Common.closeModal));
       box.querySelector("[data-go-doc]").addEventListener("click", () => {
         Common.closeModal();
         App.navigate("documents");
       });
-      box.querySelector("[data-do-gen]").addEventListener("click", () => {
-        Common.closeModal();
-        doRegenerate(q.id);
-      });
+      box.querySelector("[data-do-gen]").addEventListener("click", () => doRegenerate(q.id, box));
     }});
   }
 
-  async function markRead(q) {
-    if (!q) return;
-    const ok = await Common.confirmDialog({
-      title: "标记已读",
-      message: `将「${Common.escapeHtml(q.question)}」标记为已读，确认？`,
-      okText: "标为已读",
-    });
-    if (!ok) return;
-    try {
-      await API.request("POST", `/api/admin/unanswered/${q.id}/read`);
-      Common.toast("已标记为已读", "success");
-      loadUnanswered();
-      NotifyCenter.refresh();   // 标记已读后待处理未读数变化，刷新角标
-    } catch (err) { Common.toast(err.message, "error"); }
-  }
-
-  async function doRegenerate(qid) {
+  async function doRegenerate(qid, box) {
+    const result = box && box.querySelector("#gen-result");
+    const footer = box && box.querySelector("#gen-footer");
+    // 进入生成中：按钮禁用、结果区显示 loading，弹窗不关，等结果回来再展示答案
+    if (box) {
+      box.querySelector("[data-do-gen]").disabled = true;
+      // 生成期间也禁用「去上传文档」，避免用户等待时点它跳走、丢了本次生成结果
+      const goDoc = box.querySelector("[data-go-doc]");
+      if (goDoc) goDoc.disabled = true;
+      if (result) result.innerHTML = `<div style="display:flex;align-items:center;gap:10px;color:var(--text-2);padding:14px 16px;background:var(--surface-1);border-radius:10px"><span class="loading-spinner"></span>正在生成回答，请稍候（可能需要几十秒）…</div>`;
+    }
     try {
       const r = await API.request("POST", `/api/admin/unanswered/${qid}/regenerate`);
-      if (r.resolved) Common.toast("回答已生成，学生那边能看到了", "success");
-      else Common.toast(r.message || "知识库还没有收录相关内容，先添加资料再生成", "error");
+      if (r.resolved && r.answer) {
+        // 生成成功：直接在弹窗内展示答案，用户立刻能看到
+        if (result) {
+          result.innerHTML = `
+            <div class="fb-answer md-body" style="margin-top:0;padding-top:0">${Markdown.render(r.answer)}</div>`;
+        }
+        if (footer) {
+          footer.innerHTML = `<button class="btn btn-primary" data-done>知道了</button>`;
+          footer.querySelector("[data-done]").addEventListener("click", Common.closeModal);
+        }
+        Common.toast("回答已生成，学生那边能看到了", "success");
+      } else {
+        // 未命中：说明知识库还没覆盖，明确引导补资料，别让用户以为「生成完了但没答案」
+        const msg = r.message || "知识库还没有收录相关内容，先添加资料再生成";
+        if (result) {
+          result.innerHTML = `<div style="padding:14px 16px;background:var(--warning-bg);color:var(--warning);border-radius:10px;font-size:13.5px;line-height:1.7">${Common.escapeHtml(msg)}</div>`;
+        }
+        if (footer) {
+          footer.innerHTML = `<button class="btn" data-go-doc>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>去补充资料</button>
+            <button class="btn" data-close>关闭</button>`;
+          footer.querySelector("[data-go-doc]").addEventListener("click", () => { Common.closeModal(); App.navigate("documents"); });
+          footer.querySelector("[data-close]").addEventListener("click", Common.closeModal);
+        }
+      }
+    } catch (err) {
+      if (result) {
+        result.innerHTML = `<div style="padding:14px 16px;background:var(--danger-bg);color:var(--danger);border-radius:10px;font-size:13.5px;line-height:1.7">${Common.escapeHtml(err.message)}</div>`;
+      }
+      if (footer) {
+        footer.innerHTML = `<button class="btn" data-close>关闭</button>`;
+        footer.querySelector("[data-close]").addEventListener("click", Common.closeModal);
+      }
+    } finally {
       loadUnanswered();
-    } catch (err) { Common.toast(err.message, "error"); }
+      NotifyCenter.refresh();   // 生成回答后该条已处理，待处理未读数变化，刷新角标
+    }
   }
 
   async function removeUq(q) {

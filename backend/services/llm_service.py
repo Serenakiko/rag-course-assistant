@@ -31,7 +31,7 @@ def get_llm() -> BaseChatModel:
         # 这里用配置的 LLM_CTX（默认 8192）；真正的超窗防护在 rag_service 按 token 预算做，
         # 超长先裁历史再裁段落，避免 Ollama 从头截断丢掉系统规则。
         num_ctx=settings.LLM_CTX,
-        # qwen3.5 默认先思考再回答，长思考会把 num_predict 吃光导致正文为空
+        # qwen3 系列默认先思考再回答，长思考会把 num_predict 吃光导致正文为空
         reasoning=False,
         client_kwargs={"timeout": settings.LLM_TIMEOUT},
         async_client_kwargs={"timeout": settings.LLM_TIMEOUT},

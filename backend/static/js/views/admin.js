@@ -341,7 +341,7 @@ const AdminView = (() => {
     }).join("");
 
     el.innerHTML = `<div class="donut-wrap">
-      <svg viewBox="0 0 180 180" style="width:160px;height:160px" role="img" aria-label="各知识库知识点占比">
+      <svg viewBox="0 0 180 180" style="width:160px;height:160px" role="img" aria-label="各知识库文档占比">
         ${donutDefs}${arcs}
       </svg>
       <div class="donut-legend" style="flex:1">${legend}</div>
@@ -501,19 +501,26 @@ const AdminView = (() => {
     `, { onOpen: (box) => {
       box.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", Common.closeModal));
       box.querySelector("#u-save").addEventListener("click", async () => {
+        const btn = box.querySelector("#u-save");
         const payload = {
           username: box.querySelector("#u-name").value.trim(),
           role: box.querySelector("#u-role").value,
         };
         const pwd = box.querySelector("#u-pwd").value;
         if (pwd) payload.new_password = pwd;
+        // 新建时的必填校验放在禁用按钮之前，避免提前 return 把按钮卡在禁用态
+        let account = "";
+        if (!isEdit) {
+          account = box.querySelector("#u-account").value.trim();
+          if (!account) return Common.toast("请输入账号", "error");
+          if (!pwd) return Common.toast("请输入初始密码", "error");
+        }
+        btn.disabled = true;
+        btn.textContent = "保存中…";
         try {
           if (isEdit) {
             await API.request("PATCH", `/api/admin/users/${user.id}`, payload);
           } else {
-            const account = box.querySelector("#u-account").value.trim();
-            if (!account) return Common.toast("请输入账号", "error");
-            if (!pwd) return Common.toast("请输入初始密码", "error");
             await API.request("POST", "/api/admin/users", {
               account, password: pwd, username: payload.username, role: payload.role,
             });
@@ -522,7 +529,11 @@ const AdminView = (() => {
           Common.closeModal();
           if (!isEdit) usersPage = 1;
           loadUsers();
-        } catch (err) { Common.toast(err.message, "error"); }
+        } catch (err) {
+          Common.toast(err.message, "error");
+          btn.disabled = false;
+          btn.textContent = isEdit ? "保存" : "创建";
+        }
       });
     }});
   }

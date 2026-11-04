@@ -210,7 +210,7 @@ def list_documents(
     rows = db.scalars(
         select(Document)
         .where(*conditions)
-        .order_by(Document.id.asc())
+        .order_by(Document.id.desc())
         .limit(limit)
         .offset(offset)
     ).all()
