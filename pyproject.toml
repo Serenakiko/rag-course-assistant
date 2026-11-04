@@ -4,8 +4,7 @@
 line-length = 120
 target-version = "py310"
 # .tools 是一次性运维脚本，backend/static 是前端，data 是运行时数据
-# alembic/ 是迁移脚本（含自动生成文件），单独 lint 意义不大
-exclude = [".tools", "backend/static", "data", "venv", "alembic"]
+exclude = [".tools", "backend/static", "data", "venv"]
 
 [tool.ruff.lint]
 # E/F：pycodestyle 错误 + pyflakes（未定义/未使用）；I：import 排序

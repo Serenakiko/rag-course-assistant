@@ -110,11 +110,9 @@ rag-course-assistant/
 │   ├── config.py           # 配置加载（.env）
 │   ├── models.py           # SQLAlchemy 模型
 │   └── security.py         # PBKDF2 哈希 + JWT
-├── alembic/                # 数据库版本化迁移
 ├── data/                   # 运行时数据（SQLite / Chroma / 上传文件）
 ├── tests/                  # pytest 用例 + node 前端回归
 ├── .tools/                 # 一次性运维脚本（种子数据 / 向量重建 / 阈值标定）
-├── evaluate.py             # 拒答阈值标定
 ├── run.py                  # 启动入口
 └── requirements.txt        # 依赖清单
 ```
@@ -133,7 +131,7 @@ python -m pytest              # 全部自动化用例（含 2 条 node 前端回
 python -m ruff check .        # 静态检查
 ```
 
-测试分四层：后端单元（pytest，模型用 fake）、前端纯函数（node 回归）、端到端（`.tools/kb_e2e.py`）、性能与安全。阈值标定用 `python evaluate.py`，基于 `data/golden.json` 标注集复现。
+测试覆盖后端单元（pytest，模型用 fake）、前端纯函数（node 回归）、端到端（`.tools/kb_e2e.py`）和性能/安全场景。阈值标定可参考 `.tools/kb_probe.py` / `.tools/kb_calibrate.py`。
 
 ## 🔧 常见问题
 

@@ -1,16 +1,12 @@
 """数据库引擎与会话管理。"""
 from __future__ import annotations
 
-import logging
 from collections.abc import Generator
-from pathlib import Path
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import settings
-
-logger = logging.getLogger(__name__)
 
 settings.ensure_dirs()
 
@@ -146,14 +142,8 @@ def init_db() -> None:
                 "AND created_at < datetime('now', '-30 minutes')"
             )
         )
-        # conversations 增量迁移：记录会话使用的知识库（历史会话按库筛选）
+        # conversations 增量迁移：生成序号（同会话新提问顶掉旧流）
         conv_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(conversations)"))]
-        if "knowledge_bases" not in conv_cols:
-            conn.execute(text("ALTER TABLE conversations ADD COLUMN knowledge_bases TEXT DEFAULT '[]'"))
-        if "last_knowledge_bases" not in conv_cols:
-            conn.execute(
-                text("ALTER TABLE conversations ADD COLUMN last_knowledge_bases TEXT DEFAULT '[]'")
-            )
         if "gen_seq" not in conv_cols:
             conn.execute(text("ALTER TABLE conversations ADD COLUMN gen_seq INTEGER DEFAULT 0"))
         # messages 增量迁移：标记生成中断时保存的半截回答
@@ -171,27 +161,3 @@ def init_db() -> None:
             conn.execute(text("ALTER TABLE knowledge_points ADD COLUMN is_auto INTEGER DEFAULT 0"))
         if "updated_by" not in kp_cols:
             conn.execute(text("ALTER TABLE knowledge_points ADD COLUMN updated_by INTEGER"))
-
-    # 上面的 create_all + 手写补列已把任意旧库对齐到当前模型；这里再用 Alembic 把库
-    # stamp 到基线版本，之后的新 schema 变更走 alembic revision --autogenerate 版本化迁移。
-    # stamp 是幂等的：已标记过就不会重复，未初始化 alembic_version 表的库会在这里建表。
-    _stamp_alembic_head()
-
-
-def _stamp_alembic_head() -> None:
-    """把当前库 stamp 到 Alembic 基线版本（幂等，失败不阻塞启动）。
-
-    数据库迁移正在从「手写 PRAGMA」过渡到 Alembic：历史遗留库由上面的补列对齐，
-    这里补一个版本戳，让未来的 autogenerate 有正确的 diff 起点。
-    """
-    try:
-        from alembic.config import Config
-
-        from alembic import command
-
-        cfg = Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
-        cfg.set_main_option("sqlalchemy.url", f"sqlite:///{settings.DB_PATH}")
-        command.stamp(cfg, "head")
-    except Exception:  # noqa: BLE001
-        # alembic 未安装或版本目录异常时降级为「无版本戳」，不影响主流程
-        logger.warning("Alembic stamp 失败（忽略，迁移仍由手写补列保证）", exc_info=True)

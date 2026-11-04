@@ -90,9 +90,6 @@ class Settings:
     # 引用资料相对裁剪：只保留与 top1 相似度之比不低于该值的资料（相对判据，跨模型稳定）。
     TRIM_RATIO: float = 0.85
 
-    # ---------- 系统角色 ----------
-    ROLES: tuple = ("student", "admin")
-
     def ensure_dirs(self) -> None:
         """确保运行时目录存在。"""
         for d in (self.DATA_DIR, self.UPLOAD_DIR, self.CHROMA_DIR):
@@ -100,23 +97,6 @@ class Settings:
 
 
 settings = Settings()
-
-
-def _compat_unmatched_similarity() -> None:
-    """旧配置迁移提示：早期版本用「平方 L2 距离」作未匹配阈值（UNMATCHED_DISTANCE）。
-
-    距离与余弦相似度的量纲不同（旧命中 0.46~0.78、无关 1.19~1.21；余弦命中 >0.5、
-    无关 <0.46），无法用 1-值 精确换算。若 .env 仍残留旧键而没写新键，
-    就回落到保守默认 0.40（拦明显无关），并提示重新标定。
-    """
-    if os.getenv("UNMATCHED_SIMILARITY") is not None:
-        return  # 已显式配置新阈值
-    if os.getenv("UNMATCHED_DISTANCE") is not None:
-        # 旧键还在、新键缺失：用保守默认，别拿旧距离值当相似度用
-        settings.UNMATCHED_SIMILARITY = 0.40
-
-
-_compat_unmatched_similarity()
 
 
 def _check_secret(secret: str) -> None:

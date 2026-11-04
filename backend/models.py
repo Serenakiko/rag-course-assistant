@@ -186,12 +186,6 @@ class Conversation(Base):
         Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     title: Mapped[str] = mapped_column(String(255), default="新会话")
-    # 遗留列：新代码不再读写，保留只为兼容旧库
-    knowledge_bases: Mapped[str] = mapped_column(Text, default="[]")
-    # 遗留列，同上
-    last_knowledge_bases: Mapped[str] = mapped_column(
-        Text, default="[]", server_default="[]"
-    )
     # 生成序号：新提问自增，用于同会话新提问顶掉旧流
     gen_seq: Mapped[int] = mapped_column(
         Integer, default=0, server_default="0"
