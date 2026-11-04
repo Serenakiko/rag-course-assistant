@@ -734,6 +734,42 @@ def test_my_unanswered_is_paginated_with_full_counts(db):
     assert only_pending["pending"] == 7 and only_pending["resolved"] == 5
 
 
+def test_guard_default_admin_checks_all_admins(monkeypatch, caplog):
+    """第二个管理员仍用默认密码时，启动守卫也要发现。"""
+    from backend import main
+    from backend.security import hash_password
+    from backend.seed_data import DEFAULT_ADMIN
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as s:
+        s.add_all(
+            [
+                User(
+                    account="first-admin",
+                    password_hash=hash_password("changed-password"),
+                    username="first-admin",
+                    role="admin",
+                ),
+                User(
+                    account="second-admin",
+                    password_hash=hash_password(DEFAULT_ADMIN[1]),
+                    username="second-admin",
+                    role="admin",
+                ),
+            ]
+        )
+        s.commit()
+
+    monkeypatch.setattr("backend.database.SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(main.settings, "HOST", "127.0.0.1")
+
+    with caplog.at_level("WARNING"):
+        main._guard_default_admin()
+
+    assert "second-admin" in caplog.text
+
+
 def test_embedding_model_marker_records_current(monkeypatch, tmp_path):
     """首次运行把当前 embedding 模型记到 sidecar，作为下次启动的比较基准。"""
     from backend.services import vector_store

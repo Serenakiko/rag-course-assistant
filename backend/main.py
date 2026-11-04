@@ -42,17 +42,22 @@ def _guard_default_admin() -> None:
     from .security import verify_password
 
     with SessionLocal() as db:
-        admin = (
+        admins = (
             db.query(User)
             .filter(User.role == "admin")
             .order_by(User.id)
-            .first()
+            .all()
         )
-    if admin is None or not verify_password(DEFAULT_ADMIN[1], admin.password_hash):
+        # 不能只看第一个管理员：管理员可以创建其他管理员，后者也可能保留默认密码
+        default_admin = next(
+            (a for a in admins if verify_password(DEFAULT_ADMIN[1], a.password_hash)),
+            None,
+        )
+    if default_admin is None:
         return
     if settings.HOST not in LOOPBACK_HOSTS:
         raise RuntimeError(
-            f"管理员账号 {admin.account} 仍在使用默认密码 {DEFAULT_ADMIN[1]}，"
+            f"管理员账号 {default_admin.account} 仍在使用默认密码 {DEFAULT_ADMIN[1]}，"
             f"而 HOST={settings.HOST} 允许局域网访问，服务拒绝启动。\n"
             "先改密码再放开监听：\n"
             "  1) 把 .env 里的 HOST 改回 127.0.0.1 并启动服务；\n"
@@ -61,7 +66,7 @@ def _guard_default_admin() -> None:
         )
     logger.warning(
         "管理员账号 %s 仍在使用默认密码 %s，请立即登录后修改",
-        admin.account,
+        default_admin.account,
         DEFAULT_ADMIN[1],
     )
 
