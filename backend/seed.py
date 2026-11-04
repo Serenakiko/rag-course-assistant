@@ -12,6 +12,7 @@ import logging
 
 from sqlalchemy import select
 
+from .config import settings
 from .database import SessionLocal
 from .models import KnowledgeBase, KnowledgePoint, User
 from .security import hash_password
@@ -30,7 +31,7 @@ def init_seed() -> None:
         if admin is None:
             admin = User(
                 account=DEFAULT_ADMIN[0],
-                password_hash=hash_password(DEFAULT_ADMIN[1]),
+                password_hash=hash_password(settings.DEFAULT_ADMIN_PASSWORD),
                 username=DEFAULT_ADMIN[2],
                 role="admin",
             )

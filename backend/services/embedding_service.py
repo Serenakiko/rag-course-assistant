@@ -8,6 +8,14 @@ from langchain_openai import OpenAIEmbeddings
 from ..config import settings
 
 
+def get_embedding_model_name() -> str:
+    """返回当前 embedding 模型的稳定标识（用于记录/检测模型切换）。"""
+    provider = settings.EMBEDDING_PROVIDER or settings.LLM_PROVIDER
+    if provider == "openai":
+        return f"openai:{settings.OPENAI_EMBED_MODEL}"
+    return f"ollama:{settings.OLLAMA_EMBED_MODEL}"
+
+
 def get_embeddings() -> Embeddings:
     """按 EMBEDDING_PROVIDER（缺省跟随 LLM_PROVIDER）返回向量化模型。"""
     provider = settings.EMBEDDING_PROVIDER or settings.LLM_PROVIDER

@@ -17,7 +17,7 @@ from langchain_chroma import Chroma
 from langchain_core.documents import Document
 
 from ..config import settings
-from .embedding_service import get_embeddings
+from .embedding_service import get_embedding_model_name, get_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +107,33 @@ def _assert_cosine_space(collection: chromadb.Collection) -> None:
         )
 
 
+def _assert_embedding_model() -> None:
+    """记录并检查 embedding 模型身份。
+
+    维度校验只能发现「换成了不同维度的模型」；同维度换模型（例如两个 1024 维模型）
+    不会报错，但相似度分布和 UNMATCHED_SIMILARITY 会静默漂移。这里在 CHROMA_DIR
+    下留一个 sidecar 文件，模型变化时给出明确警告。
+    """
+    current = get_embedding_model_name()
+    marker = settings.CHROMA_DIR / "embedding_model.txt"
+    try:
+        if marker.exists():
+            recorded = marker.read_text(encoding="utf-8").strip()
+            if recorded and recorded != current:
+                logger.warning(
+                    "embedding 模型已变化（%s → %s）：UNMATCHED_SIMILARITY 是按旧模型标定的，"
+                    "请重新运行 `python -m evaluation.evaluate --thresholds` 校准阈值；"
+                    "若语义空间差异较大，建议重建向量库。",
+                    recorded,
+                    current,
+                )
+                return
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(current, encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        logger.warning("记录 embedding 模型失败，跳过模型一致性检查", exc_info=True)
+
+
 def get_vector_store() -> Chroma:
     """懒加载向量库（首次调用时创建 collection，并校验维度与空间）。"""
     global _vector_store
@@ -120,6 +147,7 @@ def get_vector_store() -> Chroma:
         if collection is not None:
             check_embedding_dimension(collection)
             _assert_cosine_space(collection)
+        _assert_embedding_model()
         _vector_store = Chroma(
             client=_get_client(),
             collection_name=settings.COLLECTION_NAME,

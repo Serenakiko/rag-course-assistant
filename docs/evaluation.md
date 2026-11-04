@@ -88,3 +88,10 @@ python -m evaluation.evaluate --thresholds --json evaluation/last_run.json
 `default.json`（当前默认 0.56）、`top5_nogate.json`、`top5_thr040.json`、`top5_thr054.json`、`top5_thr056.json`、`top5_thr058.json`、`top3_thr040.json`、`top8_thr040.json`。
 
 > 换 embedding 模型或增加课程资料后，先重新跑 `python -m evaluation.evaluate --thresholds`，再决定 `.env` 里的 `UNMATCHED_SIMILARITY`。
+
+## 局限
+
+- 40 条标注来自 20 个种子知识点，不是真实学生问题的分布；recall@5 = 1.0 / MRR = 1.0 只说明**在这套小数据集上检索已饱和**，不能外推到真实课堂。
+- 本脚本只评检索层和距离门控，不包含 `ANSWERABILITY_CHECK` 的 LLM 判定；后者需要单独做端到端评估。
+- 阈值是按 `bge-m3` 标定的；换 embedding 模型后必须重新标定。`vector_store` 会在 `data/chroma/embedding_model.txt` 记录模型名，同维度换模型时打警告，避免静默漂移。
+- 论文中应写明「小规模演示数据集」，并在积累真实提问后扩充到 100 条以上复测。

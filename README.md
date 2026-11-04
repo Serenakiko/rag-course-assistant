@@ -35,6 +35,7 @@
 - [系统架构](docs/architecture.md) — 总体架构、ER 图、问答时序、三重拒答
 - [检索评测](docs/evaluation.md) — 标注集、指标、消融实验建议
 - [论文贡献点](docs/contributions.md) — 三条贡献及对应代码/实验
+- [已知限制](docs/limitations.md) — 默认密码、限流、迁移、评测规模等边界
 - [演示数据](demo/README.md) — 答辩账号与演示数据生成
 
 ## 🚀 快速开始
@@ -73,7 +74,7 @@ python run.py
 | --- | --- | --- |
 | 管理员 | `23040107` | `111111` |
 
-> ⚠️ 首次登录后请立即在「个人中心」修改密码。
+> ⚠️ 首次登录后请立即在「个人中心」修改密码。默认值以 `backend/seed_data.py` 的 `DEFAULT_ADMIN` 为准；可在 `.env` 用 `DEFAULT_ADMIN_PASSWORD` 覆盖首次创建时的密码。
 
 ### 其它启动方式
 

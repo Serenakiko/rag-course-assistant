@@ -37,6 +37,8 @@ python demo/seed_demo.py --no-seed
 | 23040111 | 赵同学 | 111111 |
 | 23040107 | 系统管理员 | 111111 |
 
+> 密码统一取 `backend/seed_data.py` 的 `DEFAULT_ADMIN[1]`（当前 111111）；管理员首次登录后请立即修改。
+
 ## 会生成什么
 
 - 4 个学生账号；

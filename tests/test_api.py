@@ -32,6 +32,7 @@ from backend.routers import (
     users,
 )
 from backend.security import hash_password
+from backend.seed_data import DEFAULT_ADMIN
 
 
 def _build_app(session_factory) -> FastAPI:
@@ -83,9 +84,9 @@ def api(monkeypatch, tmp_path):
 
     with SessionFactory() as db:
         admin = User(
-            account="23040107",
-            password_hash=hash_password("111111"),
-            username="系统管理员",
+            account=DEFAULT_ADMIN[0],
+            password_hash=hash_password(DEFAULT_ADMIN[1]),
+            username=DEFAULT_ADMIN[2],
             role="admin",
         )
         db.add(admin)
@@ -135,7 +136,7 @@ def test_student_cannot_access_admin_endpoints(api):
     assert client.get("/api/admin/recycle", headers=_auth(student)).status_code == 403
     assert client.get("/api/admin/unanswered/stats", headers=_auth(student)).status_code == 403
 
-    admin = _login(client, "23040107", "111111")
+    admin = _login(client, DEFAULT_ADMIN[0], DEFAULT_ADMIN[1])
     assert client.get("/api/admin/users", headers=_auth(admin)).status_code == 200
     assert client.get("/api/admin/recycle", headers=_auth(admin)).status_code == 200
     assert client.get("/api/admin/unanswered/stats", headers=_auth(admin)).status_code == 200
@@ -158,7 +159,7 @@ def test_knowledge_base_visibility(api):
     assert "A的私有库" in alice_names
     assert "B的私有库" not in alice_names
 
-    admin = _login(client, "23040107", "111111")
+    admin = _login(client, DEFAULT_ADMIN[0], DEFAULT_ADMIN[1])
     admin_names = {b["name"] for b in client.get("/api/knowledge/bases", headers=_auth(admin)).json()}
     assert {"A的私有库", "B的私有库"} <= admin_names
 

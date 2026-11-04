@@ -25,8 +25,9 @@ from backend.database import SessionLocal, init_db  # noqa: E402
 from backend.models import Conversation, Message, UnansweredQuestion, User  # noqa: E402
 from backend.security import hash_password  # noqa: E402
 from backend.seed import init_seed  # noqa: E402
+from backend.seed_data import DEFAULT_ADMIN  # noqa: E402
 
-DEMO_PASSWORD = "111111"
+DEMO_PASSWORD = DEFAULT_ADMIN[1]
 
 DEMO_USERS = [
     ("23040108", "张同学"),

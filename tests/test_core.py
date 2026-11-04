@@ -732,3 +732,33 @@ def test_my_unanswered_is_paginated_with_full_counts(db):
     only_pending = my_unanswered(status="pending", limit=10, offset=0, user=student, db=db)
     assert only_pending["total"] == 7
     assert only_pending["pending"] == 7 and only_pending["resolved"] == 5
+
+
+def test_embedding_model_marker_records_current(monkeypatch, tmp_path):
+    """首次运行把当前 embedding 模型记到 sidecar，作为下次启动的比较基准。"""
+    from backend.services import vector_store
+
+    monkeypatch.setattr(vector_store.settings, "CHROMA_DIR", tmp_path)
+    monkeypatch.setattr(vector_store, "get_embedding_model_name", lambda: "ollama:bge-m3")
+
+    vector_store._assert_embedding_model()
+
+    marker = tmp_path / "embedding_model.txt"
+    assert marker.read_text(encoding="utf-8") == "ollama:bge-m3"
+
+
+def test_embedding_model_change_warns(monkeypatch, tmp_path, caplog):
+    """同维度换 embedding 模型不会报错，但必须留下可追踪的警告。"""
+    from backend.services import vector_store
+
+    marker = tmp_path / "embedding_model.txt"
+    marker.write_text("ollama:old-model", encoding="utf-8")
+    monkeypatch.setattr(vector_store.settings, "CHROMA_DIR", tmp_path)
+    monkeypatch.setattr(vector_store, "get_embedding_model_name", lambda: "ollama:new-model")
+
+    with caplog.at_level("WARNING"):
+        vector_store._assert_embedding_model()
+
+    assert "embedding 模型已变化" in caplog.text
+    # 不覆盖旧标记：确认没重新标定前，每次启动都继续提醒
+    assert marker.read_text(encoding="utf-8") == "ollama:old-model"

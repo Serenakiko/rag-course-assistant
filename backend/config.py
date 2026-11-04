@@ -6,6 +6,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from .seed_data import DEFAULT_ADMIN
+
 # 项目根目录 = backend 的上一级
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env", encoding="utf-8")
@@ -32,6 +34,9 @@ class Settings:
     JWT_SECRET: str = _get("JWT_SECRET", "")
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_HOURS: int = int(_get("JWT_EXPIRE_HOURS", "24"))
+    # 默认管理员首次创建时的密码。只在账号不存在时生效；已存在不会被覆盖。
+    # 默认值仅为本地首次登录方便，公网部署前必须在 .env 改成强密码。
+    DEFAULT_ADMIN_PASSWORD: str = _get("DEFAULT_ADMIN_PASSWORD", DEFAULT_ADMIN[1])
 
     # ---------- 数据目录 ----------
     DATA_DIR: Path = BASE_DIR / "data"
@@ -84,7 +89,8 @@ class Settings:
     UNMATCHED_SIMILARITY: float = float(_get("UNMATCHED_SIMILARITY", "0.56"))
     # 二次可答性判定：距离门控通过后，再让模型只回答"有/没有"，判断资料里是否直接讲了这个问题。
     # 防的是"资料讲二叉树、学生问红黑树"这类相近但未覆盖的情况；代价是每次提问多一次模型调用。
-    ANSWERABILITY_CHECK: bool = _get("ANSWERABILITY_CHECK", "false").lower() in ("1", "true", "yes")
+    # 默认开启，与 .env.example 保持一致：三重拒答是系统的核心设计，不能因为少建 .env 就退化成两道。
+    ANSWERABILITY_CHECK: bool = _get("ANSWERABILITY_CHECK", "true").lower() in ("1", "true", "yes")
     # 多轮追问的检索 query 改写：把最近的历史轮拼接进 query，让「它」「这个」类指代能召回对的内容。
     QUERY_REWRITE_HISTORY_TURNS: int = 3  # 拼入检索的最近历史轮数
     # 引用资料相对裁剪：只保留与 top1 相似度之比不低于该值的资料（相对判据，跨模型稳定）。

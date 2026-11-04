@@ -12,6 +12,8 @@ import time
 import webbrowser
 from threading import Thread
 
+from backend.seed_data import DEFAULT_ADMIN
+
 # 用代码里真正 import 的模块名：requirements.txt 装的是 langchain-core / -chroma，
 # 没有 langchain 这个总包，之前拿它自检会让干净的虚拟环境直接启动不了
 REQUIRED_PACKAGES = [
@@ -90,7 +92,7 @@ def main() -> None:
     print(f"  {settings.APP_NAME} v{settings.APP_VERSION}")
     print(f"  访问地址：{url}")
     print(f"  大模型模式：{settings.LLM_PROVIDER}")
-    print("  默认管理员账号：23040107（首次登录后请立即修改密码）")
+    print(f"  默认管理员账号：{DEFAULT_ADMIN[0]}（首次登录后请立即修改密码）")
     print("  按 Ctrl+C 停止服务")
     print("=" * 64)
     print()
@@ -122,8 +124,11 @@ def main() -> None:
             print()
             print("=" * 64)
             print("  服务没能启动，具体原因见上面的报错。")
-            print("  如果是「管理员仍在使用默认密码 111111」：")
-            print("    1) 把 .env 里的 HOST 改回 127.0.0.1，启动并登录  23040107 / 111111")
+            print(f"  如果是「管理员仍在使用默认密码 {DEFAULT_ADMIN[1]}」：")
+            print(
+                f"    1) 把 .env 里的 HOST 改回 127.0.0.1，启动并登录  "
+                f"{DEFAULT_ADMIN[0]} / {DEFAULT_ADMIN[1]}"
+            )
             print("    2) 在「个人中心」改掉密码，再把 HOST 改成 0.0.0.0")
             print("=" * 64)
         raise
