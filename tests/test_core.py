@@ -269,7 +269,8 @@ def test_answerability_gate_blocks_similar_but_uncovered(monkeypatch):
     from backend.services import rag_service
 
     doc = Document(page_content="二叉查找树", metadata={"course": "数据结构"})
-    monkeypatch.setattr(rag_service, "vector_search", lambda *a, **k: [(doc, 0.5)])
+    # 相似度必须高于距离门控阈值，才能确保本用例测的是「可答性判定」而不是第一道门控
+    monkeypatch.setattr(rag_service, "vector_search", lambda *a, **k: [(doc, 0.8)])
     monkeypatch.setattr(rag_service.settings, "ANSWERABILITY_CHECK", True)
     async def _cannot(*a, **k):
         return False

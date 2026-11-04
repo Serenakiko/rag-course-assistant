@@ -78,10 +78,10 @@ class Settings:
     CHAR_TO_TOKEN: float = 1.6
     # 知识库无匹配判定阈值（余弦相似度）：检索最相似资料与问题的相似度低于该值，
     # 判定知识库未覆盖该问题，直接拒绝回答并记录“未命中问题”。
-    # 该值越小越宽松（放行越多）。实测 bge-m3 余弦：完全无关 <0.46，库内有答案多数 >0.5，
-    # 「相近但未覆盖」（红黑树 vs 二叉树）可达 0.6~0.7——这类必须靠 ANSWERABILITY_CHECK 兜底，
-    # 相似度阈值只负责拦「明显无关」。默认 0.40 落在两个空带之间。
-    UNMATCHED_SIMILARITY: float = float(_get("UNMATCHED_SIMILARITY", "0.40"))
+    # 该值越小越宽松（放行越多）。40 条标注集实测：0.40 会放行全部无关问题；
+    # 0.56 拒答 9/10、误拒 2/30；0.58 拒答 10/10、误拒 2/30。
+    # 默认取 0.56 作为保守值；换 embedding 模型或课程资料后需要重新标定。
+    UNMATCHED_SIMILARITY: float = float(_get("UNMATCHED_SIMILARITY", "0.56"))
     # 二次可答性判定：距离门控通过后，再让模型只回答"有/没有"，判断资料里是否直接讲了这个问题。
     # 防的是"资料讲二叉树、学生问红黑树"这类相近但未覆盖的情况；代价是每次提问多一次模型调用。
     ANSWERABILITY_CHECK: bool = _get("ANSWERABILITY_CHECK", "false").lower() in ("1", "true", "yes")

@@ -8,6 +8,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![LangChain](https://img.shields.io/badge/LangChain-1.x-1C3C3C?logo=langchain&logoColor=white)](https://www.langchain.com/)
 [![ChromaDB](https://img.shields.io/badge/ChromaDB-0.4%2B-FFD700)](https://www.trychroma.com/)
+[![CI](https://github.com/Serenakiko/rag-course-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/Serenakiko/rag-course-assistant/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 </div>
@@ -28,6 +29,13 @@
 - **知识库可见性隔离** — 学生只能检索公共库和自己的库，公共库对非创建者只读
 - **误删可恢复** — 删除先落快照进回收站，30 天内可恢复并重新向量化
 - **双角色权限** — 学生（提问、自建知识库）与管理员（内容、用户、数据概览）
+
+## 📚 项目文档
+
+- [系统架构](docs/architecture.md) — 总体架构、ER 图、问答时序、三重拒答
+- [检索评测](docs/evaluation.md) — 标注集、指标、消融实验建议
+- [论文贡献点](docs/contributions.md) — 三条贡献及对应代码/实验
+- [演示数据](demo/README.md) — 答辩账号与演示数据生成
 
 ## 🚀 快速开始
 
@@ -111,6 +119,9 @@ rag-course-assistant/
 │   ├── models.py           # SQLAlchemy 模型
 │   └── security.py         # PBKDF2 哈希 + JWT
 ├── data/                   # 运行时数据（SQLite / Chroma / 上传文件）
+├── demo/                   # 答辩演示数据脚本
+├── docs/                   # 架构、评测、论文贡献点
+├── evaluation/             # 标注集与离线检索评测
 ├── tests/                  # pytest 用例 + node 前端回归
 ├── .tools/                 # 一次性运维脚本（种子数据 / 向量重建 / 阈值标定）
 ├── run.py                  # 启动入口
@@ -127,8 +138,11 @@ rag-course-assistant/
 ## 🧪 测试
 
 ```bash
-python -m pytest              # 全部自动化用例（含 2 条 node 前端回归）
-python -m ruff check .        # 静态检查
+python -m pytest                              # 全部自动化用例（含 HTTP 集成与 node 前端回归）
+python -m ruff check .                        # 静态检查
+python -m evaluation.evaluate                 # 检索质量评测
+python -m evaluation.evaluate --thresholds    # 拒答阈值扫描
+python demo/seed_demo.py                      # 生成答辩演示数据
 ```
 
 测试覆盖后端单元（pytest，模型用 fake）、前端纯函数（node 回归）、端到端（`.tools/kb_e2e.py`）和性能/安全场景。阈值标定可参考 `.tools/kb_probe.py` / `.tools/kb_calibrate.py`。
