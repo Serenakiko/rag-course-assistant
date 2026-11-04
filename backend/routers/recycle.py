@@ -7,6 +7,7 @@ import logging
 import shutil
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -167,63 +168,69 @@ def restore_item(
             logger.exception("恢复知识点向量失败 point_id=%s", kp.id)
 
     restored_docs = failed_docs = 0
+    copied_paths: list[Path] = []
     settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    for d in data.get("docs") or []:
-        trash_name = d.get("trash_name") or ""
-        src = item_dir(item_id) / trash_name if trash_name else None
-        if src is None or not src.exists():
-            logger.warning("回收站里找不到文档源文件，跳过：%s", d.get("filename"))
-            continue
-        dest = settings.UPLOAD_DIR / f"{uuid.uuid4().hex}{src.suffix}"
-        try:
-            shutil.move(str(src), str(dest))
-        except OSError:
-            logger.exception("恢复文档文件失败 %s", src)
-            continue
-
-        doc = Document(
-            filename=d.get("filename") or dest.name,
-            file_type=d.get("file_type") or dest.suffix.lstrip("."),
-            file_size=int(d.get("file_size") or 0),
-            stored_path=str(dest),
-            status="processing",
-            course=name,
-            uploaded_by=_safe_uid(d.get("uploaded_by")),
-            is_seed=int(d.get("is_seed") or 0),
-        )
-        db.add(doc)
-        db.flush()
-
-        if doc.is_seed:
-            # 种子展示文档的正文已经作为知识点入过库，不再重复切分入库
-            doc.status = "ready"
-            restored_docs += 1
-            continue
-        try:
-            text = parse_file(dest)
-            chunks = split_text(text)
-            if not chunks:
-                raise ValueError("没有提取到有效文本")
-            count = add_document_chunks(doc.id, doc.filename, name, chunks)
-            doc.status = "ready"
-            doc.chunk_count = count
-            doc.error = ""
-            restored_docs += 1
-        except Exception as exc:  # noqa: BLE001
-            doc.status = "failed"
-            doc.error = str(exc)[:500]
-            failed_docs += 1
-            logger.exception("恢复文档向量失败 doc_id=%s", doc.id)
-
-    # 最后统一提交：库 + 知识点 + 文档一次落库，中间失败整体回滚不留半套。
-    # 注意 created_by 指向的用户若已被删，这里会因 FK 违约抛 500——所以先校验，
-    # 用户没了就落到当前管理员名下，避免空库已经 commit 进去。
-    db.delete(item)
     try:
+        for d in data.get("docs") or []:
+            trash_name = d.get("trash_name") or ""
+            src = item_dir(item_id) / trash_name if trash_name else None
+            if src is None or not src.exists():
+                logger.warning("回收站里找不到文档源文件，跳过：%s", d.get("filename"))
+                failed_docs += 1
+                continue
+            dest = settings.UPLOAD_DIR / f"{uuid.uuid4().hex}{src.suffix}"
+            # 先复制、提交成功后再删 trash：提交失败时原件还在，重试仍能恢复。
+            # 用 move 的话，提交失败后文件已离开 trash，重试会找不到文档。
+            # 先登记再复制：复制中途失败可能留下半截文件，回滚时也要一并清掉。
+            copied_paths.append(dest)
+            shutil.copy2(src, dest)
+
+            doc = Document(
+                filename=d.get("filename") or dest.name,
+                file_type=d.get("file_type") or dest.suffix.lstrip("."),
+                file_size=int(d.get("file_size") or 0),
+                stored_path=str(dest),
+                status="processing",
+                course=name,
+                uploaded_by=_safe_uid(d.get("uploaded_by")),
+                is_seed=int(d.get("is_seed") or 0),
+            )
+            db.add(doc)
+            db.flush()
+
+            if doc.is_seed:
+                # 种子展示文档的正文已经作为知识点入过库，不再重复切分入库
+                doc.status = "ready"
+                restored_docs += 1
+                continue
+            try:
+                text = parse_file(dest)
+                chunks = split_text(text)
+                if not chunks:
+                    raise ValueError("没有提取到有效文本")
+                count = add_document_chunks(doc.id, doc.filename, name, chunks)
+                doc.status = "ready"
+                doc.chunk_count = count
+                doc.error = ""
+                restored_docs += 1
+            except Exception as exc:  # noqa: BLE001
+                doc.status = "failed"
+                doc.error = str(exc)[:500]
+                failed_docs += 1
+                logger.exception("恢复文档向量失败 doc_id=%s", doc.id)
+
+        # 最后统一提交：库 + 知识点 + 文档一次落库，中间失败整体回滚不留半套。
+        # 注意 created_by 指向的用户若已被删，这里会因 FK 违约抛 500——所以先校验，
+        # 用户没了就落到当前管理员名下，避免空库已经 commit 进去。
+        db.delete(item)
         db.commit()
     except Exception:  # noqa: BLE001
         db.rollback()
-        logger.exception("恢复知识库提交失败，已整体回滚 item_id=%s", item_id)
+        # 回滚后 DB 里没有这些文档，复制出来的文件也要一并删掉；
+        # trash 里的原件保持不动，用户可以直接重试恢复。
+        for path in copied_paths:
+            path.unlink(missing_ok=True)
+        logger.exception("恢复知识库失败，已回滚 item_id=%s", item_id)
         raise HTTPException(status_code=500, detail="恢复失败，已回滚，请重试") from None
 
     shutil.rmtree(item_dir(item_id), ignore_errors=True)

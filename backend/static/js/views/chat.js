@@ -9,6 +9,7 @@ const ChatView = (() => {
   let sessionItems = [];      // 当前这一页会话（最近 20 条，或搜索结果）
   let sessionTotal = 0;       // 匹配总数（不搜索时就是全部会话数）
   let searchTimer = null;     // 搜索防抖
+  let selectedCourse = "";    // 本轮检索限定的课程；空串表示全部可见知识库
   const convMeta = new Map(); // id -> 会话概要：当前会话被挤出这一页时还能钉在最上面
   const SIDEBAR_LIMIT = 20;   // 侧边栏只取这么多条，再多去「对话历史」页
   const SEARCH_LIMIT = 50;    // 搜索结果最多取这么多条
@@ -56,6 +57,12 @@ const ChatView = (() => {
         <section class="chat-main">
           <div class="chat-messages" id="chat-messages"></div>
           <div class="chat-input-area">
+            <div class="chat-scope">
+              <label for="chat-course">检索范围</label>
+              <select id="chat-course" aria-label="检索范围">
+                <option value="">全部课程</option>
+              </select>
+            </div>
             <div class="chat-input-box">
               <textarea id="chat-input" rows="1" placeholder="输入你的问题，Enter 发送"></textarea>
               <button class="send-btn" id="send-btn" title="发送">
@@ -68,6 +75,21 @@ const ChatView = (() => {
 
     const inputEl = document.getElementById("chat-input");
     const sendBtn = document.getElementById("send-btn");
+    const courseEl = document.getElementById("chat-course");
+
+    courseEl.addEventListener("change", (e) => { selectedCourse = e.target.value; });
+    // 只列出当前用户可见的知识库；接口失败就保持「全部课程」
+    API.request("GET", "/api/knowledge/bases").then((bases) => {
+      const el = document.getElementById("chat-course");
+      if (!el) return;  // 请求返回前已切走页面
+      el.innerHTML = '<option value="">全部课程</option>' +
+        (bases || []).map((b) =>
+          `<option value="${Common.escapeHtml(b.name)}">${Common.escapeHtml(b.name)}</option>`
+        ).join("");
+      el.value = selectedCourse;
+      // 之前选的库被删或不再可见：回落到全部课程
+      if (el.value !== selectedCourse) selectedCourse = "";
+    }).catch(() => {});
 
     document.getElementById("chat-search").addEventListener("input", (e) => {
       sessionQuery = e.target.value;
@@ -505,6 +527,8 @@ const ChatView = (() => {
     activeSeq = seq;
     const silentUser = !!(opts && opts.silentUser);  // 补生成模式：不重复渲染提问
     const regenerate = !!(opts && opts.regenerate);  // 重新生成：后端不重复落提问、先删旧回答
+    const courses = opts && opts.courses ? opts.courses
+      : (selectedCourse ? [selectedCourse] : []);  // 空数组 = 全部可见知识库
     let bubble = null;
     let hadError = false;
     let errorMsg = "";
@@ -604,6 +628,7 @@ const ChatView = (() => {
         },
       }, {
         regenerate,
+        courses,
         // 空闲超时 > 后端 LLM_TIMEOUT(180s)：排队段有 10 秒心跳，生成段没有，
         // 冷启动首 token 可能一两分钟
         idleTimeout: 200_000,

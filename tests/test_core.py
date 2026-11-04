@@ -36,6 +36,42 @@ def _user(db: Session, username: str, role: str) -> User:
     return user
 
 
+def test_admin_create_blank_username_does_not_collide(db):
+    """空用户名回落到账号：第二个空用户名用户不能撞唯一索引。"""
+    from backend.routers.users import AdminUserCreate, admin_create_user
+
+    admin = _user(db, "10000001", "admin")
+    first = admin_create_user(
+        AdminUserCreate(account="20000001", password="secret1", username="", role="student"),
+        admin,
+        db,
+    )
+    second = admin_create_user(
+        AdminUserCreate(account="20000002", password="secret2", username="", role="student"),
+        admin,
+        db,
+    )
+    assert first.username == "20000001"
+    assert second.username == "20000002"
+
+
+def test_regenerate_requires_existing_conversation(db):
+    """新会话没有上一条回答，regenerate 必须直接拒绝，不能存出无提问的回答。"""
+    from backend.routers.chat import _prepare_ask
+    from backend.schemas import AskRequest
+
+    user = _user(db, "10000001", "student")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            _prepare_ask(
+                AskRequest(message="重新生成", regenerate=True, conversation_id=None),
+                user,
+                db,
+            )
+        )
+    assert exc.value.status_code == 400
+
+
 def test_course_visibility_and_write_guard(db):
     admin = _user(db, "10000001", "admin")
     alice = _user(db, "10000002", "student")

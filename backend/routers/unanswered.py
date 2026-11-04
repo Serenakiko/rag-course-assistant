@@ -301,7 +301,6 @@ async def regenerate_answer(
     if q is None:
         raise HTTPException(status_code=404, detail="记录不存在")
 
-    from ..models import utcnow
     from ..services.kb_scope import allowed_course_names
     from ..services.rag_service import generate_answer
 

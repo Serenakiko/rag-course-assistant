@@ -131,8 +131,12 @@ def process_document(doc_id: int, course: str) -> None:
         count = add_document_chunks(doc.id, doc.filename, course, chunks)
         # 写向量期间文档可能被删除：DB 行没了但向量已入库，留下检索得到、点开 404 的
         # 无主分块。落库前先确认行还在，没了就把刚写入的向量清掉再退出。
-        if session.get(Document, doc_id) is None:
-            delete_document(doc.id)
+        # 必须用新 session 查：当前 session 的 identity map 会返回缓存对象，SQLite
+        # 的读事务也可能停在旧快照上，两种都会让删除检测失效。
+        with SessionLocal() as check:
+            still_exists = check.scalar(select(Document.id).where(Document.id == doc_id))
+        if still_exists is None:
+            delete_document(doc_id, strict=False)
             return
         doc.status = "ready"
         doc.chunk_count = count
@@ -346,15 +350,19 @@ def remove_document(
     # 先删 DB 记录（事务），成功后再异步清理向量与文件。
     # 反过来的话：文件/向量删了、DB 删除失败，就出现「文件没了引用还在」或「向量没了记录还在」。
     stored_path = doc.stored_path
+    deleted_doc_id = doc.id
+    deleted_kp_ids = [kp.id for kp in auto_kps]
     for kp in auto_kps:
         db.delete(kp)
     db.delete(doc)
     db.commit()
 
     # DB 已删，向量与文件清理失败可重试（不影响主流程），只记日志。
-    delete_document(doc.id)
-    for kp in auto_kps:
-        delete_knowledge_point(kp.id)
+    if not delete_document(deleted_doc_id, strict=False):
+        logger.error("文档记录已删除，但向量清理失败，需重建向量库 doc_id=%s", deleted_doc_id)
+    for kp_id in deleted_kp_ids:
+        if not delete_knowledge_point(kp_id, strict=False):
+            logger.error("文档记录已删除，但自动知识点向量清理失败 point_id=%s", kp_id)
     if stored_path:
         Path(stored_path).unlink(missing_ok=True)
     return {"ok": True}

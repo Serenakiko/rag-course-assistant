@@ -1,11 +1,19 @@
 /* ============ 轻量 Markdown 渲染（离线可用，无第三方依赖） ============ */
 const Markdown = (() => {
   // 只放行安全协议，挡掉 javascript: / data: 这类可执行 URL
-  // 注意：不能放行「协议相对 URL」（//evil.com），否则会绕过协议白名单跳到外部站点。
-  // 结尾的 $ 保证 ^/ 只匹配「站内绝对路径」，不匹配以 // 开头的协议相对地址。
-  const SAFE_URL = /^(https?:|mailto:|\/|#)|^[^:]*$/i;
-  // 单独拦截协议相对 URL：以 // 开头的一律不放行
-  const isProtocolRelative = (u) => /^\/\//.test(u);
+  const SAFE_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
+  function isSafeUrl(raw) {
+    const u = String(raw || "").trim();
+    if (!u || /[\u0000-\u001f\u007f]/.test(u)) return false;
+    // 浏览器把反斜杠当斜杠：//evil.com、\\evil.com、\/evil.com 都会变成协议相对地址
+    if (/^[\\/]{2}/.test(u)) return false;
+    if (u.startsWith("#")) return true;
+    if (u.startsWith("/")) return true;  // 上面已排掉 //，这里只剩站内绝对路径
+    // 有 scheme 时只放行白名单；没有 scheme 的相对地址允许
+    const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(u);
+    if (!scheme) return true;
+    return SAFE_PROTOCOLS.has(scheme[1].toLowerCase() + ":");
+  }
 
   function inline(text) {
     // 先整体转义，之后的正则只在纯文本上工作，输出标签全部由本函数拼接
@@ -14,12 +22,12 @@ const Markdown = (() => {
     t = t.replace(/`([^`]+)`/g, (_, code) => `<code>${code}</code>`);
     // 图片
     t = t.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+[^)\s]+)?\)/g,
-      (_, alt, src) => (SAFE_URL.test(src) && !isProtocolRelative(src)
+      (_, alt, src) => (isSafeUrl(src)
         ? `<img src="${src}" alt="${alt}" style="max-width:100%;border-radius:8px">`
         : `![${alt}](${src})`));
     // 链接
     t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,
-      (_, label, href) => (SAFE_URL.test(href) && !isProtocolRelative(href)
+      (_, label, href) => (isSafeUrl(href)
         ? `<a href="${href}" target="_blank" rel="noopener">${label}</a>`
         : `[${label}](${href})`));
     // 粗体

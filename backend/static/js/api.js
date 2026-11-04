@@ -135,6 +135,7 @@ const API = (() => {
             conversation_id: conversationId,
             message,
             regenerate: !!opts.regenerate,
+            courses: opts.courses || [],
           }),
           signal: controller.signal,
         });

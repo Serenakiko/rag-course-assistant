@@ -552,6 +552,9 @@ async def _prepare_ask(
     """
     # 1. 定位或创建会话
     conversation_id = payload.conversation_id
+    if payload.regenerate and conversation_id is None:
+        # 新会话没有「上一条回答」可替换，继续下去会存出没有提问的回答
+        raise HTTPException(status_code=400, detail="重新生成必须指定原会话")
     if conversation_id is None:
         conv = Conversation(user_id=user.id, title=payload.message.strip()[:24] or "新会话")
         db.add(conv)
@@ -608,6 +611,8 @@ async def _prepare_ask(
             Message.role == "user",
         )
     )
+    if payload.regenerate and turn_user_id is None:
+        raise HTTPException(status_code=400, detail="该会话没有可重新生成的提问")
 
     # 检索范围：学生只能在可见知识库内检索，管理员不限制（None）。
     # 前端传了 courses（本轮选定课程）则优先用，但学生仍需落到可见范围内，

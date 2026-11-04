@@ -113,25 +113,41 @@ def _prune_expired(now: float) -> None:
             del store[key]
 
 
+def _is_trusted_proxy(host: str) -> bool:
+    """直连方是否为本机/内网代理（cpolar、nginx 等）。"""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host in ("localhost",)
+    # IPv4-mapped IPv6（::ffff:127.0.0.1）按 IPv4 判断
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_loopback or ip.is_private
+
+
 def _client_ip(request: Request) -> str:
     """取客户端真实 IP。
 
-    反向代理 / cpolar 隧道下，request.client.host 永远是 127.0.0.1，
-    所有公网用户会被当成同一个 IP，限流会误伤全班。优先读 X-Forwarded-For
-    的第一个值（离客户端最近的一跳），并做白名单过滤防伪造。
+    反向代理 / cpolar 隧道下，request.client.host 是 127.0.0.1，所有公网用户会被
+    当成同一个 IP，限流会误伤全班。只有直连方确实是本机/内网代理时才信任
+    X-Forwarded-For；公网客户端直连时伪造该头会被忽略，无法绕过 IP 限流。
+
+    取最后一个合法 IP：代理通常把真实客户端追加到末尾，这样客户端自带的伪造
+    前缀不会生效。
     """
+    peer = request.client.host if request.client else "-"
+    if not _is_trusted_proxy(peer):
+        return peer
     xff = request.headers.get("X-Forwarded-For", "")
     if xff:
-        # 只取最靠客户端的一跳；每跳都必须是合法 IP，否则整个回退
         candidates = [p.strip() for p in xff.split(",") if p.strip()]
-        if candidates:
-            first = candidates[0]
+        for candidate in reversed(candidates):
             try:
-                ipaddress.ip_address(first)
-                return first
+                ipaddress.ip_address(candidate)
+                return candidate
             except ValueError:
-                pass
-    return request.client.host if request.client else "-"
+                continue
+    return peer
 
 
 def _login_key(request: Request, account: str) -> str:
@@ -328,11 +344,15 @@ async def upload_avatar(
         raise HTTPException(status_code=400, detail="仅支持 png/jpg/jpeg/gif/webp 图片")
     if (file.size or 0) > AVATAR_MAX_SIZE:
         raise HTTPException(status_code=400, detail="图片不能超过 2MB")
-    data = await file.read()
+    # 分块读，超过上限立刻中止：一次性 read() 会先把超大文件整个读进内存
+    data = bytearray()
+    while chunk := await file.read(64 * 1024):
+        data.extend(chunk)
+        if len(data) > AVATAR_MAX_SIZE:
+            raise HTTPException(status_code=400, detail="图片不能超过 2MB")
     if not data:
         raise HTTPException(status_code=400, detail="文件为空")
-    if len(data) > AVATAR_MAX_SIZE:
-        raise HTTPException(status_code=400, detail="图片不能超过 2MB")
+    data = bytes(data)
     if not _looks_like_image(data, ext):
         raise HTTPException(status_code=400, detail="文件内容不是有效的图片")
     AVATAR_DIR.mkdir(parents=True, exist_ok=True)

@@ -202,18 +202,20 @@ def admin_stats(
     # 取被问得最多的问题。不用分词（无 jieba），原问归一化更能反映「高频困惑点」，
     # 便于管理员针对性补料。
     hot_questions: list[dict] = []
-    question_rows = db.execute(
+    question_result = db.execute(
         select(Message.content).where(
             Message.role == "user", Message.content.isnot(None), Message.content != ""
         )
-    ).scalars().all()
-    if question_rows:
-        qcount: dict[str, int] = {}
-        for raw in question_rows:
+    )
+    qcount: dict[str, int] = {}
+    # 分批取，避免消息量上来后一次性把全部提问读进内存
+    while batch := question_result.fetchmany(1000):
+        for (raw,) in batch:
             norm = " ".join((raw or "").strip().split())
             if not norm:
                 continue
             qcount[norm] = qcount.get(norm, 0) + 1
+    if qcount:
         top = sorted(qcount.items(), key=lambda x: (-x[1], x[0]))[:8]
         hot_questions = [{"question": q, "count": c} for q, c in top]
 
@@ -257,11 +259,11 @@ def doc_usage_stats(
     死资料 = documents（ready 状态）的 filename + knowledge_points 的 title
     中，从未作为真实来源被引用的那一部分。
     """
-    rows = db.execute(
+    source_result = db.execute(
         select(Message.sources).where(
             Message.role == "assistant", Message.sources.isnot(None), Message.sources != "[]"
         )
-    ).scalars().all()
+    )
 
     # 用 (source_type, doc_id/point_id) 作为统计键，而不是标题字符串：
     # 不同课程的文档可能同名（都叫「第一章.pdf」），按标题统计会把它们的引用
@@ -269,29 +271,31 @@ def doc_usage_stats(
     key_count: dict[tuple, int] = {}
     key_course: dict[tuple, str] = {}
     key_title: dict[tuple, str] = {}
-    for raw in rows:
-        try:
-            sources = json.loads(raw or "[]")
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(sources, list):
-            continue
-        for src in sources:
-            if not isinstance(src, dict):
+    # 分批取，避免历史回答多时把全部 sources 一次性读进内存
+    while batch := source_result.fetchmany(1000):
+        for (raw,) in batch:
+            try:
+                sources = json.loads(raw or "[]")
+            except (ValueError, TypeError):
                 continue
-            source_type = src.get("source_type")
-            if source_type not in ("document", "knowledge_point"):
+            if not isinstance(sources, list):
                 continue
-            oid = src.get("doc_id") if source_type == "document" else src.get("point_id")
-            if oid is None:
-                # 老数据可能没有 id（只有 title），退回用 title 兜底，保证不丢历史计数
-                oid = src.get("title") or ""
-            key = (source_type, str(oid))
-            title = (src.get("title") or "").strip() or str(oid)
-            key_count[key] = key_count.get(key, 0) + 1
-            if not key_course.get(key) and src.get("course"):
-                key_course[key] = src.get("course")
-            key_title[key] = title
+            for src in sources:
+                if not isinstance(src, dict):
+                    continue
+                source_type = src.get("source_type")
+                if source_type not in ("document", "knowledge_point"):
+                    continue
+                oid = src.get("doc_id") if source_type == "document" else src.get("point_id")
+                if oid is None:
+                    # 老数据可能没有 id（只有 title），退回用 title 兜底，保证不丢历史计数
+                    oid = src.get("title") or ""
+                key = (source_type, str(oid))
+                title = (src.get("title") or "").strip() or str(oid)
+                key_count[key] = key_count.get(key, 0) + 1
+                if not key_course.get(key) and src.get("course"):
+                    key_course[key] = src.get("course")
+                key_title[key] = title
 
     # 全量资料（文档 + 手工知识点），用于找「从未被引用」的死资料
     docs = db.execute(

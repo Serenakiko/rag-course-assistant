@@ -13,11 +13,11 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, or_, select
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session, joinedload
 
-from ..database import get_db
+from ..database import SessionLocal, get_db
 from ..deps import get_current_user
 from ..models import Document, KnowledgeBase, KnowledgePoint, UnansweredQuestion, User
 from ..schemas import (
@@ -226,10 +226,61 @@ def create_base(
     return base
 
 
+def _rebuild_base_vectors(
+    point_rows: list[tuple[int, str, str, str]],
+    doc_rows: list[tuple[int, str, str]],
+    course: str,
+) -> None:
+    """改名后异步重建向量。
+
+    改名已经提交，重建期间旧 course 的向量暂时查不到；放在后台是为了避免大库
+    在请求内同步重算导致网关超时。只处理仍在库里、且 course 已改到新名字的记录，
+    防止给刚被删除的资料写回孤儿向量。
+    """
+    session = SessionLocal()
+    try:
+        for point_id, title, content, tags in point_rows:
+            still_exists = session.scalar(
+                select(KnowledgePoint.id).where(
+                    KnowledgePoint.id == point_id,
+                    KnowledgePoint.course == course,
+                )
+            )
+            if still_exists is None:
+                continue
+            try:
+                update_knowledge_point(point_id, title, content, course, tags)
+            except Exception:  # noqa: BLE001
+                logger.exception("改名后重建知识点向量失败 point_id=%s", point_id)
+                # 旧 course 的向量必须清掉，否则检索 filter 永远匹配不到
+                delete_knowledge_point(point_id, strict=False)
+        for doc_id, stored_path, filename in doc_rows:
+            still_exists = session.scalar(
+                select(Document.id).where(
+                    Document.id == doc_id,
+                    Document.course == course,
+                )
+            )
+            if still_exists is None:
+                continue
+            try:
+                text = parse_file(Path(stored_path))
+                chunks = split_text(text)
+                delete_document(doc_id, strict=False)
+                if chunks:
+                    add_document_chunks(doc_id, filename, course, chunks)
+            except Exception:  # noqa: BLE001
+                logger.exception("改名后重建文档向量失败 doc_id=%s", doc_id)
+                delete_document(doc_id, strict=False)
+    finally:
+        session.close()
+
+
 @router.put("/bases/{base_id}", response_model=KnowledgeBaseOut, summary="更新知识库")
 def update_base(
     base_id: int,
     payload: KnowledgeBaseIn,
+    background: BackgroundTasks,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> KnowledgeBase:
@@ -254,34 +305,25 @@ def update_base(
             db.scalars(select(KnowledgePoint).where(KnowledgePoint.course == old_name))
         )
         docs = list(db.scalars(select(Document).where(Document.course == old_name)))
-        # 先改库并提交，再重建向量；单条失败只记日志
+        # 在提交前把重建所需的数据取成普通值，后台任务不再依赖 ORM 对象
+        point_rows = [(p.id, p.title, p.content, p.tags) for p in points]
+        doc_rows = [(d.id, d.stored_path, d.filename) for d in docs]
+        # 先改库并提交，向量交给后台重建；单条失败只记日志
         for p in points:
             p.course = name
         for d in docs:
             d.course = name
+        # 未命中问题也存了课程名，不同步会让改名前的问题继续挂在旧库下
+        db.execute(
+            update(UnansweredQuestion)
+            .where(UnansweredQuestion.course == old_name)
+            .values(course=name)
+        )
         base.name = name
         base.description = payload.description.strip()
         db.commit()
         db.refresh(base)
-        for p in points:
-            try:
-                update_knowledge_point(p.id, p.title, p.content, name, p.tags)
-            except Exception:  # noqa: BLE001
-                logger.exception("改名后重建知识点向量失败 point_id=%s", p.id)
-                # 旧课程名的向量必须清掉，否则 metadata 停在旧 course，
-                # 而检索 filter 是 {course: {$in: courses}} → 这条知识点改名后静默查不到。
-                delete_knowledge_point(p.id)
-        for d in docs:
-            try:
-                text = parse_file(Path(d.stored_path))
-                chunks = split_text(text)
-                delete_document(d.id)
-                if chunks:
-                    add_document_chunks(d.id, d.filename, name, chunks)
-            except Exception:  # noqa: BLE001
-                logger.exception("改名后重建文档向量失败 doc_id=%s", d.id)
-                # 旧课程名的向量必须清掉，避免检索到过期归属
-                delete_document(d.id)
+        background.add_task(_rebuild_base_vectors, point_rows, doc_rows, name)
         return base
     base.description = payload.description.strip()
     db.commit()
@@ -303,19 +345,23 @@ def remove_base(
     # 先落一份回收站快照（库 + 知识点 + 文档，源文件移到 trash 目录），
     # 再照常删除；30 天内误删可恢复
     snapshot_base(db, base, user.id)
-    # 先删向量，再删记录
+    # 先删向量，再删记录。这里不能用 strict：快照阶段源文件已经移进 trash，
+    # 此时因向量删除失败而中止会留下「DB 记录还在、文件却没了」的坏库。
+    # 删除失败只记日志，保证记录与文件至少同步消失。
     points = list(
         db.scalars(select(KnowledgePoint).where(KnowledgePoint.course == base.name))
     )
     for p in points:
-        delete_knowledge_point(p.id)
+        if not delete_knowledge_point(p.id, strict=False):
+            logger.error("删除知识库时知识点向量清理失败 point_id=%s", p.id)
     db.execute(
         KnowledgePoint.__table__.delete().where(KnowledgePoint.course == base.name)
     )
     # 文档连同向量、源文件一起删，否则会变成孤儿继续出现在文档管理里
     docs = list(db.scalars(select(Document).where(Document.course == base.name)))
     for d in docs:
-        delete_document(d.id)
+        if not delete_document(d.id, strict=False):
+            logger.error("删除知识库时文档向量清理失败 doc_id=%s", d.id)
         Path(d.stored_path).unlink(missing_ok=True)
         db.delete(d)
     db.delete(base)

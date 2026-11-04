@@ -61,6 +61,12 @@ check("javascript: 原样保留为文本", jsLink.includes("javascript:alert(1)"
 const okLink = Markdown.render("[文档](https://example.com/a)");
 check("https 链接正常生成", okLink.includes('<a href="https://example.com/a" target="_blank" rel="noopener">'));
 
+// 反斜杠会被浏览器当成斜杠：\\evil.com / \/evil.com 等价于 //evil.com
+const bsLink = Markdown.render("[文档](\\\\evil.com)");
+check("反斜杠协议相对地址不生成链接", !bsLink.includes("<a "));
+const mixedBsLink = Markdown.render("[文档](\\/evil.com)");
+check("混合斜杠协议相对地址不生成链接", !mixedBsLink.includes("<a "));
+
 const relLink = Markdown.render("[相对](/static/app.html)");
 check("站内相对链接正常生成", relLink.includes('href="/static/app.html"'));
 

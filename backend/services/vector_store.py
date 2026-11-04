@@ -196,8 +196,14 @@ def _next_version(source_type: str, oid: str) -> int:
         return 1
 
 
-def _delete_document_versions(doc_id: int, keep_version: int | None = None) -> None:
-    """删除某文档的全部向量（可按版本保留最新一份）。"""
+def _delete_document_versions(
+    doc_id: int, keep_version: int | None = None, *, strict: bool = False
+) -> bool:
+    """删除某文档的全部向量（可按版本保留最新一份）。
+
+    返回是否成功。strict=True 时失败会抛出，供「先删向量、再删 DB」的调用方
+    保留记录让用户重试；strict=False 用于 DB 已删后的收尾，失败只记日志。
+    """
     try:
         collection = get_collection()
         if keep_version is not None:
@@ -216,12 +222,21 @@ def _delete_document_versions(doc_id: int, keep_version: int | None = None) -> N
                 where={"$and": [{"source_type": "document"}, {"doc_id": str(doc_id)}]}
             )
     except Exception:  # noqa: BLE001
-        logger.warning("删除文档向量失败 doc_id=%s（该文档可能仍会被检索到）", doc_id, exc_info=True)
+        logger.error(
+            "删除文档向量失败 doc_id=%s（该文档可能仍会被检索到）", doc_id, exc_info=True
+        )
+        if strict:
+            raise
+        return False
+    return True
 
 
-def delete_document(doc_id: int) -> None:
-    """删除某文档的全部向量（不存在时静默跳过）。"""
-    _delete_document_versions(doc_id)
+def delete_document(doc_id: int, *, strict: bool = True) -> bool:
+    """删除某文档的全部向量（不存在时静默跳过）。
+
+    默认 strict=True：删除失败会抛出，调用方据此保留 DB 记录并让用户重试。
+    """
+    return _delete_document_versions(doc_id, strict=strict)
 
 
 # ---------- 知识点 ----------
@@ -241,7 +256,9 @@ def add_knowledge_point(point_id: int, title: str, content: str, course: str, ta
     _delete_point_versions(point_id, keep_version=version)
 
 
-def _delete_point_versions(point_id: int, keep_version: int | None = None) -> None:
+def _delete_point_versions(
+    point_id: int, keep_version: int | None = None, *, strict: bool = False
+) -> bool:
     try:
         collection = get_collection()
         data = collection.get(
@@ -255,7 +272,15 @@ def _delete_point_versions(point_id: int, keep_version: int | None = None) -> No
         if ids:
             collection.delete(ids=ids)
     except Exception:  # noqa: BLE001
-        logger.warning("删除知识点向量失败 point_id=%s（该知识点可能仍会被检索到）", point_id, exc_info=True)
+        logger.error(
+            "删除知识点向量失败 point_id=%s（该知识点可能仍会被检索到）",
+            point_id,
+            exc_info=True,
+        )
+        if strict:
+            raise
+        return False
+    return True
 
 
 def update_knowledge_point(point_id: int, title: str, content: str, course: str, tags: str) -> None:
@@ -263,8 +288,9 @@ def update_knowledge_point(point_id: int, title: str, content: str, course: str,
     add_knowledge_point(point_id, title, content, course, tags)
 
 
-def delete_knowledge_point(point_id: int) -> None:
-    _delete_point_versions(point_id)
+def delete_knowledge_point(point_id: int, *, strict: bool = True) -> bool:
+    """删除某知识点的全部向量；默认 strict=True，失败时抛出供调用方保留 DB 记录。"""
+    return _delete_point_versions(point_id, strict=strict)
 
 
 # ---------- 检索 ----------

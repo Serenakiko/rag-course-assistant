@@ -107,11 +107,11 @@ def admin_create_user(
     exists = db.scalar(select(User).where(User.account == account))
     if exists is not None:
         raise HTTPException(status_code=409, detail="账号已存在")
-    username = payload.username.strip()
-    if username:
-        name_exists = db.scalar(select(User.id).where(User.username == username))
-        if name_exists is not None:
-            raise HTTPException(status_code=409, detail="用户名已存在")
+    # 与注册保持一致：空用户名回落到账号，避免第二个空用户名撞唯一索引
+    username = payload.username.strip() or account
+    name_exists = db.scalar(select(User.id).where(User.username == username))
+    if name_exists is not None:
+        raise HTTPException(status_code=409, detail="用户名已存在")
     user = User(
         account=account,
         password_hash=hash_password(payload.password),
