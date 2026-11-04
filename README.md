@@ -66,7 +66,7 @@ cp .env.example .env
 python run.py
 ```
 
-> Windows 用户也可直接双击 `start.bat`（一键启动，用项目内 venv）。
+> Windows 用户也可直接双击 `start.bat`（一键启动）：优先使用项目内 `venv\Scripts\python.exe`，没有建 venv 时自动回退到 PATH 里的 `python`，两者都能启动。
 
 ### 默认账号
 
