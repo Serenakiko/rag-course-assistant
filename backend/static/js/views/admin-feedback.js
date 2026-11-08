@@ -170,10 +170,10 @@ const AdminFeedbackView = (() => {
       list.innerHTML = `<div class="fb-empty">
         <div class="fb-empty-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
         <p>${uqStatus === "pending"
-          ? "没有待处理的问题反馈"
+          ? "没有待处理的未命中问题"
           : uqStatus === "resolved"
             ? "还没有已解决的反馈"
-            : "还没有收到问题反馈"}</p>
+            : "还没有收到未命中问题"}</p>
       </div>`;
       Common.renderPagination("uq-pagination", 0, 1, uqPageSize, () => {}, {
         sizeOptions: [10, 20],

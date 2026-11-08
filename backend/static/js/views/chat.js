@@ -688,7 +688,7 @@ const ChatView = (() => {
           if (!body || body.querySelector(".msg-note")) return;
           const tip = document.createElement("div");
           tip.className = "msg-note";
-          tip.innerHTML = "该问题暂未在知识库中命中，已自动提交跟进；解决后可在侧边栏「我的反馈」中查看";
+          tip.innerHTML = "该问题暂未在知识库中命中，已自动提交跟进；解决后可在侧边栏「答疑进度」中查看";
           body.appendChild(tip);
           phaseEl.dataset.status = "unmatched";
           phaseText.textContent = "知识库未命中";

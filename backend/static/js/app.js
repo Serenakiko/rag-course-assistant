@@ -110,59 +110,66 @@ const App = (() => {
     bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>',
   };
 
-  // 侧边栏顺序：高频核心动作在前，账号类（个人中心）放在最后一组，不要单独沉底。
-  // 学生：首页 / 智能问答（一级入口）→ 学习记录（历史/反馈）→ 课程资料（知识库/我的文档）
-  // 管理员：概览 → 内容管理（知识库与文档/回收站）→ 教学运营（反馈/历史/自测问答）→ 系统管理（用户）
+  // 侧边栏按角色任务组织：学生看学习闭环，管理员看问答运营闭环。
+  // 个人中心统一放进底部账号区，不再重复占用导航项。
   const NAV = [
     { group: "", roles: ["student"], items: [
-      { key: "workbench", icon: ICON.home, label: "首页" },
+      { key: "workbench", icon: ICON.home, label: "学习首页" },
       { key: "chat", icon: ICON.chat, label: "智能问答" },
     ]},
     { group: "学习记录", roles: ["student"], items: [
-      { key: "history", icon: ICON.history, label: "对话历史" },
-      { key: "feedback", icon: ICON.unanswered, label: "我的反馈" },
+      { key: "history", icon: ICON.history, label: "全部会话" },
+      { key: "feedback", icon: ICON.unanswered, label: "答疑进度" },
     ]},
     { group: "课程资料", roles: ["student"], items: [
-      { key: "knowledge", icon: ICON.knowledge, label: "知识库" },
-      { key: "documents", icon: ICON.documents, label: "我的文档" },
+      { key: "knowledge", icon: ICON.knowledge, label: "课程知识库" },
+      { key: "documents", icon: ICON.documents, label: "我的资料" },
     ]},
     { group: "", roles: ["admin"], items: [
-      { key: "overview", icon: ICON.overview, label: "数据概览" },
+      { key: "overview", icon: ICON.overview, label: "运营概览" },
+    ]},
+    { group: "问答运营", roles: ["admin"], items: [
+      { key: "unanswered", icon: ICON.unanswered, label: "未命中问题" },
+      { key: "history", icon: ICON.history, label: "会话审阅" },
+      { key: "chat", icon: ICON.chat, label: "问答自测" },
     ]},
     { group: "内容管理", roles: ["admin"], items: [
       { key: "content", icon: ICON.knowledge, label: "知识库与文档" },
       { key: "recycle", icon: ICON.trash, label: "回收站" },
     ]},
-    { group: "教学运营", roles: ["admin"], items: [
-      { key: "unanswered", icon: ICON.unanswered, label: "问题反馈" },
-      { key: "history", icon: ICON.history, label: "对话历史" },
-      { key: "chat", icon: ICON.chat, label: "智能问答" },
-    ]},
     { group: "系统管理", roles: ["admin"], items: [
       { key: "users", icon: ICON.users, label: "用户管理" },
     ]},
-    // 账号类和其他组连在一起，不要再沉到底部留一大块空白
-    { group: "账号", roles: ["student", "admin"], items: [
-      { key: "settings", icon: ICON.user, label: "个人中心" },
-    ]},
   ];
 
-
+  const ROLE_LABELS = {
+    student: "学生",
+    admin: "管理员",
+  };
 
   const TITLES = {
-    workbench: "首页",
-    knowledge: "知识库",
-    chat: "智能问答",
-    history: "对话历史",
-    settings: "个人中心",
-    overview: "数据概览",
-    users: "用户管理",
-    kb: "知识库管理",
-    documents: "文档管理",
-    content: "知识库与文档",
-    recycle: "回收站",
-    unanswered: "问题反馈",
-    feedback: "我的反馈",
+    student: {
+      workbench: "学习首页",
+      knowledge: "课程知识库",
+      documents: "我的资料",
+      history: "全部会话",
+      feedback: "答疑进度",
+      chat: "智能问答",
+      settings: "个人中心",
+    },
+    admin: {
+      overview: "运营概览",
+      unanswered: "未命中问题",
+      feedback: "未命中问题",
+      history: "会话审阅",
+      chat: "问答自测",
+      content: "知识库与文档",
+      recycle: "回收站",
+      users: "用户管理",
+      settings: "个人中心",
+      kb: "知识库管理",
+      documents: "文档管理",
+    },
   };
 
   let currentView = null;
@@ -220,13 +227,10 @@ const App = (() => {
       if (!ok) return;
       doLogout();
     });
-    // 点击头像直接弹“更换头像”
-    const avatarEl = document.getElementById("user-avatar");
-    avatarEl.title = "点击更换头像";
-    avatarEl.addEventListener("click", (e) => {
-      e.stopPropagation();
-      ProfileView.openAvatarModal();
-    });
+    const profileBtn = document.getElementById("user-profile-btn");
+    if (profileBtn) {
+      profileBtn.addEventListener("click", () => navigate("settings"));
+    }
     navigate(
       mustChangePassword
         ? "settings"
@@ -239,16 +243,23 @@ const App = (() => {
 
   function refreshUserInfo() {
     const user = API.getUser();
+    const role = user.role === "admin" ? "admin" : "student";
     document.getElementById("user-avatar").innerHTML = Common.avatarContent(user);
-    document.getElementById("user-name").textContent = user.username || user.account;
+    const displayName = user.username || user.account;
+    document.getElementById("user-name").textContent = displayName;
+    const profileBtn = document.getElementById("user-profile-btn");
+    if (profileBtn) profileBtn.setAttribute("aria-label", `${displayName}，进入个人中心`);
     const roleEl = document.getElementById("user-role");
-    if (roleEl) roleEl.style.display = "none";  // 侧边栏用户区不显示角色小字
+    if (roleEl) {
+      roleEl.textContent = ROLE_LABELS[role];
+      roleEl.style.display = "";
+    }
   }
 
   function navItemHtml(it) {
     return `
-        <button class="nav-item" data-key="${it.key}">
-          <span class="nav-icon">${it.icon}</span><span>${it.label}</span>
+        <button type="button" class="nav-item" data-key="${it.key}" title="${it.label}" aria-label="${it.label}">
+          <span class="nav-icon">${it.icon}</span><span class="nav-label">${it.label}</span>
         </button>`;
   }
 
@@ -277,10 +288,21 @@ const App = (() => {
     const role = API.getUser().role;
     // 兼容旧入口：管理员的 kb / documents 都落在「知识库与文档」上，高亮同一项
     const activeKey = role === "admin" && (key === "kb" || key === "documents") ? "content" : key;
-    document.querySelectorAll(".nav-item").forEach((b) =>
-      b.classList.toggle("active", b.dataset.key === activeKey));
+    document.querySelectorAll(".nav-item").forEach((b) => {
+      const active = b.dataset.key === activeKey;
+      b.classList.toggle("active", active);
+      if (active) b.setAttribute("aria-current", "page");
+      else b.removeAttribute("aria-current");
+    });
+    const profileBtn = document.getElementById("user-profile-btn");
+    if (profileBtn) {
+      const active = key === "settings";
+      profileBtn.classList.toggle("active", active);
+      if (active) profileBtn.setAttribute("aria-current", "page");
+      else profileBtn.removeAttribute("aria-current");
+    }
     document.getElementById("page-title").textContent =
-      key === "documents" && role === "student" ? "我的文档" : (TITLES[key] || "智答系统");
+      (TITLES[role] && TITLES[role][key]) || "智答系统";
     const container = document.getElementById("main-content");
     container.innerHTML = "";
 
@@ -319,8 +341,8 @@ const App = (() => {
     NotifyCenter.refresh();
   }
 
-  // 侧边栏不再显示反馈角标：新回答直接在「我的反馈」列表里标「新回答」
-  /* ---------- 窄屏抽屉导航（≤640px） ---------- */
+  // 未读数量只由顶部通知铃铛提示，侧边栏保持纯导航。
+  /* ---------- 窄屏抽屉导航（≤768px） ---------- */
   function setupMobileNav() {
     const toggle = document.getElementById("nav-toggle");
     const backdrop = document.getElementById("nav-backdrop");
@@ -328,7 +350,7 @@ const App = (() => {
     if (!toggle || !backdrop || !sidebar) return;
 
     const isOpen = () => document.body.classList.contains("nav-open");
-    const mobileQuery = window.matchMedia("(max-width: 640px)");
+    const mobileQuery = window.matchMedia("(max-width: 768px)");
     const syncAccessibility = () => {
       if (mobileQuery.matches) {
         sidebar.setAttribute("aria-hidden", String(!isOpen()));
@@ -365,12 +387,12 @@ const App = (() => {
     });
     mobileQuery.addEventListener("change", syncAccessibility);
     window.addEventListener("resize", () => {
-      if (window.innerWidth > 640 && isOpen()) setOpen(false, false);
+      if (window.innerWidth > 768 && isOpen()) setOpen(false, false);
     });
     syncAccessibility();
   }
 
-  return { init, refreshUserInfo, navigate };
+  return { init, refreshUserInfo, renderNav, navigate };
 })();
 
 document.addEventListener("DOMContentLoaded", () => App.init());

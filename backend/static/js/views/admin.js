@@ -45,7 +45,7 @@ const AdminView = (() => {
         </div>
         <div class="card" id="fb-card" style="display:none">
           <div class="row-between mb-16">
-            <b>问题反馈</b>
+            <b>未命中问题</b>
             <button class="btn btn-sm" id="fb-all">查看全部</button>
           </div>
           <div id="fb-list"></div>
@@ -437,20 +437,18 @@ const AdminView = (() => {
         const isSystem = u.account === SYSTEM_ADMIN_ACCOUNT;
         const canEdit = !isSystem || iAmSystem;
         const badge = isSystem
-          ? '<span class="badge badge-admin">系统管理员</span>'
+          ? ""
           : (u.id === me.id ? '<span class="badge badge-student">我</span>' : "");
         return `
         <tr>
           <td data-label="序号">${(usersPage - 1) * usersPageSize + i + 1}</td>
           <td data-label="账号">${Common.escapeHtml(u.account)} ${badge}</td>
           <td data-label="用户名">${Common.escapeHtml(u.username || "-")}</td>
-          <td data-label="角色"><span class="role-badge ${u.role}">${u.role === "admin" ? "管理员" : "学生"}</span></td>
+          <td data-label="角色"><span class="role-badge ${isSystem ? "system-admin" : u.role}">${isSystem ? "系统管理员" : (u.role === "admin" ? "管理员" : "学生")}</span></td>
           <td data-label="提问数" class="muted">${u.question_count || 0}</td>
           <td data-label="创建时间" class="muted">${Common.fmtTime(u.created_at)}</td>
           <td data-label="操作">
-            ${canEdit
-              ? `<button class="ops-link edit" data-edit="${u.id}">编辑</button>`
-              : `<span class="muted" title="系统管理员账号仅限本人修改">受保护</span>`}
+            ${canEdit ? `<button class="ops-link edit" data-edit="${u.id}">编辑</button>` : ""}
             ${u.id !== me.id && !isSystem ? `<button class="ops-link del" data-del="${u.id}">删除</button>` : ""}
           </td>
         </tr>`;
@@ -493,11 +491,12 @@ const AdminView = (() => {
       </div>
       <div class="form-group">
         <label>角色</label>
-        <select class="form-control" id="u-role" ${isSystem ? "disabled" : ""}>
-          <option value="student" ${isEdit && user.role === "student" ? "selected" : ""}>学生</option>
-          <option value="admin" ${isEdit && user.role === "admin" ? "selected" : ""}>管理员</option>
-        </select>
-        ${isSystem ? `<div class="form-hint" style="margin-top:6px;color:var(--text-3);font-size:12.5px">系统管理员身份不可取消</div>` : ""}
+        ${isSystem
+          ? `<input class="form-control" id="u-role" value="系统管理员" readonly aria-readonly="true">`
+          : `<select class="form-control" id="u-role">
+              <option value="student" ${isEdit && user.role === "student" ? "selected" : ""}>学生</option>
+              <option value="admin" ${isEdit && user.role === "admin" ? "selected" : ""}>管理员</option>
+            </select>`}
       </div>
       <div class="form-group">
         <label>${isEdit ? "重置密码" : "初始密码"}</label>
@@ -513,7 +512,7 @@ const AdminView = (() => {
         const btn = box.querySelector("#u-save");
         const payload = {
           username: box.querySelector("#u-name").value.trim(),
-          role: box.querySelector("#u-role").value,
+          role: isSystem ? "admin" : box.querySelector("#u-role").value,
         };
         const pwd = box.querySelector("#u-pwd").value;
         if (pwd) payload.new_password = pwd;

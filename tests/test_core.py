@@ -505,6 +505,40 @@ def test_regenerate_unmatched_returns_to_pending(monkeypatch, db):
     assert rec.read_at is None           # 重新计为未读，学生端能看到“有更新”
 
 
+def test_regenerate_resource_error_explains_memory_shortage(monkeypatch, db):
+    """管理员重新生成遇到模型内存不足时，应提示内存问题而不是泛化成生成失败。"""
+    from backend.models import UnansweredQuestion
+    from backend.routers import unanswered as uq_mod
+    from backend.services import rag_service
+
+    admin = _user(db, "10000093", "admin")
+    student = _user(db, "10000094", "student")
+    rec = UnansweredQuestion(
+        question="进程和线程有什么区别",
+        course="操作系统",
+        status="pending",
+        answer="",
+        created_by=student.id,
+    )
+    db.add(rec)
+    db.commit()
+
+    async def fake_generate(question, courses=None):
+        return {
+            "answer": "",
+            "recommended": [],
+            "matched": False,
+            "error": "resource",
+        }
+
+    monkeypatch.setattr(rag_service, "generate_answer", fake_generate)
+    out = asyncio.run(uq_mod.regenerate_answer(rec.id, admin, db))
+
+    assert out["ok"] is False
+    assert out["resolved"] is False
+    assert "内存不足" in out["message"]
+
+
 def test_like_escape():
     """搜索词里的 % 和 _ 不能当 LIKE 通配符用（全站共用 services.like）。"""
     from backend.services.like import LIKE_ESCAPE, escape_like
@@ -638,6 +672,11 @@ def test_frontend_pagination_script():
 def test_frontend_markdown_script():
     """前端 Markdown 回归：回答正文里的 HTML 必须转义、危险协议不生成链接。"""
     _run_node_script("frontend_markdown.mjs", "前端 Markdown 回归")
+
+
+def test_frontend_navigation_script():
+    """前端导航回归：双角色菜单名称、顺序与可访问名称保持角色语义。"""
+    _run_node_script("frontend_navigation.mjs", "前端导航回归")
 
 
 def test_documents_list_is_paginated_and_scoped(db):

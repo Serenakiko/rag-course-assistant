@@ -42,7 +42,7 @@ const WorkbenchView = (() => {
         <div class="wb-func-card" data-go="knowledge">
           <div class="wb-func-icon orange">${S.book}</div>
           <div style="flex:1;min-width:0">
-            <div class="wb-func-name">知识库</div>
+            <div class="wb-func-name">课程知识库</div>
             <div class="wb-func-desc">查看课程资料与知识点，随时查阅</div>
           </div>
         </div>
@@ -64,7 +64,7 @@ const WorkbenchView = (() => {
 
       <div class="card wb-fb-card" id="wb-resolved">
         <div class="row-between mb-16">
-          <b>我的反馈</b>
+          <b>答疑进度</b>
           <button class="btn btn-sm" id="wb-fb-all">查看全部</button>
         </div>
         <div class="wb-fb-list" id="wb-resolved-list"><div class="fb-loading"><span class="loading-spinner"></span></div></div>
@@ -131,7 +131,7 @@ const WorkbenchView = (() => {
       const listEl = document.getElementById("wb-resolved-list");
       if (listEl) {
         if (!items || !items.length) {
-          listEl.innerHTML = `<div class="wb-fb-empty">还没有提交过反馈。提问时如果知识库里没有相关内容，会自动记到这里；管理员补完资料后，你能在这里看到回答。</div>`;
+          listEl.innerHTML = `<div class="wb-fb-empty">还没有待跟进的答疑。提问时如果知识库里没有相关内容，会自动记到这里；管理员补完资料后，你能在这里看到回答。</div>`;
         } else {
           listEl.innerHTML = items.slice(0, 5).map((r) => `
             <div class="fb-row" data-fb="${r.id}">
@@ -155,8 +155,8 @@ const WorkbenchView = (() => {
       const cards = [
         { icon: S.chat, num: s.conversations ?? 0, label: "我的会话", cls: "blue", go: "history" },
         { icon: S.send, num: s.questions ?? 0, label: "提问消息", cls: "green", go: "chat" },
-        { icon: S.file, num: s.my_documents ?? 0, label: "我的文档", cls: "orange", go: "documents" },
-        { icon: S.book, num: s.knowledge_bases ?? 0, label: "知识库", cls: "red", go: "knowledge" },
+        { icon: S.file, num: s.my_documents ?? 0, label: "我的资料", cls: "orange", go: "documents" },
+        { icon: S.book, num: s.knowledge_bases ?? 0, label: "课程知识库", cls: "red", go: "knowledge" },
       ];
       const grid = document.getElementById("wb-stat-grid");
       grid.innerHTML = cards.map((c) => `
