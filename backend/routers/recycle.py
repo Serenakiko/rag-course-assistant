@@ -20,7 +20,11 @@ from ..models import Document, KnowledgeBase, KnowledgePoint, RecycleItem, User
 from ..services.chunker import split_text
 from ..services.document_parser import parse_file
 from ..services.recycle import RETENTION_DAYS, drop_files, item_dir
-from ..services.vector_store import add_document_chunks, add_knowledge_point
+from ..services.vector_store import (
+    add_document_chunks,
+    add_knowledge_point,
+    delete_knowledge_base_vectors,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -139,6 +143,7 @@ def restore_item(
     )
     db.add(base)
     db.flush()  # 拿到 base.id，暂不 commit——整个恢复尽量在一个事务里，中途失败不留半套
+    restored_vector_key = base.vector_key
 
     # 知识点先全部 add、一次 flush 拿到 id，再统一写向量。
     new_points: list[KnowledgePoint] = []
@@ -162,7 +167,14 @@ def restore_item(
         if kp.is_auto:
             continue
         try:
-            add_knowledge_point(kp.id, kp.title, kp.content, kp.course, kp.tags)
+            add_knowledge_point(
+                kp.id,
+                kp.title,
+                kp.content,
+                kp.course,
+                kp.tags,
+                knowledge_base_id=restored_vector_key,
+            )
         except Exception:  # noqa: BLE001
             failed_points += 1
             logger.exception("恢复知识点向量失败 point_id=%s", kp.id)
@@ -208,7 +220,13 @@ def restore_item(
                 chunks = split_text(text)
                 if not chunks:
                     raise ValueError("没有提取到有效文本")
-                count = add_document_chunks(doc.id, doc.filename, name, chunks)
+                count = add_document_chunks(
+                    doc.id,
+                    doc.filename,
+                    name,
+                    chunks,
+                    knowledge_base_id=restored_vector_key,
+                )
                 doc.status = "ready"
                 doc.chunk_count = count
                 doc.error = ""
@@ -226,6 +244,12 @@ def restore_item(
         db.commit()
     except Exception:  # noqa: BLE001
         db.rollback()
+        try:
+            delete_knowledge_base_vectors(
+                restored_vector_key, name, strict=False
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("恢复失败后清理孤儿向量失败：%s", restored_vector_key)
         # 回滚后 DB 里没有这些文档，复制出来的文件也要一并删掉；
         # trash 里的原件保持不动，用户可以直接重试恢复。
         for path in copied_paths:

@@ -31,6 +31,8 @@ const WorkbenchView = (() => {
         </div>
       </div>
 
+      <div class="card wb-recent-card" id="wb-recent" style="display:none"></div>
+
       <div class="stat-grid" id="wb-stat-grid"><div style="grid-column:1/-1;text-align:center;padding:40px"><span class="loading-spinner"></span></div></div>
 
       <div class="wb-section">
@@ -59,8 +61,6 @@ const WorkbenchView = (() => {
           </div>
         </div>
       </div>
-
-      <div class="card wb-recent-card" id="wb-recent" style="display:none"></div>
 
       <div class="card wb-fb-card" id="wb-resolved">
         <div class="row-between mb-16">

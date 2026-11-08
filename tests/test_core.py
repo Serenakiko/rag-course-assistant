@@ -9,7 +9,7 @@ os.environ.setdefault("JWT_SECRET", "x" * 64)
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from backend.models import Base, KnowledgeBase, KnowledgePoint, User
@@ -230,8 +230,8 @@ def test_unmatched_gate_rejects_irrelevant_without_record(monkeypatch):
         return events
 
     events = asyncio.run(run())
-    assert events[0]["type"] == "token"
-    assert "不在我的回答范围内" in events[0]["content"]
+    tokens = [event["content"] for event in events if event["type"] == "token"]
+    assert "不在我的回答范围内" in "".join(tokens)
     assert all(e["type"] != "unmatched" for e in events)
 
 
@@ -272,8 +272,10 @@ def test_answerability_gate_blocks_similar_but_uncovered(monkeypatch):
     # 相似度必须高于距离门控阈值，才能确保本用例测的是「可答性判定」而不是第一道门控
     monkeypatch.setattr(rag_service, "vector_search", lambda *a, **k: [(doc, 0.8)])
     monkeypatch.setattr(rag_service.settings, "ANSWERABILITY_CHECK", True)
+
     async def _cannot(*a, **k):
-        return False
+        return rag_service.Answerability.UNANSWERABLE
+
     monkeypatch.setattr(rag_service, "can_answer", _cannot)
 
     async def run():
@@ -309,8 +311,8 @@ def test_empty_kb_short_circuits_without_llm(monkeypatch):
 
     events = asyncio.run(run())
     assert called == []
-    assert events[0]["type"] == "token"
-    assert "还没有相关内容" in events[0]["content"]
+    tokens = [event["content"] for event in events if event["type"] == "token"]
+    assert "还没有相关内容" in "".join(tokens)
 
 
 def test_avatar_path_guard():
@@ -734,11 +736,12 @@ def test_my_unanswered_is_paginated_with_full_counts(db):
     assert only_pending["pending"] == 7 and only_pending["resolved"] == 5
 
 
-def test_guard_default_admin_checks_all_admins(monkeypatch, caplog):
+def test_guard_default_admin_checks_all_admins(monkeypatch, caplog, tmp_path):
     """第二个管理员仍用默认密码时，启动守卫也要发现。"""
     from backend import main
-    from backend.security import hash_password
+    from backend.security import hash_password, verify_password
     from backend.seed_data import DEFAULT_ADMIN
+    from backend.services import admin_security
 
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -762,12 +765,14 @@ def test_guard_default_admin_checks_all_admins(monkeypatch, caplog):
         s.commit()
 
     monkeypatch.setattr("backend.database.SessionLocal", lambda: Session(engine))
-    monkeypatch.setattr(main.settings, "HOST", "127.0.0.1")
-
+    monkeypatch.setattr(admin_security.settings, "DATA_DIR", tmp_path)
     with caplog.at_level("WARNING"):
         main._guard_default_admin()
 
-    assert "second-admin" in caplog.text
+    assert "已轮换 1 个" in caplog.text
+    with Session(engine) as s:
+        second = s.scalar(select(User).where(User.account == "second-admin"))
+        assert not verify_password(DEFAULT_ADMIN[1], second.password_hash)
 
 
 def test_embedding_model_marker_records_current(monkeypatch, tmp_path):

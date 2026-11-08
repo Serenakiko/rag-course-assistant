@@ -10,7 +10,7 @@
 # Version policy: lower bound = a version verified by our test suite,
 # upper bound <2.0 to block breaking langchain 2.x upgrades.
 # Verified: langchain 1.x family (core 1.6.9 / chroma 1.1.0),
-# all 38 tests pass.
+# and the full project test suite passes.
 # ============================================================
 
 # ---- Web framework ----

@@ -313,6 +313,9 @@ async def regenerate_answer(
         message = {
             "busy": "后台正忙（同时最多 3 路生成），这次没排上队，稍后再点一次",
             "timeout": "生成超时了，这次没有保存回答，稍后再试",
+            "answerability": (
+                "资料可答性判定超时或模型暂时不可用，这不表示知识库未收录，请稍后重试"
+            ),
         }.get(result["error"], "这次没生成出有效回答，检查模型服务后再试")
         return {"ok": False, "answer": "", "resolved": False, "message": message}
     if result["recommended"]:

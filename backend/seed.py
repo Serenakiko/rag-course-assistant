@@ -12,11 +12,10 @@ import logging
 
 from sqlalchemy import select
 
-from .config import settings
 from .database import SessionLocal
-from .models import KnowledgeBase, KnowledgePoint, User
-from .security import hash_password
-from .seed_data import DEFAULT_ADMIN, SAMPLE_BASES, SAMPLE_POINTS
+from .models import KnowledgeBase, KnowledgePoint
+from .seed_data import SAMPLE_BASES, SAMPLE_POINTS
+from .services.admin_security import create_default_admin
 from .services.vector_store import add_knowledge_point
 
 logger = logging.getLogger(__name__)
@@ -27,18 +26,7 @@ def init_seed() -> None:
     session = SessionLocal()
     try:
         # 1. 默认管理员
-        admin = session.scalar(select(User).where(User.account == DEFAULT_ADMIN[0]))
-        if admin is None:
-            admin = User(
-                account=DEFAULT_ADMIN[0],
-                password_hash=hash_password(settings.DEFAULT_ADMIN_PASSWORD),
-                username=DEFAULT_ADMIN[2],
-                role="admin",
-            )
-            session.add(admin)
-            session.commit()
-            session.refresh(admin)
-            logger.info("已创建默认管理员：%s", DEFAULT_ADMIN[0])
+        admin = create_default_admin(session)
 
         # 2. 四门课程知识库（按名称幂等创建）
         for item in SAMPLE_BASES:

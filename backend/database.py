@@ -82,6 +82,13 @@ def init_db() -> None:
             )
         if "token_version" not in cols:
             conn.execute(text("ALTER TABLE users ADD COLUMN token_version INTEGER DEFAULT 0"))
+        if "must_change_password" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE users ADD COLUMN must_change_password "
+                    "INTEGER DEFAULT 0"
+                )
+            )
         # unanswered_questions 增量迁移：为旧库补充闭环增强所需字段
         uq_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(unanswered_questions)"))]
         if "related_points" not in uq_cols:
@@ -161,3 +168,28 @@ def init_db() -> None:
             conn.execute(text("ALTER TABLE knowledge_points ADD COLUMN is_auto INTEGER DEFAULT 0"))
         if "updated_by" not in kp_cols:
             conn.execute(text("ALTER TABLE knowledge_points ADD COLUMN updated_by INTEGER"))
+        # knowledge_bases 增量迁移：给每个库分配不可复用的向量身份
+        kb_cols = [
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(knowledge_bases)"))
+        ]
+        if "vector_key" not in kb_cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE knowledge_bases "
+                    "ADD COLUMN vector_key VARCHAR(64) DEFAULT ''"
+                )
+            )
+        conn.execute(
+            text(
+                "UPDATE knowledge_bases "
+                "SET vector_key = 'kb_' || lower(hex(randomblob(16))) "
+                "WHERE vector_key IS NULL OR vector_key = ''"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_knowledge_bases_vector_key "
+                "ON knowledge_bases (vector_key)"
+            )
+        )

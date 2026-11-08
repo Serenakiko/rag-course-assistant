@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..constants import SYSTEM_ADMIN_ACCOUNT
 from ..database import get_db
 from ..deps import get_current_user
 from ..models import User
@@ -29,6 +30,7 @@ from ..security import (
     hash_password,
     verify_password,
 )
+from ..services.admin_security import remove_initial_password
 
 router = APIRouter()
 
@@ -289,10 +291,14 @@ def change_password(
 ) -> dict:
     if not verify_password(payload.old_password, user.password_hash):
         raise HTTPException(status_code=400, detail="原密码错误")
+    if verify_password(payload.new_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="新密码不能与原密码相同")
     user.password_hash = hash_password(payload.new_password)
+    user.must_change_password = 0
     # 让所有已签发的令牌失效，避免旧 token 在有效期内继续可用
     user.token_version = int(user.token_version or 0) + 1
     db.commit()
+    remove_initial_password(user.account)
     return {"ok": True}
 
 
@@ -304,6 +310,12 @@ def update_profile(
 ) -> User:
     if payload.account is not None:
         new_account = payload.account.strip()
+        if (
+            user.account == SYSTEM_ADMIN_ACCOUNT
+            and new_account
+            and new_account != SYSTEM_ADMIN_ACCOUNT
+        ):
+            raise HTTPException(status_code=400, detail="系统管理员账号不能修改")
         if new_account and new_account != user.account:
             exists = db.scalar(select(User.id).where(User.account == new_account))
             if exists:

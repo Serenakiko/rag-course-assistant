@@ -14,8 +14,9 @@ from .config import settings
 from .database import SessionLocal, init_db
 from .routers import auth, chat, documents, knowledge, recycle, stats, unanswered, users
 from .seed import init_seed
-from .seed_data import DEFAULT_ADMIN
+from .services.admin_security import rotate_insecure_admin_passwords
 from .services.recycle import purge_expired
+from .services.vector_reconcile import retry_pending_vector_cleanups
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,49 +27,12 @@ logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
-LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
-
-
 def _guard_default_admin() -> None:
-    """默认管理员仍在用初始密码时的处理。
+    """轮换遗留默认密码，不依赖 HOST 是否被隧道隐藏。"""
+    from .database import SessionLocal as CurrentSessionLocal
 
-    默认账号/密码只以 backend.seed_data.DEFAULT_ADMIN 为唯一来源。
-    只监听本机（默认配置）时记一条警告就够了——这是本地课程项目的取舍。
-    一旦把 HOST 放开到 0.0.0.0 让局域网访问，一个已知密码的管理员账号就是
-    后门（登录限流只拦暴力破解，不拦已知密码），这种情况直接拒绝启动。
-    """
-    from .database import SessionLocal
-    from .models import User
-    from .security import verify_password
-
-    with SessionLocal() as db:
-        admins = (
-            db.query(User)
-            .filter(User.role == "admin")
-            .order_by(User.id)
-            .all()
-        )
-        # 不能只看第一个管理员：管理员可以创建其他管理员，后者也可能保留默认密码
-        default_admin = next(
-            (a for a in admins if verify_password(DEFAULT_ADMIN[1], a.password_hash)),
-            None,
-        )
-    if default_admin is None:
-        return
-    if settings.HOST not in LOOPBACK_HOSTS:
-        raise RuntimeError(
-            f"管理员账号 {default_admin.account} 仍在使用默认密码 {DEFAULT_ADMIN[1]}，"
-            f"而 HOST={settings.HOST} 允许局域网访问，服务拒绝启动。\n"
-            "先改密码再放开监听：\n"
-            "  1) 把 .env 里的 HOST 改回 127.0.0.1 并启动服务；\n"
-            f"  2) 用 {DEFAULT_ADMIN[0]} / {DEFAULT_ADMIN[1]} 登录，在「个人中心」改掉密码；\n"
-            "  3) 再把 HOST 改成 0.0.0.0 启动。"
-        )
-    logger.warning(
-        "管理员账号 %s 仍在使用默认密码 %s，请立即登录后修改",
-        default_admin.account,
-        DEFAULT_ADMIN[1],
-    )
+    with CurrentSessionLocal() as db:
+        rotate_insecure_admin_passwords(db)
 
 
 @asynccontextmanager
@@ -81,6 +45,9 @@ async def lifespan(_app: FastAPI):
         logger.info("回收站清理：%s 条超过保留期", removed)
     init_seed()
     _guard_default_admin()
+    retried = retry_pending_vector_cleanups()
+    if retried:
+        logger.info("向量清理任务已完成：%s 条", retried)
     logger.info("数据库初始化完成：%s", settings.DB_PATH)
     yield
 

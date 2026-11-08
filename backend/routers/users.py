@@ -7,6 +7,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..constants import SYSTEM_ADMIN_ACCOUNT
 from ..database import get_db
 from ..deps import require_role
 from ..models import Conversation, KnowledgeBase, Message, User
@@ -15,6 +16,8 @@ from ..security import hash_password
 from ..services.like import contains
 
 router = APIRouter()
+
+# 系统管理员账号：其他管理员不能修改或删除，避免误操作把超管降级
 
 
 class AdminUserCreate(BaseModel):
@@ -138,8 +141,12 @@ def admin_update_user(
     target = db.get(User, user_id)
     if target is None:
         raise HTTPException(status_code=404, detail="用户不存在")
+    if target.account == SYSTEM_ADMIN_ACCOUNT and target.id != admin.id:
+        raise HTTPException(status_code=403, detail="系统管理员账号仅限本人修改")
     changed_auth = False
     if payload.role is not None:
+        if target.account == SYSTEM_ADMIN_ACCOUNT and payload.role != "admin":
+            raise HTTPException(status_code=400, detail="系统管理员的身份不可取消")
         if target.id == admin.id and payload.role != "admin":
             raise HTTPException(status_code=400, detail="不能取消自己的管理员权限")
         if target.role != payload.role:
@@ -186,6 +193,8 @@ def admin_delete_user(
     target = db.get(User, user_id)
     if target is None:
         raise HTTPException(status_code=404, detail="用户不存在")
+    if target.account == SYSTEM_ADMIN_ACCOUNT:
+        raise HTTPException(status_code=400, detail="系统管理员账号不能删除")
 
     owned = list(
         db.scalars(select(KnowledgeBase).where(KnowledgeBase.created_by == target.id))

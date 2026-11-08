@@ -16,6 +16,13 @@
     relevant_titles   期望命中的资料标题（top-k 内命中任意一个即算召回）
     expect_unmatched  true = 期望拒答（知识库未收录）
     category          answerable / paraphrase / unanswerable / near_miss
+
+相关资料的推荐字段：
+    relevant_knowledge_base_ids  知识库稳定 ID（vector metadata: knowledge_base_id）
+    relevant_document_ids        文档 ID（metadata: doc_id）
+    relevant_chunk_ids           分块 ID（metadata: chunk_id）
+    relevant_point_ids           知识点 ID（metadata: point_id）
+    relevant_titles              兼容旧标注的标题回退
 """
 from __future__ import annotations
 
@@ -31,6 +38,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backend.config import settings  # noqa: E402
+from backend.services.embedding_service import get_embedding_model_name  # noqa: E402
 from backend.services.vector_store import search  # noqa: E402
 
 GOLDEN_PATH = Path(__file__).resolve().parent / "golden.json"
@@ -48,22 +56,52 @@ def load_golden(path: Path | None = None) -> list[dict[str, Any]]:
     return data
 
 
-def _hit_title(doc, titles: set[str]) -> bool:
-    src = doc.metadata
+def _as_id_set(values: Any) -> set[str]:
+    return {str(v) for v in (values or []) if v is not None and str(v) != ""}
+
+
+def matches_relevant(doc: Any, item: dict[str, Any]) -> bool:
+    """按稳定 ID 优先判断命中；旧标注可继续用标题回退。"""
+    src = doc.metadata or {}
+    checks = (
+        ("relevant_knowledge_base_ids", src.get("knowledge_base_id")),
+        ("relevant_document_ids", src.get("doc_id")),
+        ("relevant_chunk_ids", src.get("chunk_id")),
+        ("relevant_point_ids", src.get("point_id")),
+    )
+    typed_labels_present = False
+    for item_key, metadata_value in checks:
+        expected = _as_id_set(item.get(item_key))
+        if expected:
+            typed_labels_present = True
+            if str(metadata_value) in expected:
+                return True
+    if typed_labels_present:
+        return False
+
+    titles = _as_id_set(item.get("relevant_titles"))
     title = src.get("title") or src.get("filename") or ""
-    return title in titles
+    return bool(titles) and title in titles
 
 
 def _top_similarity(docs: list[tuple[Any, float]]) -> float:
-    return float(docs[0][1]) if docs else 0.0
+    return max((float(score) for _doc, score in docs), default=0.0)
 
 
 def evaluate(
     golden: list[dict[str, Any]],
     top_k: int = 5,
     threshold: float | None = None,
+    scope: str = "knowledge_points",
 ) -> dict[str, Any]:
     """跑一遍检索，返回汇总指标和逐题明细。"""
+    scopes = {
+        "knowledge_points": ("knowledge_point",),
+        "full": ("knowledge_point", "document"),
+    }
+    if scope not in scopes:
+        raise ValueError(f"未知评测作用域：{scope}")
+    source_types = scopes[scope]
     threshold = settings.UNMATCHED_SIMILARITY if threshold is None else threshold
 
     answerable_total = 0
@@ -86,10 +124,11 @@ def evaluate(
 
     for item in golden:
         question = item["question"]
-        titles = set(item.get("relevant_titles") or [])
         expect_unmatched = bool(item.get("expect_unmatched"))
         category = item.get("category") or ("unanswerable" if expect_unmatched else "answerable")
-        docs = search(question, top_k=top_k)
+        docs = search(
+            question, top_k=top_k, source_types=source_types
+        )
         top_sim = _top_similarity(docs)
         stats = by_category[category]
         stats["total"] += 1
@@ -115,7 +154,7 @@ def evaluate(
         answerable_total += 1
         hit_rank = None
         for rank, (doc, _score) in enumerate(docs, start=1):
-            if _hit_title(doc, titles):
+            if matches_relevant(doc, item):
                 hit_rank = rank
                 break
         if hit_rank is not None:
@@ -172,6 +211,15 @@ def evaluate(
         "cross_course_misrecall": cross_course,
         "threshold": threshold,
         "top_k": top_k,
+        "scope": scope,
+        "source_types": list(source_types),
+        "embedding_model": get_embedding_model_name(),
+        "reranker": {
+            "enabled": settings.RERANK_ENABLED,
+            "candidates": settings.RERANK_CANDIDATES,
+            "vector_weight": settings.RERANK_VECTOR_WEIGHT,
+            "lexical_weight": settings.RERANK_LEXICAL_WEIGHT,
+        },
         "answerable_total": answerable_total,
         "unmatched_total": unmatched_total,
         "by_category": category_summary,
@@ -180,12 +228,19 @@ def evaluate(
 
 
 def threshold_scan(
-    golden: list[dict[str, Any]], top_k: int = 5
+    golden: list[dict[str, Any]], top_k: int = 5, scope: str = "knowledge_points"
 ) -> list[dict[str, float]]:
     """缓存每题 top1 相似度，再扫描 0.30~0.80 的拒答阈值。"""
+    source_types = (
+        ("knowledge_point",)
+        if scope == "knowledge_points"
+        else ("knowledge_point", "document")
+    )
     cached: list[tuple[float, bool]] = []
     for item in golden:
-        docs = search(item["question"], top_k=top_k)
+        docs = search(
+            item["question"], top_k=top_k, source_types=source_types
+        )
         cached.append((_top_similarity(docs), bool(item.get("expect_unmatched"))))
 
     rows: list[dict[str, float]] = []
@@ -210,7 +265,10 @@ def threshold_scan(
 
 def _print_report(result: dict[str, Any], top_k: int, threshold: float) -> None:
     print("=" * 66)
-    print(f"RAG 检索评测：{result['total']} 条，top_k={top_k}，阈值={threshold:.2f}")
+    print(
+        f"RAG 检索评测：{result['total']} 条，scope={result['scope']}，"
+        f"top_k={top_k}，阈值={threshold:.2f}"
+    )
     print("=" * 66)
     print(f"recall@{top_k}:       {result[f'recall@{top_k}']:.4f}")
     print(f"MRR:                {result['mrr']:.4f}")
@@ -231,20 +289,31 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="RAG 检索质量离线评测")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--threshold", type=float, default=None)
+    parser.add_argument(
+        "--scope",
+        choices=["knowledge_points", "full"],
+        default="knowledge_points",
+        help="knowledge_points=仅知识点库；full=知识点+文档分块完整混合语料",
+    )
     parser.add_argument("--thresholds", action="store_true", help="额外输出阈值扫描")
     parser.add_argument("--golden", type=str, default=None)
     parser.add_argument("--json", type=str, default=None, help="把完整结果写入 JSON")
     args = parser.parse_args()
 
     golden = load_golden(Path(args.golden) if args.golden else None)
-    result = evaluate(golden, top_k=args.top_k, threshold=args.threshold)
+    result = evaluate(
+        golden,
+        top_k=args.top_k,
+        threshold=args.threshold,
+        scope=args.scope,
+    )
     _print_report(result, args.top_k, float(result["threshold"]))
 
     if args.thresholds:
         print()
         print("阈值扫描（相似度阈值 vs 拒答综合准确率）：")
         print(f"{'threshold':>10}{'accuracy':>10}{'拒答抓到':>10}{'拒答漏放':>10}{'误拒':>8}")
-        for row in threshold_scan(golden, top_k=args.top_k):
+        for row in threshold_scan(golden, top_k=args.top_k, scope=args.scope):
             print(
                 f"{row['threshold']:>10.2f}{row['accuracy']:>10.4f}"
                 f"{row['reject_caught']:>10}{row['reject_missed']:>10}{row['hit_false_reject']:>8}"

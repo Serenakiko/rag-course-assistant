@@ -178,7 +178,8 @@ const App = (() => {
     renderNav();
     setupMobileNav();
     ThemeCenter.init();
-    NotifyCenter.init();
+    const mustChangePassword = !!API.getUser().must_change_password;
+    if (!mustChangePassword) NotifyCenter.init();
     // 退出登录：点一下弹确认框；长按 0.65 秒直接退出，不弹任何提示
     const logoutBtn = document.getElementById("logout-btn");
     function doLogout() {
@@ -226,7 +227,14 @@ const App = (() => {
       e.stopPropagation();
       ProfileView.openAvatarModal();
     });
-    navigate(API.getUser().role === "admin" ? "overview" : "workbench");
+    navigate(
+      mustChangePassword
+        ? "settings"
+        : (API.getUser().role === "admin" ? "overview" : "workbench")
+    );
+    if (mustChangePassword) {
+      setTimeout(() => ProfileView.openRequiredPasswordChange(), 0);
+    }
   }
 
   function refreshUserInfo() {
@@ -320,10 +328,22 @@ const App = (() => {
     if (!toggle || !backdrop || !sidebar) return;
 
     const isOpen = () => document.body.classList.contains("nav-open");
+    const mobileQuery = window.matchMedia("(max-width: 640px)");
+    const syncAccessibility = () => {
+      if (mobileQuery.matches) {
+        sidebar.setAttribute("aria-hidden", String(!isOpen()));
+        if (isOpen()) sidebar.removeAttribute("inert");
+        else sidebar.setAttribute("inert", "");
+      } else {
+        sidebar.removeAttribute("inert");
+        sidebar.removeAttribute("aria-hidden");
+      }
+    };
     const setOpen = (open, restoreFocus = true) => {
       document.body.classList.toggle("nav-open", open);
       toggle.setAttribute("aria-expanded", String(open));
       toggle.setAttribute("aria-label", open ? "关闭菜单" : "打开菜单");
+      syncAccessibility();
       if (open) {
         const first = sidebar.querySelector(".nav-item.active") || sidebar.querySelector(".nav-item");
         if (first) setTimeout(() => first.focus(), 30);
@@ -343,9 +363,11 @@ const App = (() => {
       const main = document.getElementById("main-content");
       if (main) setTimeout(() => main.focus(), 60);
     });
+    mobileQuery.addEventListener("change", syncAccessibility);
     window.addEventListener("resize", () => {
       if (window.innerWidth > 640 && isOpen()) setOpen(false, false);
     });
+    syncAccessibility();
   }
 
   return { init, refreshUserInfo, navigate };

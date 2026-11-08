@@ -1,9 +1,12 @@
 /* ============ 视图：管理员（数据概览 / 用户管理 / 知识库管理 / 对话历史） ============
  * 「问题反馈」单独在 views/admin-feedback.js（AdminFeedbackView）里，这里只做分派。 */
 const AdminView = (() => {
+  const SYSTEM_ADMIN_ACCOUNT = "23040101";
   /* SVG 图标库（线性，stroke=currentColor） */
   const ICON = {
     user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+    shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>',
+    users: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
     folder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
     doc: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
     chat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
@@ -57,13 +60,14 @@ const AdminView = (() => {
     try {
       const s = await API.request("GET", "/api/stats/admin/stats");
       const cards = [
-        { key: "users",     icon: ICON.user,   cls: "blue",   num: s.users,              label: "用户总数" },
-        { key: "kb",        icon: ICON.folder, cls: "green",  num: s.knowledge_bases,     label: "知识库数量" },
-        { key: "documents", icon: ICON.doc,    cls: "orange", num: s.documents,           label: "文档总数" },
-        { key: "history",   icon: ICON.chat,   cls: "red",    num: s.today_questions ?? 0, label: "今日提问" },
+        { key: "users",     icon: ICON.user,   cls: "blue",   num: s.users ?? 0,          label: "用户总数", hint: "点击查看用户管理" },
+        { key: "users",     icon: ICON.shield, cls: "green",  num: s.admins ?? 0,         label: "管理员数", hint: "点击查看用户管理" },
+        { key: "users",     icon: ICON.users,  cls: "orange", num: s.students ?? 0,       label: "学生数",   hint: "点击查看用户管理" },
+        { key: "kb",        icon: ICON.folder, cls: "red",    num: s.knowledge_bases ?? 0, label: "知识库数量", hint: "点击查看知识库管理" },
+        { key: "documents", icon: ICON.doc,    cls: "teal",   num: s.documents ?? 0,      label: "文档总数", hint: "点击查看全部文档" },
       ];
       grid.innerHTML = cards.map((c) => `
-        <div class="stat-card clickable" data-key="${c.key}" title="点击查看${c.label}">
+        <div class="stat-card clickable" data-key="${c.key}" title="${c.hint}">
           <div class="stat-info">
             <div class="stat-num">${c.num}</div>
             <div class="stat-label">${c.label}</div>
@@ -117,12 +121,14 @@ const AdminView = (() => {
       : "—";
     const totalFb = (s.feedback_up || 0) + (s.feedback_down || 0);
     const upRate = totalFb > 0 ? Math.round((s.feedback_up / totalFb) * 100) : null;
+    const totalQuestions = s.total_questions || 0;
+    const rejectedAnswers = s.rejected_answers || 0;
 
     const items = [
-      { label: "回答命中率", value: hit, hint: "知识库覆盖的问题占比", cls: "green" },
-      { label: "拒答率", value: reject, hint: "未命中自动反馈占比", cls: "red" },
+      { label: "回答命中率", value: hit, hint: `${totalQuestions - rejectedAnswers} / ${totalQuestions} 次提问`, cls: "green" },
+      { label: "拒答率", value: reject, hint: `${rejectedAnswers} / ${totalQuestions} 次提问`, cls: "red" },
       { label: "平均解决时长", value: resolve, hint: "反馈从提交到解答", cls: "blue" },
-      { label: "回答好评率", value: upRate != null ? upRate + "%" : "—", hint: `学生点赞 ${s.feedback_up || 0} · 点踩 ${s.feedback_down || 0}`, cls: "orange" },
+      { label: "回答好评率", value: upRate != null ? upRate + "%" : "—", hint: `${s.feedback_up || 0} 赞 / ${totalFb} 次已评价`, cls: "orange" },
     ];
     el.innerHTML = items.map((it) => `
       <div class="quality-item">
@@ -159,39 +165,23 @@ const AdminView = (() => {
     try {
       const d = await API.request("GET", "/api/stats/admin/doc-usage");
       const ranked = d.ranked || [];
-      const dead = d.dead_docs || [];
-      if (!ranked.length && !dead.length) {
+      if (!ranked.length) {
         list.innerHTML = `<div class="empty-state"><p>暂无引用数据，回答产生后会统计到这里</p></div>`;
         return;
       }
-      const top = ranked.slice(0, 8);
-      const deadTop = dead.slice(0, 5);
+      const top = ranked.slice(0, 5);
       const maxCount = Math.max(1, ...top.map((r) => r.count));
       let html = "";
       if (top.length) {
-        html += `<div class="usage-title muted">被引用最多的资料</div>`;
-        html += top.map((r) => {
-          const tag = r.source_type === "knowledge_point"
-            ? `<span class="usage-tag kp">知识点</span>`
-            : `<span class="usage-tag doc">文档</span>`;
-          return `
+        html += top.map((r, i) => `
           <div class="usage-row">
-            <span class="usage-name" title="${Common.escapeHtml(r.title)}">${Common.escapeHtml(r.title)}${tag}</span>
-            <span class="usage-bar"><span class="usage-bar-fill" style="width:${Math.round((r.count / maxCount) * 100)}%"></span></span>
-            <span class="usage-count">${r.count} 次</span>
-          </div>`;
-        }).join("");
-      }
-      if (deadTop.length) {
-        html += `<div class="usage-title muted" style="margin-top:14px">从未被引用</div>`;
-        html += deadTop.map((r) => `
-          <div class="usage-row dead">
+            <span class="usage-rank ${i < 3 ? "top" : ""}">${i + 1}</span>
             <span class="usage-name" title="${Common.escapeHtml(r.title)}">${Common.escapeHtml(r.title)}</span>
-            <span class="usage-count">${Common.escapeHtml(r.course || "")}</span>
+            <span class="usage-bar"><span class="usage-bar-fill" style="width:${Math.round((r.count / maxCount) * 100)}%"></span></span>
+            <span class="usage-count">${r.count}</span>
           </div>`).join("");
-        if (dead.length > deadTop.length) {
-          html += `<div class="muted" style="font-size:12px;margin-top:6px">另有 ${dead.length - deadTop.length} 份资料未被引用</div>`;
-        }
+      } else {
+        html += `<div class="muted" style="padding:8px 0 10px;font-size:13px">暂无文档被引用</div>`;
       }
       list.innerHTML = html;
     } catch (err) {
@@ -237,9 +227,12 @@ const AdminView = (() => {
     // 数据点 + x 轴标签
     let dots = "";
     let labels = "";
+    const mobile = window.matchMedia("(max-width: 640px)").matches;
     points.forEach((p, i) => {
       dots += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4" fill="var(--card)" stroke="var(--primary)" stroke-width="2"><title>${p.date}：${p.count} 次</title></circle>`;
-      labels += `<text x="${p.x.toFixed(1)}" y="${h - 10}" text-anchor="middle" font-size="12" fill="var(--text-3)">${p.date.slice(5)}</text>`;
+      if (!mobile || i % 2 === 0 || i === points.length - 1) {
+        labels += `<text x="${p.x.toFixed(1)}" y="${h - 10}" text-anchor="middle" font-size="12" fill="var(--text-3)">${p.date.slice(5)}</text>`;
+      }
     });
 
     el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto" role="img" aria-label="近7天提问趋势">
@@ -439,19 +432,29 @@ const AdminView = (() => {
     if (!usersRows.length) {
       tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:36px;color:var(--text-3)">${keyword ? "没有匹配的用户" : "暂无用户"}</td></tr>`;
     } else {
-      tbody.innerHTML = usersRows.map((u, i) => `
+      const iAmSystem = me && me.account === SYSTEM_ADMIN_ACCOUNT;
+      tbody.innerHTML = usersRows.map((u, i) => {
+        const isSystem = u.account === SYSTEM_ADMIN_ACCOUNT;
+        const canEdit = !isSystem || iAmSystem;
+        const badge = isSystem
+          ? '<span class="badge badge-admin">系统管理员</span>'
+          : (u.id === me.id ? '<span class="badge badge-student">我</span>' : "");
+        return `
         <tr>
-          <td>${(usersPage - 1) * usersPageSize + i + 1}</td>
-          <td>${Common.escapeHtml(u.account)}${u.id === me.id ? ' <span class="badge badge-student">我</span>' : ""}</td>
-          <td>${Common.escapeHtml(u.username || "-")}</td>
-          <td><span class="role-badge ${u.role}">${u.role === "admin" ? "管理员" : "学生"}</span></td>
-          <td class="muted">${u.question_count || 0}</td>
-          <td class="muted">${Common.fmtTime(u.created_at)}</td>
-          <td>
-            <button class="ops-link edit" data-edit="${u.id}">编辑</button>
-            ${u.id !== me.id ? `<button class="ops-link del" data-del="${u.id}">删除</button>` : ""}
+          <td data-label="序号">${(usersPage - 1) * usersPageSize + i + 1}</td>
+          <td data-label="账号">${Common.escapeHtml(u.account)} ${badge}</td>
+          <td data-label="用户名">${Common.escapeHtml(u.username || "-")}</td>
+          <td data-label="角色"><span class="role-badge ${u.role}">${u.role === "admin" ? "管理员" : "学生"}</span></td>
+          <td data-label="提问数" class="muted">${u.question_count || 0}</td>
+          <td data-label="创建时间" class="muted">${Common.fmtTime(u.created_at)}</td>
+          <td data-label="操作">
+            ${canEdit
+              ? `<button class="ops-link edit" data-edit="${u.id}">编辑</button>`
+              : `<span class="muted" title="系统管理员账号仅限本人修改">受保护</span>`}
+            ${u.id !== me.id && !isSystem ? `<button class="ops-link del" data-del="${u.id}">删除</button>` : ""}
           </td>
-        </tr>`).join("");
+        </tr>`;
+      }).join("");
     }
 
     tbody.querySelectorAll("[data-edit]").forEach((b) =>
@@ -469,6 +472,11 @@ const AdminView = (() => {
 
   function openUserEditor(user) {
     const isEdit = !!user;
+    const me = API.getUser();
+    const isSystem = isEdit && user.account === SYSTEM_ADMIN_ACCOUNT;
+    if (isSystem && (!me || me.account !== SYSTEM_ADMIN_ACCOUNT)) {
+      return Common.toast("系统管理员账号仅限本人修改", "error");
+    }
     Common.openModal(`
       <div class="modal-header">
         <h3>${isEdit ? "编辑用户" : "新增用户"}</h3>
@@ -485,10 +493,11 @@ const AdminView = (() => {
       </div>
       <div class="form-group">
         <label>角色</label>
-        <select class="form-control" id="u-role">
+        <select class="form-control" id="u-role" ${isSystem ? "disabled" : ""}>
           <option value="student" ${isEdit && user.role === "student" ? "selected" : ""}>学生</option>
           <option value="admin" ${isEdit && user.role === "admin" ? "selected" : ""}>管理员</option>
         </select>
+        ${isSystem ? `<div class="form-hint" style="margin-top:6px;color:var(--text-3);font-size:12.5px">系统管理员身份不可取消</div>` : ""}
       </div>
       <div class="form-group">
         <label>${isEdit ? "重置密码" : "初始密码"}</label>
@@ -540,6 +549,9 @@ const AdminView = (() => {
 
   async function removeUser(user) {
     if (!user) return;
+    if (user.account === SYSTEM_ADMIN_ACCOUNT) {
+      return Common.toast("系统管理员账号不能删除", "error");
+    }
     // 名下有知识库：必须先转移
     let owned = [];
     try {
@@ -736,14 +748,14 @@ const AdminView = (() => {
     } else {
       tbody.innerHTML = kbRows.map((b, i) => `
         <tr>
-          <td>${(kbPage - 1) * kbPageSize + i + 1}</td>
-          <td>${Common.escapeHtml(b.name)}</td>
-          <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${Common.escapeHtml(b.description || "")}">${Common.escapeHtml(b.description || "-")}</td>
-          <td>${b.document_count || 0}</td>
-          <td>${b.chunk_count || 0}</td>
-          <td>${Common.escapeHtml(b.creator_name || "-")}</td>
-          <td class="muted">${Common.fmtTime(b.created_at)}</td>
-          <td>
+          <td data-label="序号">${(kbPage - 1) * kbPageSize + i + 1}</td>
+          <td data-label="知识库">${Common.escapeHtml(b.name)}</td>
+          <td data-label="简介" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${Common.escapeHtml(b.description || "")}">${Common.escapeHtml(b.description || "-")}</td>
+          <td data-label="文档数">${b.document_count || 0}</td>
+          <td data-label="分块数">${b.chunk_count || 0}</td>
+          <td data-label="创建者">${Common.escapeHtml(b.creator_name || "-")}</td>
+          <td data-label="创建时间" class="muted">${Common.fmtTime(b.created_at)}</td>
+          <td data-label="操作">
             <button class="ops-link edit" data-edit="${b.id}">编辑</button>
             <button class="ops-link del" data-del="${b.id}">删除</button>
           </td>
@@ -1006,12 +1018,12 @@ const AdminView = (() => {
       // 编号 = 当前位置（不是数据库 id）：删掉一条后重新拉取即自动重排
       tbody.innerHTML = convRows.map((c, i) => `
         <tr>
-          <td>${start + i + 1}</td>
-          <td title="${Common.escapeHtml(c.title)}" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Common.escapeHtml(c.title)}</td>
-          <td class="muted">${c.message_count || 0}</td>
-          <td>${Common.escapeHtml(c.username || c.account || "-")}</td>
-          <td class="muted">${Common.fmtTime(c.created_at)}</td>
-          <td>
+          <td data-label="序号">${start + i + 1}</td>
+          <td data-label="会话标题" title="${Common.escapeHtml(c.title)}" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Common.escapeHtml(c.title)}</td>
+          <td data-label="消息数" class="muted">${c.message_count || 0}</td>
+          <td data-label="提问者">${Common.escapeHtml(c.username || c.account || "-")}</td>
+          <td data-label="创建时间" class="muted">${Common.fmtTime(c.created_at)}</td>
+          <td data-label="操作">
             <button class="ops-link edit" data-view="${c.id}">查看</button>
             <button class="ops-link del" data-del="${c.id}">删除</button>
           </td>

@@ -6,8 +6,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from .seed_data import DEFAULT_ADMIN
-
 # 项目根目录 = backend 的上一级
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env", encoding="utf-8")
@@ -34,9 +32,9 @@ class Settings:
     JWT_SECRET: str = _get("JWT_SECRET", "")
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_HOURS: int = int(_get("JWT_EXPIRE_HOURS", "24"))
-    # 默认管理员首次创建时的密码。只在账号不存在时生效；已存在不会被覆盖。
-    # 默认值仅为本地首次登录方便，公网部署前必须在 .env 改成强密码。
-    DEFAULT_ADMIN_PASSWORD: str = _get("DEFAULT_ADMIN_PASSWORD", DEFAULT_ADMIN[1])
+    # 可选：显式指定管理员首次创建密码。留空则生成随机初始密码并写入
+    # data/admin_initial_credentials.txt；与公开默认密码相同也会被拒绝使用。
+    DEFAULT_ADMIN_PASSWORD: str = _get("DEFAULT_ADMIN_PASSWORD", "")
 
     # ---------- 数据目录 ----------
     DATA_DIR: Path = BASE_DIR / "data"
@@ -84,17 +82,25 @@ class Settings:
     # 知识库无匹配判定阈值（余弦相似度）：检索最相似资料与问题的相似度低于该值，
     # 判定知识库未覆盖该问题，直接拒绝回答并记录“未命中问题”。
     # 该值越小越宽松（放行越多）。40 条标注集实测：0.40 会放行全部无关问题；
-    # 0.56 拒答 9/10、误拒 2/30；0.58 拒答 10/10、误拒 2/30。
-    # 默认取 0.56 作为保守值；换 embedding 模型或课程资料后需要重新标定。
+    # 0.54 拒答 8/10、误拒 1/30；0.56 拒答 8/10、误拒 2/30；
+    # 0.58 拒答 9/10、误拒 2/30。0.56 保留为较保守的默认值，
+    # 剩余 near_miss 交给 ANSWERABILITY_CHECK。换模型或资料后需重新标定。
     UNMATCHED_SIMILARITY: float = float(_get("UNMATCHED_SIMILARITY", "0.56"))
     # 二次可答性判定：距离门控通过后，再让模型只回答"有/没有"，判断资料里是否直接讲了这个问题。
     # 防的是"资料讲二叉树、学生问红黑树"这类相近但未覆盖的情况；代价是每次提问多一次模型调用。
     # 默认开启，与 .env.example 保持一致：三重拒答是系统的核心设计，不能因为少建 .env 就退化成两道。
     ANSWERABILITY_CHECK: bool = _get("ANSWERABILITY_CHECK", "true").lower() in ("1", "true", "yes")
+    # 可答性判定是独立模型调用，超时是系统错误，不应升级成“资料不可答”
+    ANSWERABILITY_TIMEOUT: float = float(_get("ANSWERABILITY_TIMEOUT", "25"))
     # 多轮追问的检索 query 改写：把最近的历史轮拼接进 query，让「它」「这个」类指代能召回对的内容。
     QUERY_REWRITE_HISTORY_TURNS: int = 3  # 拼入检索的最近历史轮数
     # 引用资料相对裁剪：只保留与 top1 相似度之比不低于该值的资料（相对判据，跨模型稳定）。
     TRIM_RATIO: float = 0.85
+    # 轻量混合重排：向量候选再用 BM25 词法分数重排，不引入额外模型或网络调用。
+    RERANK_ENABLED: bool = _get("RERANK_ENABLED", "true").lower() in ("1", "true", "yes")
+    RERANK_CANDIDATES: int = int(_get("RERANK_CANDIDATES", "12"))
+    RERANK_VECTOR_WEIGHT: float = float(_get("RERANK_VECTOR_WEIGHT", "0.95"))
+    RERANK_LEXICAL_WEIGHT: float = float(_get("RERANK_LEXICAL_WEIGHT", "0.05"))
 
     def ensure_dirs(self) -> None:
         """确保运行时目录存在。"""

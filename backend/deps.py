@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Callable
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,7 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> User:
@@ -38,6 +39,15 @@ def get_current_user(
     # 改密、降权后旧令牌立即失效
     if int(payload.get("ver", 0)) != int(user.token_version or 0):
         raise unauthorized
+    allowed_before_password_change = {
+        "/api/auth/me",
+        "/api/auth/change-password",
+    }
+    if user.must_change_password and request.url.path not in allowed_before_password_change:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="首次登录必须修改密码后才能继续使用",
+        )
     return user
 
 

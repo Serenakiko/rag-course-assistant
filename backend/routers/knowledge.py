@@ -10,7 +10,9 @@
 """
 from __future__ import annotations
 
+import json
 import logging
+import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -19,7 +21,15 @@ from sqlalchemy.orm import Session, joinedload
 
 from ..database import SessionLocal, get_db
 from ..deps import get_current_user
-from ..models import Document, KnowledgeBase, KnowledgePoint, UnansweredQuestion, User
+from ..models import (
+    Document,
+    KnowledgeBase,
+    KnowledgeBaseTombstone,
+    KnowledgePoint,
+    UnansweredQuestion,
+    User,
+    VectorCleanupTask,
+)
 from ..schemas import (
     KnowledgeBaseIn,
     KnowledgeBaseOut,
@@ -38,11 +48,12 @@ from ..services.kb_scope import (
     point_scope_condition,
 )
 from ..services.like import LIKE_ESCAPE, contains, escape_like
-from ..services.recycle import snapshot_base
+from ..services.recycle import item_dir, snapshot_base
 from ..services.vector_store import (
     add_document_chunks,
     add_knowledge_point,
     delete_document,
+    delete_knowledge_base_vectors,
     delete_knowledge_point,
     update_knowledge_point,
 )
@@ -50,6 +61,42 @@ from ..services.vector_store import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _restore_snapshot_files(
+    payload: str, docs: list[Document], trash_dir: Path
+) -> bool:
+    """删除事务失败时，把快照已移动的源文件恢复到原路径。"""
+    try:
+        data = json.loads(payload or "{}")
+    except ValueError:
+        return False
+    entries = data.get("docs") or []
+    docs_by_id = {doc.id: doc for doc in docs if doc.id is not None}
+    restored_all = True
+    for index, entry in enumerate(entries):
+        doc = docs_by_id.get(entry.get("doc_id"))
+        if doc is None and not entry.get("doc_id") and index < len(docs):
+            # 兼容旧快照：老 payload 没有 doc_id，只能按当时顺序回退
+            doc = docs[index]
+        if doc is None:
+            restored_all = False
+            continue
+        trash_name = entry.get("trash_name") or ""
+        if not trash_name:
+            continue
+        source = trash_dir / trash_name
+        destination = Path(doc.stored_path)
+        if not source.exists():
+            restored_all = False
+            continue
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(destination))
+        except OSError:
+            restored_all = False
+            logger.exception("回滚快照文件失败：%s", source)
+    return restored_all
 
 
 def can_manage(user: User, creator_id: int | None) -> bool:
@@ -344,27 +391,76 @@ def remove_base(
         raise HTTPException(status_code=403, detail="只能删除自己创建的知识库")
     # 先落一份回收站快照（库 + 知识点 + 文档，源文件移到 trash 目录），
     # 再照常删除；30 天内误删可恢复
-    snapshot_base(db, base, user.id)
-    # 先删向量，再删记录。这里不能用 strict：快照阶段源文件已经移进 trash，
-    # 此时因向量删除失败而中止会留下「DB 记录还在、文件却没了」的坏库。
-    # 删除失败只记日志，保证记录与文件至少同步消失。
-    points = list(
-        db.scalars(select(KnowledgePoint).where(KnowledgePoint.course == base.name))
+    try:
+        recycle_item = snapshot_base(db, base, user.id)
+    except Exception:
+        db.rollback()
+        raise
+    snapshot_item_id = recycle_item.id
+    snapshot_payload = recycle_item.payload
+    vector_key = base.vector_key
+    course_name = base.name
+    tombstone = db.scalar(
+        select(KnowledgeBaseTombstone).where(
+            KnowledgeBaseTombstone.knowledge_base_id == vector_key
+        )
     )
-    for p in points:
-        if not delete_knowledge_point(p.id, strict=False):
-            logger.error("删除知识库时知识点向量清理失败 point_id=%s", p.id)
+    if tombstone is None:
+        db.add(
+            KnowledgeBaseTombstone(
+                knowledge_base_id=vector_key,
+                course_name=course_name,
+            )
+        )
+    task = db.scalar(
+        select(VectorCleanupTask).where(
+            VectorCleanupTask.knowledge_base_id == vector_key,
+            VectorCleanupTask.status == "pending",
+        )
+    )
+    if task is None:
+        task = VectorCleanupTask(
+            knowledge_base_id=vector_key,
+            course_name=course_name,
+        )
+        db.add(task)
+    points = list(
+        db.scalars(select(KnowledgePoint).where(KnowledgePoint.course == course_name))
+    )
     db.execute(
-        KnowledgePoint.__table__.delete().where(KnowledgePoint.course == base.name)
+        KnowledgePoint.__table__.delete().where(KnowledgePoint.course == course_name)
     )
     # 文档连同向量、源文件一起删，否则会变成孤儿继续出现在文档管理里
-    docs = list(db.scalars(select(Document).where(Document.course == base.name)))
+    docs = list(db.scalars(select(Document).where(Document.course == course_name)))
+    stored_paths = [Path(d.stored_path) for d in docs if d.stored_path]
     for d in docs:
-        if not delete_document(d.id, strict=False):
-            logger.error("删除知识库时文档向量清理失败 doc_id=%s", d.id)
-        Path(d.stored_path).unlink(missing_ok=True)
         db.delete(d)
     db.delete(base)
+    # 删除记录、tombstone 与清理任务在同一事务中提交；提交失败时库仍可用。
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        trash_path = item_dir(snapshot_item_id)
+        if _restore_snapshot_files(snapshot_payload, docs, trash_path):
+            shutil.rmtree(trash_path, ignore_errors=True)
+        raise
+
+    for path in stored_paths:
+        path.unlink(missing_ok=True)
+
+    task.attempts = int(task.attempts or 0) + 1
+    try:
+        delete_knowledge_base_vectors(vector_key, course_name)
+    except Exception as exc:  # noqa: BLE001
+        task.last_error = str(exc)[:1000]
+        logger.error(
+            "知识库已删除，但向量清理失败，已保留待重试任务 knowledge_base_id=%s",
+            vector_key,
+        )
+    else:
+        task.status = "done"
+        task.last_error = ""
     db.commit()
     return {"ok": True, "removed_points": len(points), "removed_documents": len(docs)}
 

@@ -10,6 +10,7 @@ import logging
 import time
 import weakref
 from collections.abc import AsyncGenerator, Callable
+from enum import Enum
 
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage
@@ -30,9 +31,21 @@ from .rag_prompts import (
     is_smalltalk,
     is_unmatched_answer,
 )
+from .vector_store import _chunk_locator
 from .vector_store import search as vector_search
 
 logger = logging.getLogger(__name__)
+
+
+class Answerability(str, Enum):
+    ANSWERABLE = "answerable"
+    UNANSWERABLE = "unanswerable"
+    ERROR = "error"
+
+
+def _max_similarity(docs: list[tuple[Document, float]]) -> float:
+    """reranker 改变顺序后，距离门控仍以候选最高语义分为准。"""
+    return max((float(score) for _doc, score in docs), default=0.0)
 
 
 def _est_tokens(text: str) -> int:
@@ -79,7 +92,18 @@ def _format_context(docs: list[tuple[Document, float]]) -> str:
         src = doc.metadata
         title = src.get("title") or src.get("filename") or "未知来源"
         course = src.get("course") or "未分类"
-        lines.append(f"[{i}] 来源《{title}》（课程：{course}）\n{doc.page_content}")
+        section = src.get("section") or src.get("chapter") or ""
+        page = src.get("page") or src.get("page_number") or ""
+        locator = "，".join(
+            part for part in (
+                f"章节：{section}" if section else "",
+                f"页码：{page}" if page != "" else "",
+            ) if part
+        )
+        lines.append(
+            f"[{i}] 来源《{title}》（课程：{course}"
+            f"{'，' + locator if locator else ''}）\n{doc.page_content}"
+        )
     return "\n\n".join(lines)
 
 
@@ -88,13 +112,26 @@ def _format_sources(docs: list[tuple[Document, float]]) -> list[dict]:
     out: list[dict] = []
     for _i, (doc, _score) in enumerate(docs, start=1):
         src = doc.metadata
+        section = src.get("section") or src.get("chapter") or ""
+        page = src.get("page") or src.get("page_number")
+        if src.get("source_type") == "document" and (not section or page is None):
+            inferred_page, inferred_section = _chunk_locator(doc.page_content)
+            section = section or inferred_section
+            if page is None:
+                page = inferred_page or None
         out.append(
             {
                 "source_type": src.get("source_type", "document"),
                 "doc_id": src.get("doc_id"),
                 "point_id": src.get("point_id"),
+                "chunk_id": src.get("chunk_id"),
+                "chunk_index": src.get("chunk_index"),
+                "filename": src.get("filename"),
                 "title": src.get("title") or src.get("filename") or "未知来源",
                 "course": src.get("course") or "未分类",
+                "section": section,
+                "chapter": src.get("chapter") or "",
+                "page": page,
                 "content": doc.page_content[:200],
             }
         )
@@ -207,7 +244,7 @@ def recommend_titles(docs: list[tuple[Document, float]], limit: int = 3, spread:
     """
     if not docs:
         return []
-    top = docs[0][1]
+    top = _max_similarity(docs)
     # 只拦「整批是噪声」：top1 相似度连阈值下限都够不到，说明库里没有相近内容。
     # 之前用 top >= UNMATCHED_SIMILARITY + 0.15 当门槛，而门控拒答是 top < UNMATCHED_SIMILARITY，
     # 两个区间不相交 → 拒答时 recommended 恒空，「拒答推荐相近资料」功能形同虚设。
@@ -265,13 +302,21 @@ async def is_course_related(question: str, timeout: float = 10.0) -> bool:
         return False
 
 
-async def can_answer(question: str, docs: list[tuple[Document, float]], timeout: float = 30.0) -> bool:
-    """独立判一次"检索到的资料能不能直接回答这个问题"。
+async def can_answer(
+    question: str,
+    docs: list[tuple[Document, float]],
+    timeout: float | None = None,
+) -> Answerability:
+    """独立判一次“检索到的资料能不能直接回答这个问题”。
 
     距离门控只能拦"库里明显没有"；拦不住"库里看着像有、其实没讲"（资料讲二叉树、
     学生问红黑树）。让生成模型自己克制没用 —— 实测 3B 模型会照着相近资料把答案编下去，
-    所以拆成一个只输出"有/没有"的窄任务，判定失败或超时一律按不能答处理（宁可拒答，不要编造）。
+    所以拆成一个只输出"有/没有"的窄任务。
+
+    模型明确回答“没有”才是 UNANSWERABLE；超时、空响应或无法解析都返回 ERROR。
+    ERROR 必须由上层提示重试，不能生成拒答，更不能写未命中反馈。
     """
+    timeout = settings.ANSWERABILITY_TIMEOUT if timeout is None else timeout
     try:
         llm = get_llm()
         resp = await asyncio.wait_for(
@@ -284,10 +329,18 @@ async def can_answer(question: str, docs: list[tuple[Document, float]], timeout:
             timeout=timeout,
         )
         text = (getattr(resp, "content", "") or "").strip()
-        return text.startswith("有")
+        if text.startswith("有"):
+            return Answerability.ANSWERABLE
+        if text.startswith(("没有", "无", "否")):
+            return Answerability.UNANSWERABLE
+        logger.warning("资料可答性判定返回无法解析的结果（%s）：%r", question[:30], text[:40])
+        return Answerability.ERROR
+    except asyncio.TimeoutError:
+        logger.warning("资料可答性判定超时（%s）", question[:30])
+        return Answerability.ERROR
     except Exception:  # noqa: BLE001
-        logger.warning("资料可答性判定失败（%s），按不可答处理", question[:30])
-        return False
+        logger.warning("资料可答性判定失败（%s）", question[:30], exc_info=True)
+        return Answerability.ERROR
 
 
 def _trim_docs(docs: list[tuple[Document, float]], ratio: float | None = None) -> list[tuple[Document, float]]:
@@ -300,7 +353,7 @@ def _trim_docs(docs: list[tuple[Document, float]], ratio: float | None = None) -
     if not docs:
         return []
     ratio = ratio if ratio is not None else settings.TRIM_RATIO
-    top = docs[0][1]
+    top = _max_similarity(docs)
     if top <= 0:
         return docs[:1]
     kept = [d for d in docs if d[1] >= top * ratio]
@@ -414,10 +467,19 @@ async def _generate_answer_locked(
             "recommended": [],
             "matched": False,
         }
-    if docs[0][1] < settings.UNMATCHED_SIMILARITY:
+    if _max_similarity(docs) < settings.UNMATCHED_SIMILARITY:
         return _unmatched_result(question, docs)
-    if settings.ANSWERABILITY_CHECK and not await can_answer(question, docs):
-        return _unmatched_result(question, docs)
+    if settings.ANSWERABILITY_CHECK:
+        answerability = await can_answer(question, docs)
+        if answerability is Answerability.ERROR:
+            return {
+                "answer": "",
+                "recommended": [],
+                "matched": False,
+                "error": "answerability",
+            }
+        if answerability is Answerability.UNANSWERABLE:
+            return _unmatched_result(question, docs)
 
     kept = _trim_docs(docs)
     context = _format_context(kept)
@@ -534,6 +596,19 @@ def _timeout_message() -> str:
     return f"回答生成超时（超过 {settings.LLM_TIMEOUT:.0f} 秒），稍后再试或者换个问法。"
 
 
+def _answerability_error_message() -> str:
+    return "资料可答性判定超时或模型暂时不可用，这不表示知识库未收录。请稍后重试。"
+
+
+def _phase_event(phase: str, status: str, started: float) -> dict:
+    return {
+        "type": "phase",
+        "phase": phase,
+        "status": status,
+        "elapsed_ms": max(0, int((time.monotonic() - started) * 1000)),
+    }
+
+
 def _unmatched_content(question: str, recommended: list[str]) -> str:
     """未收录拒答正文：知识库暂缺 + 相近资料推荐 + 反馈提示。"""
     head = f"「{question}」" if len(question) <= 40 else "该问题"
@@ -602,6 +677,7 @@ async def _handle_generate(
     question: str,
     history: list[tuple[str, str]],
     kept: list[tuple[Document, float]],
+    phase_started: float | None = None,
 ) -> AsyncGenerator[dict, None]:
     """基于检索资料流式生成回答，并在模型判「未收录」时追加推荐与反馈。"""
     context = _format_context(kept)
@@ -638,6 +714,8 @@ async def _handle_generate(
         "answer": answer,
         "truncated": truncated,
     }
+    if phase_started is not None:
+        yield _phase_event("generation", "done", phase_started)
 
 
 async def _stream_answer_locked(
@@ -669,10 +747,13 @@ async def _stream_answer_locked(
             return
 
         # 1. 检索（多轮追问先做 query 改写，把指代补全再检索）
+        retrieval_started = time.monotonic()
+        yield _phase_event("retrieval", "running", retrieval_started)
         search_query = await _rewrite_query(question, history)
         if search_query != question:
             logger.info("查询改写：%s → %s", question[:30], search_query[:30])
         docs = await asyncio.to_thread(vector_search, search_query, settings.TOP_K, courses)
+        yield _phase_event("retrieval", "done", retrieval_started)
         # 知识库没有任何内容时直接拒绝，不调模型
         if not docs:
             yield {
@@ -682,20 +763,33 @@ async def _stream_answer_locked(
             return
 
         # 2. 无匹配门控：最相似资料的相似度仍低于阈值 → 知识库未覆盖该问题
-        if docs[0][1] < settings.UNMATCHED_SIMILARITY:
+        if _max_similarity(docs) < settings.UNMATCHED_SIMILARITY:
             async for event in _handle_unmatched(question, docs):
                 yield event
             return
 
         # 3. 可答性二次判定：距离门控拦不住的相近未覆盖，再独立判一次
-        if settings.ANSWERABILITY_CHECK and not await can_answer(question, docs):
-            async for event in _handle_answerability_gate(question, docs):
-                yield event
-            return
+        if settings.ANSWERABILITY_CHECK:
+            answerability_started = time.monotonic()
+            yield _phase_event("answerability", "running", answerability_started)
+            answerability = await can_answer(question, docs)
+            if answerability is Answerability.ERROR:
+                yield _phase_event("answerability", "error", answerability_started)
+                yield {"type": "error", "message": _answerability_error_message()}
+                return
+            yield _phase_event("answerability", "done", answerability_started)
+            if answerability is Answerability.UNANSWERABLE:
+                async for event in _handle_answerability_gate(question, docs):
+                    yield event
+                return
 
         # 4. 引用资料收紧（离题的不参与生成），再流式生成
         kept = _trim_docs(docs)
-        async for event in _handle_generate(question, history, kept):
+        generation_started = time.monotonic()
+        yield _phase_event("generation", "running", generation_started)
+        async for event in _handle_generate(
+            question, history, kept, phase_started=generation_started
+        ):
             yield event
     except Exception as exc:  # noqa: BLE001
         logger.exception("RAG 流式回答失败")

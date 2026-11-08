@@ -10,6 +10,7 @@ const ChatView = (() => {
   let sessionTotal = 0;       // 匹配总数（不搜索时就是全部会话数）
   let searchTimer = null;     // 搜索防抖
   let selectedCourse = "";    // 本轮检索限定的课程；空串表示全部可见知识库
+  let closeChatDrawer = () => {};
   const convMeta = new Map(); // id -> 会话概要：当前会话被挤出这一页时还能钉在最上面
   const SIDEBAR_LIMIT = 20;   // 侧边栏只取这么多条，再多去「对话历史」页
   const SEARCH_LIMIT = 50;    // 搜索结果最多取这么多条
@@ -39,7 +40,14 @@ const ChatView = (() => {
   function render(container, opts) {
     container.innerHTML = `
       <div class="chat-layout">
-        <aside class="chat-side">
+        <button type="button" class="chat-side-toggle" id="chat-side-toggle"
+          aria-label="打开会话列表" aria-controls="chat-side-panel" aria-expanded="false">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h10"/></svg>
+          <span>会话</span>
+        </button>
+        <button type="button" class="chat-side-backdrop" id="chat-side-backdrop" aria-label="关闭会话列表"></button>
+        <aside class="chat-side" id="chat-side-panel" aria-label="会话列表">
+          <button type="button" class="chat-side-close" id="chat-side-close" aria-label="关闭会话列表">×</button>
           <button class="chat-new" id="chat-new">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             <span>新对话</span>
@@ -76,6 +84,45 @@ const ChatView = (() => {
     const inputEl = document.getElementById("chat-input");
     const sendBtn = document.getElementById("send-btn");
     const courseEl = document.getElementById("chat-course");
+
+    const layoutEl = container.querySelector(".chat-layout");
+    const sideEl = document.getElementById("chat-side-panel");
+    const sideToggle = document.getElementById("chat-side-toggle");
+    const sideClose = document.getElementById("chat-side-close");
+    const sideBackdrop = document.getElementById("chat-side-backdrop");
+    const mobileChat = window.matchMedia("(max-width: 900px)");
+    const syncChatDrawer = (open, restoreFocus = true) => {
+      const expanded = mobileChat.matches && open;
+      layoutEl.classList.toggle("chat-side-open", expanded);
+      sideToggle.setAttribute("aria-expanded", String(expanded));
+      sideToggle.setAttribute("aria-label", expanded ? "关闭会话列表" : "打开会话列表");
+      if (mobileChat.matches) {
+        sideEl.setAttribute("aria-hidden", String(!expanded));
+        if (expanded) sideEl.removeAttribute("inert");
+        else sideEl.setAttribute("inert", "");
+      } else {
+        sideEl.removeAttribute("inert");
+        sideEl.removeAttribute("aria-hidden");
+      }
+      if (expanded) {
+        const first = sideEl.querySelector(".session-item.active, .chat-new");
+        if (first) setTimeout(() => first.focus(), 30);
+      } else if (restoreFocus && mobileChat.matches) {
+        sideToggle.focus();
+      }
+    };
+    closeChatDrawer = () => syncChatDrawer(false, false);
+    sideToggle.addEventListener("click", () =>
+      syncChatDrawer(!layoutEl.classList.contains("chat-side-open")));
+    sideClose.addEventListener("click", () => syncChatDrawer(false));
+    sideBackdrop.addEventListener("click", () => syncChatDrawer(false));
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && layoutEl.classList.contains("chat-side-open")) {
+        syncChatDrawer(false);
+      }
+    });
+    mobileChat.addEventListener("change", () => syncChatDrawer(false, false));
+    syncChatDrawer(false, false);
 
     courseEl.addEventListener("change", (e) => { selectedCourse = e.target.value; });
     // 只列出当前用户可见的知识库；接口失败就保持「全部课程」
@@ -269,6 +316,7 @@ const ChatView = (() => {
       stopStream();
     }
     currentConvId = id;
+    closeChatDrawer();
     document.querySelectorAll(".session-item").forEach((el) =>
       el.classList.toggle("active", Number(el.dataset.id) === id));
     const messagesEl = document.getElementById("chat-messages");
@@ -388,14 +436,25 @@ const ChatView = (() => {
     if (bodyEl.querySelector(".msg-sources")) return;  // 补生成时不重复插入
     const wrap = document.createElement("div");
     wrap.className = "msg-sources";
-    const items = sources.map((s) => `
+    const items = sources.map((s) => {
+      const documentName = s.filename || s.document || s.title || "未知来源";
+      const chapter = s.section || s.chapter || "";
+      const page = s.page ?? s.page_number ?? "";
+      const chunk = s.chunk_index ?? s.chunk ?? "";
+      return `
       <div class="src-item">
         <div class="src-item-head">
-          <span class="src-title">${Common.escapeHtml(s.title || "未知来源")}</span>
+          <span class="src-title">${Common.escapeHtml(documentName)}</span>
           ${s.course ? `<button type="button" class="src-course" data-course="${Common.escapeHtml(s.course)}" title="查看《${Common.escapeHtml(s.course)}》知识库">${Common.escapeHtml(s.course)}</button>` : ""}
         </div>
-        <div class="src-snippet">${Common.escapeHtml(s.content || "")}</div>
-      </div>`).join("");
+        <div class="src-meta">
+          ${chapter ? `<span>章节：${Common.escapeHtml(chapter)}</span>` : ""}
+          ${page !== "" ? `<span>页码：${Common.escapeHtml(page)}</span>` : ""}
+          ${chunk !== "" ? `<span>分块：${Common.escapeHtml(Number(chunk) + 1)}</span>` : ""}
+        </div>
+        <div class="src-snippet"><b>命中片段</b>${Common.escapeHtml(s.content || "")}</div>
+      </div>`;
+    }).join("");
     wrap.innerHTML = `
       <button type="button" class="src-toggle">
         ${ICON_DOC}<span>参考了 ${sources.length} 份资料</span>${ICON_ARROW}
@@ -560,12 +619,38 @@ const ChatView = (() => {
       assistantDiv.innerHTML = `
         <div class="msg-avatar">AI</div>
         <div class="msg-body">
+          <div class="chat-phase" role="status" aria-live="polite">
+            <span class="chat-phase-dot"></span>
+            <span class="chat-phase-text">正在准备回答</span>
+            <span class="chat-phase-time"></span>
+          </div>
           <div class="bubble md-body"><span class="typing-dots"><span></span><span></span><span></span></span></div>
         </div>`;
       messagesEl.appendChild(assistantDiv);
       scrollBottom();
 
       bubble = assistantDiv.querySelector(".bubble");
+      const phaseEl = assistantDiv.querySelector(".chat-phase");
+      const phaseText = assistantDiv.querySelector(".chat-phase-text");
+      const phaseTime = assistantDiv.querySelector(".chat-phase-time");
+      const phaseLabels = {
+        retrieval: "检索资料",
+        answerability: "判断可答性",
+        generation: "生成回答",
+      };
+      const setPhase = (evt) => {
+        const label = phaseLabels[evt.phase] || "处理中";
+        phaseEl.dataset.status = evt.status || "running";
+        if (evt.status === "running") {
+          phaseText.textContent = `正在${label}`;
+          phaseTime.textContent = "";
+        } else {
+          phaseText.textContent = evt.status === "error" ? `${label}失败` : `${label}完成`;
+          phaseTime.textContent = evt.elapsed_ms != null
+            ? `${(evt.elapsed_ms / 1000).toFixed(1)} 秒`
+            : "";
+        }
+      };
       let fullText = "";
       let renderTimer = null;
 
@@ -588,6 +673,9 @@ const ChatView = (() => {
           if (seq !== streamSeq) return;
           hadError = true;
           errorMsg = msg;
+          phaseEl.dataset.status = "error";
+          phaseText.textContent = "回答失败";
+          phaseTime.textContent = "";
           const errHtml = `<span style="color:var(--danger)">${Common.escapeHtml(msg)}</span>`;
           bubble.innerHTML = fullText
             ? `${Markdown.render(fullText)}<div style="margin-top:10px">${errHtml}</div>`
@@ -602,7 +690,13 @@ const ChatView = (() => {
           tip.className = "msg-note";
           tip.innerHTML = "该问题暂未在知识库中命中，已自动提交跟进；解决后可在侧边栏「我的反馈」中查看";
           body.appendChild(tip);
+          phaseEl.dataset.status = "unmatched";
+          phaseText.textContent = "知识库未命中";
           scrollBottom();
+        },
+        onPhase: (evt) => {
+          if (seq !== streamSeq) return;
+          setPhase(evt);
         },
         onSources: (sources) => {
           if (seq !== streamSeq) return;
@@ -620,6 +714,10 @@ const ChatView = (() => {
           if (!hadError) {
             bubble.innerHTML = fullText ? Markdown.render(fullText)
               : `<span style="color:var(--text-3)">已停止生成。</span>`;
+            if (!phaseEl.dataset.status || phaseEl.dataset.status === "running") {
+              phaseEl.dataset.status = "done";
+              phaseText.textContent = "回答完成";
+            }
           } else if (!fullText) {
             bubble.innerHTML = `<span style="color:var(--danger)">${Common.escapeHtml(errorMsg)}</span>`;
           }

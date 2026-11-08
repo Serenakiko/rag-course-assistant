@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import chromadb
@@ -18,6 +19,7 @@ from langchain_core.documents import Document
 
 from ..config import settings
 from .embedding_service import get_embedding_model_name, get_embeddings
+from .reranker import rerank_documents
 
 logger = logging.getLogger(__name__)
 
@@ -161,8 +163,118 @@ def _doc(text: str, metadata: dict) -> Document:
     return Document(page_content=text, metadata=metadata)
 
 
+def _chunk_locator(text: str) -> tuple[str, str]:
+    """从 PDF 页标记和 Markdown/章节标题提取引用定位信息。"""
+    page_match = re.search(r"【第\s*(\d+)\s*页】", text)
+    page = page_match.group(1) if page_match else ""
+
+    heading = re.search(r"(?m)^#{1,6}\s+(.+?)\s*$", text)
+    if heading:
+        section = heading.group(1).strip()
+    else:
+        numbered = re.search(
+            r"(?m)^(第[一二三四五六七八九十百\d]+[章节][^\n]{0,80})$", text
+        )
+        section = numbered.group(1).strip() if numbered else ""
+    return page, section
+
+
+def _chunk_locators(chunks: list[str]) -> list[tuple[str, str]]:
+    """为每个分块补齐最近一次出现的页码和章节。"""
+    current_page = ""
+    current_section = ""
+    locators: list[tuple[str, str]] = []
+    for text in chunks:
+        page, section = _chunk_locator(text)
+        if page:
+            current_page = page
+        if section:
+            current_section = section
+        locators.append((current_page, current_section))
+    return locators
+
+
+def _knowledge_base_vector_key(course: str) -> str:
+    """按课程名读取当前知识库的稳定向量身份。"""
+    if not course:
+        return ""
+    from sqlalchemy import select
+
+    from ..database import SessionLocal
+    from ..models import KnowledgeBase
+
+    with SessionLocal() as db:
+        return (
+            db.scalar(
+                select(KnowledgeBase.vector_key).where(
+                    KnowledgeBase.name == course
+                )
+            )
+            or ""
+        )
+
+
+def _active_vector_scope(
+    courses: list[str] | None,
+) -> tuple[set[str], set[str]]:
+    """返回当前有效知识库身份与可接受旧 metadata 的课程名。"""
+    from sqlalchemy import select
+
+    from ..database import SessionLocal
+    from ..models import KnowledgeBase, KnowledgeBaseTombstone
+
+    with SessionLocal() as db:
+        stmt = select(KnowledgeBase.name, KnowledgeBase.vector_key)
+        if courses:
+            stmt = stmt.where(KnowledgeBase.name.in_(courses))
+        rows = db.execute(stmt).all()
+        names = {name for name, _key in rows}
+        tombstones = (
+            db.execute(
+                select(
+                    KnowledgeBaseTombstone.course_name,
+                    KnowledgeBaseTombstone.knowledge_base_id,
+                ).where(KnowledgeBaseTombstone.course_name.in_(names))
+            ).all()
+            if names
+            else []
+        )
+    tombstoned = {name for name, _key in tombstones}
+    tombstoned_keys = {str(key) for _name, key in tombstones if key}
+    active_keys = {
+        str(key) for _name, key in rows if key and str(key) not in tombstoned_keys
+    }
+    legacy_courses = names - tombstoned
+    return active_keys, legacy_courses
+
+
+def is_active_vector(
+    doc: Document,
+    active_keys: set[str],
+    legacy_courses: set[str],
+) -> bool:
+    """把向量记录限定到当前有效知识库身份。
+
+    新向量必须命中 active_keys；旧版没有 knowledge_base_id 的向量只允许在
+    课程尚未删除（无 tombstone）时兼容。
+    """
+    src = doc.metadata or {}
+    kb_id = str(src.get("knowledge_base_id") or "")
+    if kb_id:
+        return kb_id in active_keys
+    course = str(src.get("course") or "")
+    return bool(course) and course in legacy_courses
+
+
 # ---------- 文档 ----------
-def add_document_chunks(doc_id: int, filename: str, course: str, chunks: list[str]) -> int:
+def add_document_chunks(
+    doc_id: int,
+    filename: str,
+    course: str,
+    chunks: list[str],
+    *,
+    knowledge_base_id: str | None = None,
+) -> int:
     """文档分块入库，返回写入块数。
 
     版本化 id：先写新版本（version 自增），成功后再删旧版本。这样 add 中途失败时
@@ -173,20 +285,28 @@ def add_document_chunks(doc_id: int, filename: str, course: str, chunks: list[st
     # 文档分块同时写 title（去扩展名）和 filename（完整名）：
     # title 供引用卡展示干净的标题（不带 .pdf 后缀），filename 供删文档时精确回退反馈。
     title = Path(filename).stem or filename
-    docs = [
-        _doc(
-            text,
-            {
-                "source_type": "document",
-                "doc_id": str(doc_id),
-                "filename": filename,
-                "title": title,
-                "course": course,
-                "chunk_index": i,
-            },
+    knowledge_base_id = knowledge_base_id or _knowledge_base_vector_key(course)
+    docs = []
+    for i, (text, (page, section)) in enumerate(
+        zip(chunks, _chunk_locators(chunks), strict=False)
+    ):
+        docs.append(
+            _doc(
+                text,
+                {
+                    "source_type": "document",
+                    "doc_id": str(doc_id),
+                    "filename": filename,
+                    "title": title,
+                    "course": course,
+                    "knowledge_base_id": knowledge_base_id,
+                    "chunk_index": i,
+                    "chunk_id": f"{doc_id}:{i}",
+                    "page": page,
+                    "section": section,
+                },
+            )
         )
-        for i, text in enumerate(chunks)
-    ]
     version = _next_version("document", str(doc_id))
     ids = [f"doc-{doc_id}-{i}-v{version}" for i in range(len(chunks))]
     get_vector_store().add_documents(docs, ids=ids)
@@ -268,7 +388,16 @@ def delete_document(doc_id: int, *, strict: bool = True) -> bool:
 
 
 # ---------- 知识点 ----------
-def add_knowledge_point(point_id: int, title: str, content: str, course: str, tags: str) -> None:
+def add_knowledge_point(
+    point_id: int,
+    title: str,
+    content: str,
+    course: str,
+    tags: str,
+    *,
+    knowledge_base_id: str | None = None,
+) -> None:
+    knowledge_base_id = knowledge_base_id or _knowledge_base_vector_key(course)
     doc = _doc(
         f"{title}\n{content}",
         {
@@ -276,6 +405,7 @@ def add_knowledge_point(point_id: int, title: str, content: str, course: str, ta
             "point_id": str(point_id),
             "title": title,
             "course": course,
+            "knowledge_base_id": knowledge_base_id,
             "tags": tags,
         },
     )
@@ -321,11 +451,54 @@ def delete_knowledge_point(point_id: int, *, strict: bool = True) -> bool:
     return _delete_point_versions(point_id, strict=strict)
 
 
+def delete_knowledge_base_vectors(
+    knowledge_base_id: str, course: str, *, strict: bool = True
+) -> bool:
+    """删除某知识库的全部向量，包括没有 knowledge_base_id 的旧版记录。"""
+    try:
+        try:
+            collection = get_collection()
+        except Exception as exc:  # noqa: BLE001
+            if "does not exist" in str(exc).lower():
+                return True
+            raise
+        data = collection.get(
+            where={"course": course},
+            include=["metadatas"],
+        )
+        ids = [
+            vec_id
+            for vec_id, metadata in zip(
+                data.get("ids") or [],
+                data.get("metadatas") or [],
+                strict=False,
+            )
+            if str((metadata or {}).get("knowledge_base_id") or "") in (
+                "",
+                knowledge_base_id,
+            )
+        ]
+        if ids:
+            collection.delete(ids=ids)
+    except Exception:  # noqa: BLE001
+        logger.error(
+            "删除知识库向量失败 knowledge_base_id=%s course=%s",
+            knowledge_base_id,
+            course,
+            exc_info=True,
+        )
+        if strict:
+            raise
+        return False
+    return True
+
+
 # ---------- 检索 ----------
 def search(
     query: str,
     top_k: int | None = None,
     courses: list[str] | None = None,
+    source_types: tuple[str, ...] | list[str] | None = None,
 ) -> list[tuple[Document, float]]:
     """相似度检索，返回 (文档, 相似度) 列表，按相似度降序。
 
@@ -339,18 +512,29 @@ def search(
     # 否则空列表会被当成"不过滤"，反而把全部知识库都捞出来。
     if courses is not None and not courses:
         return []
-    filter_ = None
+    conditions: list[dict] = []
     if courses:
-        filter_ = {"course": {"$in": courses}}
+        conditions.append({"course": {"$in": courses}})
+    if source_types:
+        conditions.append({"source_type": {"$in": list(source_types)}})
+    filter_ = None
+    if len(conditions) == 1:
+        filter_ = conditions[0]
+    elif len(conditions) > 1:
+        filter_ = {"$and": conditions}
+    candidate_k = max(k * 4, settings.RERANK_CANDIDATES) if settings.RERANK_ENABLED else max(k * 3, 12)
     results = get_vector_store().similarity_search_with_score(
-        query, k=max(k * 3, 12), filter=filter_
+        query, k=candidate_k, filter=filter_
     )
+    active_keys, legacy_courses = _active_vector_scope(courses)
 
     # 去重：同一文档的同一分块、以及内容完全相同的资料，只保留最相关的一条
     seen_keys: set[tuple] = set()
     seen_content: set[str] = set()
     deduped: list[tuple[Document, float]] = []
     for doc, score in results:
+        if not is_active_vector(doc, active_keys, legacy_courses):
+            continue
         src = doc.metadata
         key = (
             src.get("course"),
@@ -364,4 +548,17 @@ def search(
         seen_content.add(content)
         # Chroma cosine space 的 score 是距离（1 - cosine），转回相似度
         deduped.append((doc, 1.0 - float(score)))
+    if settings.RERANK_ENABLED:
+        deduped = rerank_documents(
+            query,
+            deduped,
+            vector_weight=settings.RERANK_VECTOR_WEIGHT,
+            lexical_weight=settings.RERANK_LEXICAL_WEIGHT,
+        )
+        selected = deduped[:k]
+        if selected:
+            semantic_best = max(deduped, key=lambda item: item[1])
+            if all(doc is not semantic_best[0] for doc, _score in selected):
+                selected[-1] = semantic_best
+        return selected
     return deduped[:k]

@@ -1,97 +1,134 @@
 # 检索评测
 
-> 本脚本只评「检索层 + 距离门控」，不调用对话模型。`ANSWERABILITY_CHECK`（可答性判定）需要真实 LLM，适合在应用层用人工标注或端到端测试单独评估。
+> 本脚本只评「检索层 + 距离门控」，不调用对话模型。`ANSWERABILITY_CHECK` 需要真实 LLM，应在应用层用人工标注或端到端测试单独评估。
 
-## 数据集
+## 两套评测口径
 
-标注集在 [`evaluation/golden.json`](../evaluation/golden.json)，共 40 条：
+加入文档分块后，同一问题的正确知识点可能排在第 2 位。若仍把知识点和文档分块混在一起按标题算 MRR，分数会被语料规模和分块策略影响，不能代表知识点库本身的质量。
+
+| 作用域 | `--scope` | 检索范围 | 用途 |
+| --- | --- | --- | --- |
+| 知识点库评测 | `knowledge_points` | 只检索 `source_type=knowledge_point` | 论文主表、知识点召回质量 |
+| 完整混合语料评测 | `full` | 同时检索知识点和文档分块 | 真实问答语料下的端到端检索压力 |
+
+两套结果必须分别报告，不能用一个数字混称“RAG 检索准确率”。
+
+## 标注字段
+
+`evaluation/golden.json` 共 40 条：
 
 | 类别 | 数量 | 用途 |
 | --- | --- | --- |
-| `answerable` | 20 | 每个知识点一条标准问法，测 recall@k / MRR |
-| `paraphrase` | 10 | 换个说法问同一知识点，测语义检索鲁棒性 |
-| `unanswerable` | 6 | 完全无关问题，测拒答准确率 |
-| `near_miss` | 4 | 资料相近但未直接覆盖，测“相近但不可答”的边界 |
+| `answerable` | 20 | 每个知识点一条标准问法 |
+| `paraphrase` | 10 | 换个说法问同一知识点 |
+| `unanswerable` | 6 | 完全无关问题 |
+| `near_miss` | 4 | 资料相近但未直接覆盖 |
 
-字段：
+另有 `evaluation/student_questions.json`，共 21 条去重后的真实学生提问，字段包含 `source_message_id` 和对应的知识点 ID。该集合没有负样本，因此只用于观察真实问法下的 recall/MRR/误拒率，不单独解释拒答准确率。
+
+推荐使用稳定 ID 标注：
 
 ```json
 {
-  "question": "TCP 为什么需要三次握手？",
-  "course": "计算机网络",
-  "relevant_titles": ["TCP 三次握手与四次挥手"],
+  "question": "进程和线程有什么区别？",
+  "course": "操作系统",
+  "relevant_knowledge_base_ids": ["kb_..."],
+  "relevant_point_ids": ["11"],
+  "relevant_document_ids": ["42"],
+  "relevant_chunk_ids": ["42:0"],
+  "relevant_titles": ["进程与线程"],
   "expect_unmatched": false,
   "category": "answerable"
 }
 ```
 
-`relevant_titles` 使用知识点的 `title`，与向量 metadata 中的 `title` 对应。
+匹配顺序为知识库 ID、文档 ID、chunk ID、知识点 ID；旧标注仍可用 `relevant_titles` 回退。
 
 ## 指标
 
-- **recall@k**：top-k 内命中任意 `relevant_titles` 的比例。
-- **MRR**：第一个正确结果排名的倒数均值。
+- **recall@k**：top-k 内命中任一期望资料的比例。
+- **MRR**：第一个正确结果的排名倒数均值。
 - **拒答准确率**：`expect_unmatched=true` 的问题中，top1 相似度低于阈值的比例。
 - **误拒率**：可答问题中，top1 相似度低于阈值的比例。
 - **跨课程误召回**：top1 命中的课程与期望课程不一致的条数。
 
 ## 运行
 
-先确保 `.env` 已配置（至少 `JWT_SECRET`），并且知识库已入库：
+确保 `.env` 已配置，知识库和文档已入库：
 
 ```bash
 ollama pull qwen3:8b
 ollama pull bge-m3
-python demo/seed_demo.py        # 或直接启动一次应用让 backend.seed 写入
+python demo/seed_demo.py
 ```
 
-跑评测：
+分别运行两套口径：
 
 ```bash
-python -m evaluation.evaluate
-python -m evaluation.evaluate --top-k 3
-python -m evaluation.evaluate --thresholds
-python -m evaluation.evaluate --thresholds --json evaluation/last_run.json
+python -m evaluation.evaluate --scope knowledge_points
+python -m evaluation.evaluate --scope full
+python -m evaluation.evaluate --scope knowledge_points --thresholds
+python -m evaluation.evaluate --scope full --thresholds
+python -m evaluation.evaluate --scope knowledge_points \
+  --golden evaluation/student_questions.json
+python -m evaluation.evaluate --scope full \
+  --golden evaluation/student_questions.json
+python -m evaluation.evaluate --scope full --json evaluation/results/full_corpus.json
 ```
 
-## 论文里建议做的对比
+## 当前结果
 
-1. **纯 LLM**：不检索，直接回答；统计编造率与拒答率。
-2. **普通 RAG**：只做向量检索 + 生成，不开三重门控。
-3. **完整系统**：距离门控 + 未收录标记 + 可答性判定。
-4. **消融**：分别关闭距离门控、可答性判定，观察拒答准确率与误拒率。
-5. **参数**：`top_k` 取 3 / 5 / 8，chunk size 取 500 / 800 / 1000。
+环境：`bge-m3`，`top_k=5`，`UNMATCHED_SIMILARITY=0.56`，混合 reranker 权重 `0.95/0.05`。
 
-建议把每次运行的 `--json` 结果保存到 `evaluation/results/`，论文表格直接引用。
-
-## 结果记录（40 条标注集，bge-m3）
-
-| 配置 | recall@k | MRR | 拒答准确率 | 误拒率 | 跨课程误召回 |
+| 作用域 | recall@5 | MRR | 拒答准确率 | 误拒率 | 跨课程误召回 |
 | --- | --- | --- | --- | --- | --- |
-| 无门控（top5，threshold=0.0） | 1.000 | 1.000 | 0.000 | 0.000 | 0 |
-| 旧默认（top5，0.40） | 1.000 | 1.000 | 0.000 | 0.000 | 0 |
-| top3，0.40 | 1.000 | 1.000 | 0.000 | 0.000 | 0 |
-| top8，0.40 | 1.000 | 1.000 | 0.000 | 0.000 | 0 |
-| 保守推荐（top5，0.54） | 1.000 | 1.000 | 0.800 | 0.0333 | 0 |
-| **当前默认（top5，0.56）** | **1.000** | **1.000** | **0.900** | **0.0667** | **0** |
-| 实验最优（top5，0.58） | 1.000 | 1.000 | 1.000 | 0.0667 | 0 |
+| 知识点库 `knowledge_points` | 1.0000 | 1.0000 | 0.8000 | 0.0667 | 0 |
+| 完整混合语料 `full` | 1.0000 | 0.8778 | 0.8000 | 0.0667 | 1 |
 
-结论：
+真实学生问题：
 
-- 20 条标准问法和 10 条改写问法全部在 top1 命中，recall@3/5/8 都是 1.0，说明当前数据规模下检索不是瓶颈。
-- 0.40 的旧默认会放行全部 10 条无关/相近未覆盖问题；提高到 0.56 后拒答 9/10，只误拒 2/30 条改写问法。
-- 0.58 能把 10/10 全部拒掉，误拒率与 0.56 相同；但更接近部分可答问题的相似度，泛化风险略高，所以运行默认取 0.56。
-- 0.56 下 6 条完全无关全部拒掉，4 条 near_miss 拒掉 3 条；剩下 1 条（TCP 慢启动，top1=0.5719）需要 `ANSWERABILITY_CHECK` 兜底。
-- 这组结果说明：**距离门控负责拦明显无关，near_miss 仍应交给 ANSWERABILITY_CHECK**。论文里应同时报告两道门控的消融结果。
+| 作用域 | 条数 | recall@5 | MRR | 误拒率 | 跨课程误召回 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 知识点库 `knowledge_points` | 21 | 1.0000 | 0.9524 | 0.2381 | 1 |
+| 完整混合语料 `full` | 21 | 1.0000 | 0.8071 | 0.1429 | 0 |
 
-原始 JSON 在 `evaluation/results/`：
-`default.json`（当前默认 0.56）、`top5_nogate.json`、`top5_thr040.json`、`top5_thr054.json`、`top5_thr056.json`、`top5_thr058.json`、`top3_thr040.json`、`top8_thr040.json`。
+关键结论：
 
-> 换 embedding 模型或增加课程资料后，先重新跑 `python -m evaluation.evaluate --thresholds`，再决定 `.env` 里的 `UNMATCHED_SIMILARITY`。
+- 知识点库在 20 条标准问法和 10 条改写问法上均为 top1 命中；该作用域 MRR 为 `1.0000`。
+- 完整混合语料中仍会有正确资料排到第 2/3 位，因此 MRR 为 `0.8778`；加入 `0.95/0.05` 混合重排前为 `0.8500`，知识点库则从 `0.9833` 恢复到 `1.0000`，没有牺牲主表质量。
+- 0.56 阈值下拒答 8/10，误拒 2/30。`near_miss` 仍有 2 条未被距离门控拦截，应由 `ANSWERABILITY_CHECK` 兜底。
+- 完整语料有 1 条 top1 跨课程误召回，论文中应单列，不能隐藏在总体 recall 内。
+
+可复现结果 JSON：
+
+- `evaluation/results/knowledge_points.json`
+- `evaluation/results/full_corpus.json`
+- `evaluation/results/student_questions_knowledge_points.json`
+- `evaluation/results/student_questions_full.json`
+- `evaluation/results/pdf_extraction.json`
+- `evaluation/results/default.json` 及 `top*_*.json` 中的参数对比结果
+
+## PDF 页码抽取质量
+
+```bash
+python -m evaluation.pdf_extraction
+```
+
+脚本统计真实 PDF 的页数、可提取文本页覆盖率、短页比例，以及分块后能定位页码的 chunk 比例。当前 `data/uploads` 中没有 PDF，因此结果 JSON 明确为 `status=no_samples`。加入真实 PDF 后应重新运行，不能把 Markdown 章节 metadata 的覆盖情况当作 PDF 页码质量。
+
+## 消融建议
+
+1. **纯 LLM**：不检索，统计编造率与拒答率。
+2. **普通 RAG**：向量检索 + 生成，不开门控。
+3. **完整系统**：距离门控 + 可答性三态 + 未收录标记。
+4. **消融**：分别关闭距离门控、可答性判定，观察拒答准确率与误拒率。
+5. **重排消融**：`RERANK_ENABLED=false` vs `true`，并比较 `RERANK_LEXICAL_WEIGHT` 的 0.05 / 0.10 / 0.30。
+6. **参数**：`top_k` 取 3 / 5 / 8，chunk size 取 500 / 800 / 1000。
 
 ## 局限
 
-- 40 条标注来自 20 个种子知识点，不是真实学生问题的分布；recall@5 = 1.0 / MRR = 1.0 只说明**在这套小数据集上检索已饱和**，不能外推到真实课堂。
-- 本脚本只评检索层和距离门控，不包含 `ANSWERABILITY_CHECK` 的 LLM 判定；后者需要单独做端到端评估。
-- 阈值是按 `bge-m3` 标定的；换 embedding 模型后必须重新标定。`vector_store` 会在 `data/chroma/embedding_model.txt` 记录模型名，同维度换模型时打警告，避免静默漂移。
-- 论文中应写明「小规模演示数据集」，并在积累真实提问后扩充到 100 条以上复测。
+- 40 条种子标注与 21 条真实学生问题必须分开报告，不能混成一个总体分数。
+- 本脚本不包含 `ANSWERABILITY_CHECK` 的 LLM 判定，不能把离线检索指标当作端到端回答准确率。
+- 阈值按 `bge-m3` 标定；换 embedding 模型后必须重新跑 `--thresholds`。
+- 当前真实学生问题仍只有 21 条，论文中应写明规模，并继续扩充到 100 条以上。
+- 当前上传目录没有真实 PDF，因此页码抽取质量暂为 `no_samples`；该缺口不影响 Markdown/CSV 的章节 metadata。

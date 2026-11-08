@@ -23,7 +23,8 @@
 
 ## ✨ 功能特性
 
-- **流式问答 + 引用溯源** — 回答附引用来源，可点开查看原文片段
+- **流式问答 + 引用溯源** — 回答附文档、章节、页码、分块与命中片段；旧向量缺 metadata 时从正文自动回填
+- **混合重排** — 向量候选叠加 BM25 词法分数，零额外模型调用；知识点库 MRR 保持 1.0，混合语料 MRR 从 0.85 提升到 0.8778
 - **三重拒答防线** — 距离门控、未收录标记、可答性判定，知识库没覆盖就明确拒答
 - **反馈闭环** — 未命中问题自动记录，管理员按问题聚类、补资料后一键重新生成回答
 - **知识库可见性隔离** — 学生只能检索公共库和自己的库，公共库对非创建者只读
@@ -35,7 +36,7 @@
 - [系统架构](docs/architecture.md) — 总体架构、ER 图、问答时序、三重拒答
 - [检索评测](docs/evaluation.md) — 标注集、指标、消融实验建议
 - [论文贡献点](docs/contributions.md) — 三条贡献及对应代码/实验
-- [已知限制](docs/limitations.md) — 默认密码、限流、迁移、评测规模等边界
+- [已知限制](docs/limitations.md) — 管理员初始密码、限流、迁移、评测规模等边界
 - [演示数据](demo/README.md) — 答辩账号与演示数据生成
 
 ## 🚀 快速开始
@@ -68,13 +69,15 @@ python run.py
 
 > Windows 用户也可直接双击 `start.bat`（一键启动）：优先使用项目内 `venv\Scripts\python.exe`，没有建 venv 时自动回退到 PATH 里的 `python`，两者都能启动。
 
-### 默认账号
+### 管理员初始账号
 
-| 角色 | 账号 | 密码 |
-| --- | --- | --- |
-| 管理员 | `23040107` | `111111` |
+首次启动时，管理员账号固定为 `23040101`，但**不再使用公开默认密码**：
 
-> ⚠️ 首次登录后请立即在「个人中心」修改密码。默认值以 `backend/seed_data.py` 的 `DEFAULT_ADMIN` 为准；可在 `.env` 用 `DEFAULT_ADMIN_PASSWORD` 覆盖首次创建时的密码。
+- 未配置 `.env` 的 `DEFAULT_ADMIN_PASSWORD` 时，系统生成随机初始密码，写入本机文件 `data/admin_initial_credentials.txt`。
+- 显式配置的管理员密码至少 8 位；过短或等于旧公开密码时仍会改为随机密码。
+- 管理员首次登录后必须立即改密；改密成功会删除对应初始密码记录。
+- 已经使用过 `111111` 等旧默认密码的管理员账号，会在启动时自动轮换，旧令牌同时失效。
+- 如通过 cpolar / ngrok 暴露公网，仍应只在受控环境读取服务器上的初始密码文件，不要把该文件放进静态目录或提交到 Git。
 
 ### 其它启动方式
 
@@ -141,10 +144,17 @@ rag-course-assistant/
 ```bash
 python -m pytest                              # 全部自动化用例（含 HTTP 集成与 node 前端回归）
 python -m ruff check .                        # 静态检查
-python -m evaluation.evaluate                 # 检索质量评测
-python -m evaluation.evaluate --thresholds    # 拒答阈值扫描
+python -m evaluation.evaluate --scope knowledge_points   # 知识点库评测
+python -m evaluation.evaluate --scope full               # 完整混合语料评测
+python -m evaluation.evaluate --scope full --thresholds  # 拒答阈值扫描
+python -m evaluation.evaluate --scope knowledge_points \
+  --golden evaluation/student_questions.json             # 21 条真实学生问题
+python -m evaluation.pdf_extraction                      # PDF 页码抽取质量
+python .tools/rebuild_vectors.py                         # 旧文档补页码/章节 metadata
 python demo/seed_demo.py                      # 生成答辩演示数据
 ```
+
+真实学生问题集来自 `messages` 表中 21 条去重后的学生提问，保留 `source_message_id` 便于追溯；`evaluation/pdf_extraction.py` 在 `data/uploads` 没有 PDF 时输出 `status=no_samples`，不会伪造质量数字。
 
 测试覆盖后端单元（pytest，模型用 fake）、前端纯函数（node 回归）、端到端（`.tools/kb_e2e.py`）和性能/安全场景。阈值标定可参考 `.tools/kb_probe.py` / `.tools/kb_calibrate.py`。
 
@@ -152,7 +162,7 @@ python demo/seed_demo.py                      # 生成答辩演示数据
 
 - **页面显示「127.0.0.1 拒绝了连接请求」** — 服务还没启动完（冷启动约 15s），等日志出现监听信息再刷新；若报错，常见原因是 `JWT_SECRET` 未配置。
 - **问答报「模型服务还没准备好」** — Ollama 未启动或无对应模型，`ollama list` 确认后 `ollama pull`。
-- **回答总被拒答 / 检索异常** — 先停后端运行 `python .tools/rebuild_vectors.py` 重建向量，再 `python .tools/kb_probe.py` 看距离分布。换过向量模型必须重新标定阈值。
+- **回答总被拒答 / 检索异常** — 先停后端运行 `python .tools/rebuild_vectors.py` 重建向量，再 `python .tools/kb_probe.py` 看距离分布。升级前入库的旧文档也应由该命令补齐章节/页码 metadata；换过向量模型必须重新标定阈值。
 - **误删知识库** — 管理员登录进回收站，30 天内可恢复。
 - **清空所有数据** — 删除 `data/app.db`、`data/chroma/`、`data/trash/` 后重启。
 

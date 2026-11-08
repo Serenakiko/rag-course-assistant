@@ -207,13 +207,13 @@ const DocumentsView = (() => {
     } else {
       tbody.innerHTML = docRows.map((d, i) => `
         <tr>
-          <td>${start + i + 1}</td>
-          <td title="${Common.escapeHtml(d.error || "")}" style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Common.escapeHtml(d.filename)}${d.status === "failed" ? ' <span class="file-type-badge" style="background:var(--danger-bg);color:var(--danger)">解析失败</span>' : d.status === "processing" ? ' <span class="file-type-badge">解析中</span>' : ""}</td>
-          <td>${Common.escapeHtml(d.course || "-")}</td>
-          <td><span class="file-type-badge">${Common.escapeHtml(d.file_type.toUpperCase())}</span></td>
-          <td>${Common.fmtSize(d.file_size)}</td>
-          <td class="muted">${Common.fmtTime(d.created_at)}</td>
-          <td>
+          <td data-label="序号">${start + i + 1}</td>
+          <td data-label="文件名" title="${Common.escapeHtml(d.error || "")}" style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Common.escapeHtml(d.filename)}${d.status === "failed" ? ' <span class="file-type-badge" style="background:var(--danger-bg);color:var(--danger)">解析失败</span>' : d.status === "processing" ? ' <span class="file-type-badge">解析中</span>' : ""}</td>
+          <td data-label="所属知识库">${Common.escapeHtml(d.course || "-")}</td>
+          <td data-label="类型"><span class="file-type-badge">${Common.escapeHtml(d.file_type.toUpperCase())}</span></td>
+          <td data-label="大小">${Common.fmtSize(d.file_size)}</td>
+          <td data-label="上传时间" class="muted">${Common.fmtTime(d.created_at)}</td>
+          <td data-label="操作">
             <button class="ops-link" data-view="${d.id}">查看</button>
             ${d.status === "failed" ? `<button class="ops-link" data-retry="${d.id}">重新解析</button>` : ""}
             <button class="ops-link del" data-del="${d.id}" data-name="${Common.escapeHtml(d.filename)}">删除</button>

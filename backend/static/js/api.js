@@ -68,7 +68,7 @@ const API = (() => {
 
   /**
    * 流式问答：POST /api/chat/ask，按 SSE 事件回调。
-   * handlers: { onToken, onSources, onError, onUnmatched, onDone }
+   * handlers: { onToken, onSources, onError, onUnmatched, onPhase, onDone }
    * opts: { idleTimeout, totalTimeout }（毫秒）——长时间无内容 / 总时长超限时自动中止，
    *       避免网络或模型异常导致页面一直卡在“生成中”；
    *       regenerate——重新生成（后端不重复保存提问，先删掉旧回答）
@@ -163,7 +163,8 @@ const API = (() => {
             for (const line of lines) {
               try {
                 const evt = JSON.parse(line.slice(6));
-                if (evt.type === "token" && handlers.onToken) handlers.onToken(evt.content);
+                if (evt.type === "phase" && handlers.onPhase) handlers.onPhase(evt);
+                else if (evt.type === "token" && handlers.onToken) handlers.onToken(evt.content);
                 else if (evt.type === "sources" && handlers.onSources) handlers.onSources(evt.sources);
                 else if (evt.type === "unmatched" && handlers.onUnmatched) handlers.onUnmatched(evt);
                 else if (evt.type === "saved" && handlers.onSaved) handlers.onSaved(evt.message_id);

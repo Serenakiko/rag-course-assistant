@@ -42,7 +42,7 @@ const ProfileView = (() => {
             <div class="form-group">
               <label>新密码</label>
               <div class="p-pwd-wrap">
-                <input class="form-control p-pwd-input" id="p-new" type="password" placeholder="至少 6 位" autocomplete="new-password" ${ro}>
+                <input class="form-control p-pwd-input" id="p-new" type="password" placeholder="至少 8 位" autocomplete="new-password" ${ro}>
                 <button type="button" class="p-pwd-toggle" data-toggle="p-new" aria-label="显示或隐藏密码">${EYE_ON}</button>
               </div>
             </div>
@@ -93,7 +93,7 @@ const ProfileView = (() => {
       const wantsPwd = !!(oldPwd || newPwd || newPwd2);
       if (wantsPwd) {
         if (!oldPwd || !newPwd) return Common.toast("修改密码请填写原密码和新密码", "error");
-        if (newPwd.length < 6) return Common.toast("新密码至少 6 位", "error");
+        if (newPwd.length < 8) return Common.toast("新密码至少 8 位", "error");
         if (newPwd !== newPwd2) return Common.toast("两次输入的新密码不一致", "error");
       }
 
@@ -179,5 +179,64 @@ const ProfileView = (() => {
     }});
   }
 
-  return { render, openAvatarModal };
+  function openRequiredPasswordChange() {
+    const box = Common.openModal(`
+      <div class="modal-header">
+        <h3>首次登录：请修改管理员密码</h3>
+      </div>
+      <div class="alert-msg mb-16">
+        当前使用的是系统生成的初始密码。修改后旧会话立即失效，需要使用新密码重新登录。
+      </div>
+      <div class="form-group">
+        <label for="force-old-pwd">初始密码</label>
+        <input class="form-control" id="force-old-pwd" type="password" autocomplete="current-password" autofocus>
+      </div>
+      <div class="form-group">
+        <label for="force-new-pwd">新密码</label>
+        <input class="form-control" id="force-new-pwd" type="password" autocomplete="new-password" placeholder="至少 8 位">
+      </div>
+      <div class="form-group">
+        <label for="force-new-pwd2">确认新密码</label>
+        <input class="form-control" id="force-new-pwd2" type="password" autocomplete="new-password">
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" id="force-pwd-submit">修改并重新登录</button>
+      </div>
+    `, { dismissible: false });
+
+    const submit = async () => {
+      const oldPwd = box.querySelector("#force-old-pwd").value;
+      const newPwd = box.querySelector("#force-new-pwd").value;
+      const newPwd2 = box.querySelector("#force-new-pwd2").value;
+      if (!oldPwd || !newPwd) return Common.toast("请填写初始密码和新密码", "error");
+      if (newPwd.length < 8) return Common.toast("管理员新密码至少 8 位", "error");
+      if (newPwd === oldPwd) return Common.toast("新密码不能与初始密码相同", "error");
+      if (newPwd !== newPwd2) return Common.toast("两次输入的新密码不一致", "error");
+      const btn = box.querySelector("#force-pwd-submit");
+      btn.disabled = true;
+      btn.textContent = "修改中…";
+      try {
+        await API.request("POST", "/api/auth/change-password", {
+          old_password: oldPwd,
+          new_password: newPwd,
+        });
+        Common.closeModal();
+        Common.toast("管理员密码已更新，请使用新密码登录", "success");
+        setTimeout(() => API.goLogin(), 900);
+      } catch (err) {
+        Common.toast(err.message, "error");
+        btn.disabled = false;
+        btn.textContent = "修改并重新登录";
+      }
+    };
+    box.querySelector("#force-pwd-submit").addEventListener("click", submit);
+    box.querySelector("#force-new-pwd2").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submit();
+      }
+    });
+  }
+
+  return { render, openAvatarModal, openRequiredPasswordChange };
 })();

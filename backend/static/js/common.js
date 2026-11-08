@@ -43,21 +43,99 @@ const Common = (() => {
   }
 
   /* ---------- 弹窗 ---------- */
-  function openModal(html, { size = "", onOpen } = {}) {
+  let lastFocused = null;
+  let modalKeyHandler = null;
+  let modalCloseHandler = null;
+  let modalDismissible = true;
+
+  function modalFocusable(box) {
+    return [...box.querySelectorAll(
+      'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), ' +
+      'textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+    )].filter((el) => el.offsetParent !== null);
+  }
+
+  function focusModal(box, preferred) {
+    const target = preferred || box.querySelector("[autofocus]") ||
+      modalFocusable(box)[0] || box;
+    try { target.focus({ preventScroll: true }); } catch { target.focus(); }
+  }
+
+  function openModal(
+    html,
+    { size = "", onOpen, onClose, initialFocus, dismissible = true } = {}
+  ) {
     const mask = document.getElementById("modal-mask");
     const box = document.getElementById("modal-box");
+    lastFocused = document.activeElement;
+    modalCloseHandler = typeof onClose === "function" ? onClose : null;
+    modalDismissible = dismissible;
     box.className = "modal" + (size ? " " + size : "");
     box.innerHTML = html;
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    box.setAttribute("tabindex", "-1");
+    const title = box.querySelector("h3, .alert-title");
+    if (title) {
+      const titleId = "modal-title-" + Math.random().toString(36).slice(2, 9);
+      title.id = titleId;
+      box.setAttribute("aria-labelledby", titleId);
+    } else {
+      box.removeAttribute("aria-labelledby");
+    }
+    mask.setAttribute("aria-hidden", "false");
     mask.classList.add("show");
-    mask.onclick = (e) => { if (e.target === mask) closeModal(); };
+    mask.onclick = (e) => {
+      if (modalDismissible && e.target === mask) closeModal();
+    };
+    modalKeyHandler = (e) => {
+      if (!mask.classList.contains("show")) return;
+      if (e.key === "Escape" && modalDismissible) {
+        e.preventDefault();
+        closeModal();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const items = modalFocusable(box);
+      if (!items.length) {
+        e.preventDefault();
+        box.focus();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", modalKeyHandler, true);
     if (onOpen) onOpen(box);
+    requestAnimationFrame(() => focusModal(box, initialFocus));
     return box;
   }
 
-  function closeModal() {
+  function closeModal(reason) {
     const mask = document.getElementById("modal-mask");
+    if (!mask.classList.contains("show")) return;
     mask.classList.remove("show");
+    mask.setAttribute("aria-hidden", "true");
+    mask.onclick = null;
+    if (modalKeyHandler) {
+      document.removeEventListener("keydown", modalKeyHandler, true);
+      modalKeyHandler = null;
+    }
     document.getElementById("modal-box").innerHTML = "";
+    const callback = modalCloseHandler;
+    modalCloseHandler = null;
+    if (lastFocused && document.contains(lastFocused)) {
+      try { lastFocused.focus({ preventScroll: true }); } catch { lastFocused.focus(); }
+    }
+    lastFocused = null;
+    if (callback) callback(reason === true);
   }
 
   const ALERT_ICONS = {
@@ -81,13 +159,9 @@ const Common = (() => {
         </div>
         <div class="modal-footer">
           <button class="btn btn-primary" data-ok>${escapeHtml(okText)}</button>
-        </div>`);
-      const done = () => { closeModal(); resolve(true); };
+        </div>`, { onClose: () => resolve(true) });
+      const done = () => closeModal(true);
       box.querySelector("[data-ok]").onclick = done;
-      // 点遮罩也算关闭，避免 Promise 一直挂着
-      document.getElementById("modal-mask").onclick = (e) => {
-        if (e.target.id === "modal-mask") done();
-      };
     });
   }
 
@@ -105,13 +179,10 @@ const Common = (() => {
           <button class="btn" data-cancel>取消</button>
           <button class="btn ${danger ? "btn-danger" : "btn-primary"}" data-ok>${escapeHtml(okText)}</button>
         </div>
-      `);
-      const done = (v) => { closeModal(); resolve(v); };
+      `, { onClose: (ok) => resolve(ok) });
+      const done = (v) => closeModal(v);
       box.querySelector("[data-cancel]").onclick = () => done(false);
       box.querySelector("[data-ok]").onclick = () => done(true);
-      document.getElementById("modal-mask").onclick = (e) => {
-        if (e.target.id === "modal-mask") done(false);
-      };
     });
   }
 

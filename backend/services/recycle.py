@@ -35,6 +35,26 @@ def drop_files(item: RecycleItem) -> None:
     shutil.rmtree(item_dir(item.id), ignore_errors=True)
 
 
+def _restore_moved_files(moved_files: list[tuple[Path, Path]]) -> bool:
+    """把快照归档文件移回原路径；任意一条失败都返回 False。"""
+    restored_all = True
+    for original, archived in reversed(moved_files):
+        if not archived.exists():
+            if not original.exists():
+                restored_all = False
+            continue
+        if original.exists():
+            restored_all = False
+            continue
+        try:
+            original.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(archived), str(original))
+        except OSError:
+            restored_all = False
+            logger.exception("快照失败后恢复文件失败：%s", original)
+    return restored_all
+
+
 def snapshot_base(db: Session, base: KnowledgeBase, user_id: int | None) -> RecycleItem:
     """删除知识库前落快照：库、知识点、文档元信息，源文件移进 trash。
 
@@ -54,43 +74,56 @@ def snapshot_base(db: Session, base: KnowledgeBase, user_id: int | None) -> Recy
     target.mkdir(parents=True, exist_ok=True)
 
     moved: list[dict] = []
-    for d in docs:
-        entry = {
-            "filename": d.filename,
-            "file_type": d.file_type,
-            "file_size": d.file_size,
-            "uploaded_by": d.uploaded_by,
-            "is_seed": d.is_seed or 0,
-            "trash_name": "",
-        }
-        src = Path(d.stored_path) if d.stored_path else None
-        if src is not None and src.exists():
-            name = f"{uuid.uuid4().hex}{src.suffix}"
-            try:
-                shutil.move(str(src), str(target / name))
-                entry["trash_name"] = name
-            except OSError:
-                logger.warning("回收站归档文件失败：%s", src)
-        moved.append(entry)
+    moved_files: list[tuple[Path, Path]] = []
+    try:
+        for d in docs:
+            entry = {
+                "doc_id": d.id,
+                "filename": d.filename,
+                "file_type": d.file_type,
+                "file_size": d.file_size,
+                "uploaded_by": d.uploaded_by,
+                "is_seed": d.is_seed or 0,
+                "trash_name": "",
+            }
+            src = Path(d.stored_path) if d.stored_path else None
+            if src is not None and src.exists():
+                name = f"{uuid.uuid4().hex}{src.suffix}"
+                try:
+                    destination = target / name
+                    shutil.move(str(src), str(destination))
+                    moved_files.append((src, destination))
+                    entry["trash_name"] = name
+                except OSError:
+                    logger.warning("回收站归档文件失败：%s", src)
+            moved.append(entry)
 
-    item.payload = json.dumps(
-        {
-            "base": {"name": base.name, "description": base.description or ""},
-            "points": [
-                {
-                    "title": p.title,
-                    "content": p.content,
-                    "tags": p.tags or "",
-                    "created_by": p.created_by,
-                    "is_auto": p.is_auto or 0,
-                }
-                for p in points
-            ],
-            "docs": moved,
-        },
-        ensure_ascii=False,
-    )
-    db.flush()
+        item.payload = json.dumps(
+            {
+                "base": {"name": base.name, "description": base.description or ""},
+                "points": [
+                    {
+                        "title": p.title,
+                        "content": p.content,
+                        "tags": p.tags or "",
+                        "created_by": p.created_by,
+                        "is_auto": p.is_auto or 0,
+                    }
+                    for p in points
+                ],
+                "docs": moved,
+            },
+            ensure_ascii=False,
+        )
+        db.flush()
+    except Exception:
+        if _restore_moved_files(moved_files):
+            shutil.rmtree(target, ignore_errors=True)
+        else:
+            logger.error(
+                "快照文件未能全部恢复，保留回收站归档目录：%s", target
+            )
+        raise
     return item
 
 

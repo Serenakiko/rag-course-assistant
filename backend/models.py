@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -9,6 +10,10 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def new_vector_key() -> str:
+    return "kb_" + uuid4().hex
 
 
 class Base(DeclarativeBase):
@@ -25,6 +30,10 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(160))
     # 改密/降权时自增，旧的 JWT 立即失效（token 里带 ver 声明）
     token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # 首次随机密码登录后，除查看本人和改密外，其余 API 一律要求先改密
+    must_change_password: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
     # 用户名要求唯一（应用层会预检，这里用唯一索引兜底并发场景）
     username: Mapped[str] = mapped_column(String(64), default="", unique=True)
     avatar: Mapped[str] = mapped_column(String(255), default="")  # emoji:😀 / /static/avatars/x.png
@@ -71,6 +80,10 @@ class KnowledgeBase(Base):
     __tablename__ = "knowledge_bases"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # 不可复用的向量身份：删除后同名重建也不会重新捡起旧向量
+    vector_key: Mapped[str] = mapped_column(
+        String(64), unique=True, index=True, default=new_vector_key
+    )
     name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     created_by: Mapped[int] = mapped_column(
@@ -84,6 +97,38 @@ class KnowledgeBase(Base):
     )
 
     creator: Mapped["User"] = relationship()
+
+
+class KnowledgeBaseTombstone(Base):
+    """知识库删除墓碑：阻止旧 course 名下的历史向量重新进入检索。"""
+
+    __tablename__ = "knowledge_base_tombstones"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    knowledge_base_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    course_name: Mapped[str] = mapped_column(String(128), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
+class VectorCleanupTask(Base):
+    """持久化向量清理任务：进程重启后继续清理残留向量。"""
+
+    __tablename__ = "vector_cleanup_tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    knowledge_base_id: Mapped[str] = mapped_column(String(64), index=True)
+    course_name: Mapped[str] = mapped_column(String(128), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
 
 
 class KnowledgePoint(Base):

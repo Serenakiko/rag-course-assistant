@@ -2,11 +2,22 @@
   "total": 40,
   "recall@5": 1.0,
   "mrr": 1.0,
-  "refusal_accuracy": 0.9,
+  "refusal_accuracy": 0.8,
   "false_reject_rate": 0.0667,
   "cross_course_misrecall": 0,
   "threshold": 0.56,
   "top_k": 5,
+  "scope": "knowledge_points",
+  "source_types": [
+    "knowledge_point"
+  ],
+  "embedding_model": "ollama:bge-m3",
+  "reranker": {
+    "enabled": true,
+    "candidates": 12,
+    "vector_weight": 0.95,
+    "lexical_weight": 0.05
+  },
   "answerable_total": 30,
   "unmatched_total": 10,
   "by_category": {
@@ -36,7 +47,7 @@
       "recall@k": 0.0,
       "mrr": 0.0,
       "false_reject_rate": 0.0,
-      "refusal_accuracy": 0.75
+      "refusal_accuracy": 0.5
     }
   },
   "details": [
@@ -124,7 +135,7 @@
       "question": "指令流水线有哪三类冒险？分别怎么解决？",
       "category": "answerable",
       "expect_unmatched": false,
-      "top_similarity": 0.7513,
+      "top_similarity": 0.7711,
       "hit_rank": 1,
       "refused": false,
       "top_title": "CPU 指令流水线",
@@ -362,7 +373,7 @@
       "expect_unmatched": true,
       "top_similarity": 0.4023,
       "refused": true,
-      "top_title": "哈希表与冲突处理"
+      "top_title": "二叉树及其遍历"
     },
     {
       "question": "什么是区块链的共识机制？",
@@ -400,9 +411,9 @@
       "question": "MySQL 的索引底层为什么用 B+ 树？",
       "category": "near_miss",
       "expect_unmatched": true,
-      "top_similarity": 0.5545,
-      "refused": true,
-      "top_title": "二叉树及其遍历"
+      "top_similarity": 0.7333,
+      "refused": false,
+      "top_title": "B+ 树索引结构"
     },
     {
       "question": "操作系统如何进行用户登录认证？",

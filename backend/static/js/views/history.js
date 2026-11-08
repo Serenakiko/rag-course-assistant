@@ -112,11 +112,11 @@ const HistoryView = (() => {
 
     tbody.innerHTML = rows.map((c, i) => `
       <tr>
-        <td>${noOf(i)}</td>
-        <td title="${Common.escapeHtml(c.title)}" style="max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Common.escapeHtml(c.title)}</td>
-        <td class="muted">${c.message_count || 0}</td>
-        <td class="muted">${Common.fmtTime(c.created_at)}</td>
-        <td>
+        <td data-label="序号">${noOf(i)}</td>
+        <td data-label="会话标题" title="${Common.escapeHtml(c.title)}" style="max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Common.escapeHtml(c.title)}</td>
+        <td data-label="消息数" class="muted">${c.message_count || 0}</td>
+        <td data-label="创建时间" class="muted">${Common.fmtTime(c.created_at)}</td>
+        <td data-label="操作">
           <div class="ops">
             <button class="btn btn-sm" data-view="${c.id}">查看</button>
             <button class="btn btn-sm btn-danger" data-del="${c.id}">删除</button>

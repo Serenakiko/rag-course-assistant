@@ -29,6 +29,7 @@ class UserOut(BaseModel):
     username: str
     avatar: str = ""
     role: str
+    must_change_password: bool = False
     created_at: datetime
 
 
@@ -39,7 +40,7 @@ class LoginResponse(BaseModel):
 
 class ChangePasswordRequest(BaseModel):
     old_password: str
-    new_password: str = Field(min_length=6, max_length=64)
+    new_password: str = Field(min_length=8, max_length=64)
 
 
 class UpdateProfileRequest(BaseModel):
@@ -144,6 +145,7 @@ class KnowledgeBaseOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    vector_key: str
     name: str
     description: str
     created_by: int | None
@@ -208,6 +210,8 @@ class StatsOut(BaseModel):
     # 质量指标（拒答率 = 未命中 / 提问总数；命中率 = 1 - 拒答率）
     hit_rate: float | None = None      # 命中率 0~1
     reject_rate: float | None = None   # 拒答率 0~1
+    total_questions: int = 0           # 提问消息总数（质量指标分母）
+    rejected_answers: int = 0          # 拒答回答数（质量指标分子）
     avg_resolve_hours: float | None = None  # 反馈平均解决时长（小时）
     feedback_up: int = 0               # 学生点「有帮助」次数
     feedback_down: int = 0             # 学生点「没帮助」次数

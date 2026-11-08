@@ -3,7 +3,7 @@
 纯数据模块，seed.py 只负责按名称幂等写入数据库。
 """
 
-DEFAULT_ADMIN = ("23040107", "111111", "系统管理员")
+DEFAULT_ADMIN = ("23040101", "111111", "系统管理员")
 
 
 SAMPLE_BASES: list[dict] = [
