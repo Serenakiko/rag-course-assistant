@@ -638,6 +638,24 @@ def test_port_probe_only_accepts_this_application(monkeypatch):
     assert run._is_our_service("127.0.0.1", 8000)
 
 
+def test_existing_service_start_opens_browser(monkeypatch):
+    """重复双击 start.bat 时应打开已经在运行的本系统页面。"""
+    import importlib
+
+    run = importlib.import_module("run")
+    opened: list[str] = []
+
+    monkeypatch.setattr(run, "_port_in_use", lambda *_args: True)
+    monkeypatch.setattr(run, "_is_our_service", lambda *_args: True)
+    monkeypatch.setattr(run.webbrowser, "open", lambda url: opened.append(url) or True)
+    monkeypatch.setattr(run.sys, "argv", ["run.py"])
+
+    run.main()
+
+    assert len(opened) == 1
+    assert opened[0].startswith("http://127.0.0.1:")
+
+
 @pytest.mark.skipif(os.name != "nt", reason="start.bat 只在 Windows 执行")
 def test_start_bat_falls_back_when_venv_python_is_broken(tmp_path):
     """venv 存在但解释器损坏时，start.bat 应退回 PATH 中的 Python。"""

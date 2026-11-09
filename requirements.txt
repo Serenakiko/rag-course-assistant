@@ -9,16 +9,17 @@
 #
 # Version policy: exact pins for reproducible thesis evaluation and defense demos.
 # Update these together after running the full test suite.
+# Python 3.10 stays in CI: python-multipart 0.0.33+ and SQLAlchemy 2.1+ need 3.11+.
 # ============================================================
 
 # ---- Web framework ----
 fastapi==0.162.2
 uvicorn[standard]==0.54.0
-python-multipart==0.0.33
+python-multipart==0.0.32
 pydantic==2.14.3
 
 # ---- Database ----
-SQLAlchemy==2.1.8
+SQLAlchemy==2.0.46
 
 # ---- Auth ----
 PyJWT==2.15.1

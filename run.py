@@ -102,6 +102,9 @@ def main() -> None:
     if _port_in_use(settings.HOST, port):
         if _is_our_service(settings.HOST, port):
             print(f"  端口 {port} 上已经有本系统在跑，本次启动跳过。")
+            print(f"  访问地址：{url}")
+            if not args.no_browser:
+                webbrowser.open(url)
             return
         print(f"  端口 {port} 已被其他程序占用，请换一个端口，例如：python run.py --port 8001")
         sys.exit(1)

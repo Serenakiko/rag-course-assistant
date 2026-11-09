@@ -5,6 +5,8 @@ import asyncio
 import json
 import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -415,6 +417,44 @@ def test_ollama_llm_releases_memory_after_request(monkeypatch):
     llm_service.get_llm()
 
     assert captured["keep_alive"] == 0
+
+
+def test_ollama_llm_ignores_broken_tls_environment(monkeypatch, tmp_path):
+    """本机 Ollama 使用 HTTP，不应被进程里失效的证书环境变量拖垮。"""
+    from backend.services import llm_service
+
+    monkeypatch.setattr(llm_service.settings, "LLM_PROVIDER", "ollama")
+    monkeypatch.setattr(llm_service.settings, "OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "missing-ca.pem"))
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+
+    llm = llm_service.get_llm(streaming=False)
+
+    assert llm is not None
+
+
+def test_llm_import_ignores_broken_tls_environment(tmp_path):
+    """服务启动时也不能让失效证书变量在 ollama 导入阶段中断进程。"""
+    env = os.environ.copy()
+    env["SSL_CERT_FILE"] = str(tmp_path / "missing-ca.pem")
+    env.pop("SSL_CERT_DIR", None)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from backend.services.llm_service import get_llm; get_llm(streaming=False)",
+        ],
+        cwd=Path(__file__).resolve().parent.parent,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_can_answer_compacts_retrieved_context(monkeypatch):

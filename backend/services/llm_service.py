@@ -70,6 +70,8 @@ def get_llm(*, num_predict: int | None = None, streaming: bool = True) -> BaseCh
         # qwen3 系列默认先思考再回答，长思考会把 num_predict 吃光导致正文为空
         reasoning=False,
         keep_alive=settings.OLLAMA_LLM_KEEP_ALIVE,
-        client_kwargs={"timeout": settings.LLM_TIMEOUT},
-        async_client_kwargs={"timeout": settings.LLM_TIMEOUT},
+        # 本地 Ollama 是内网 HTTP 服务；httpx 默认读取 SSL_CERT_FILE/代理环境变量，
+        # 一旦进程继承了失效证书路径，连模型对象都创建不了，还没发请求就报 Errno 2。
+        client_kwargs={"timeout": settings.LLM_TIMEOUT, "trust_env": False},
+        async_client_kwargs={"timeout": settings.LLM_TIMEOUT, "trust_env": False},
     )
