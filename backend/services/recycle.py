@@ -94,8 +94,9 @@ def snapshot_base(db: Session, base: KnowledgeBase, user_id: int | None) -> Recy
                     shutil.move(str(src), str(destination))
                     moved_files.append((src, destination))
                     entry["trash_name"] = name
-                except OSError:
+                except OSError as exc:
                     logger.warning("回收站归档文件失败：%s", src)
+                    raise OSError(f"无法归档源文件：{src}（{exc}）") from exc
             moved.append(entry)
 
         item.payload = json.dumps(

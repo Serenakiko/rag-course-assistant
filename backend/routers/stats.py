@@ -6,10 +6,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from ..constants import NO_ANSWER_HINT
 from ..database import get_db
 from ..deps import get_current_user, require_role
 from ..models import Conversation, Document, KnowledgeBase, KnowledgePoint, Message, UnansweredQuestion, User
@@ -150,27 +151,40 @@ def admin_stats(
         ).scalars()
     ]
 
-    # 质量指标：统一到 message 级事件口径。
-    # 拒答率 = 拒答的 assistant 回答数 / 用户提问总数（user 消息条数）。
-    # 分子分母都是 message 级：分子是「这一轮是否拒答」，直接读落库时写好的 rejected 字段，
-    # 而不是拿中文文案 LIKE（门控拒答与模型拒答的措辞不同，LIKE 会漏掉最主要的一类拒答，
-    # 导致 hit_rate 系统性虚高）。
+    # 质量指标：统一到 message 级结果口径。
     total_questions = db.scalar(
         select(func.count(Message.id)).where(Message.role == "user")
     ) or 0
 
     rejected = db.scalar(
         select(func.count(Message.id)).where(
-            Message.role == "assistant", Message.rejected == 1
+            Message.role == "assistant",
+            or_(
+                Message.rejected == 1,
+                Message.outcome.in_(("rejected", "empty_kb")),
+            ),
+        )
+    ) or 0
+    answered = db.scalar(
+        select(func.count(Message.id)).where(
+            Message.role == "assistant",
+            or_(
+                Message.outcome == "answered",
+                and_(
+                    or_(Message.outcome.is_(None), Message.outcome == ""),
+                    Message.rejected == 0,
+                    Message.interrupted == 0,
+                    ~Message.content.startswith(NO_ANSWER_HINT),
+                ),
+            ),
         )
     ) or 0
 
     hit_rate = None
     reject_rate = None
     if total_questions > 0:
-        # 拒答率按 message 级事件：拒答轮次 / 提问总数（同一学生同一问题问两次算两次提问）
         reject_rate = round(min(rejected / total_questions, 1.0), 4)
-        hit_rate = round(1 - reject_rate, 4)
+        hit_rate = round(min(answered / total_questions, 1.0), 4)
 
     # 反馈平均解决时长（小时）：已解决反馈的 answered_at - created_at 均值
     avg_resolve_hours = None
@@ -238,6 +252,7 @@ def admin_stats(
         hit_rate=hit_rate,
         reject_rate=reject_rate,
         total_questions=total_questions,
+        answered_answers=answered,
         rejected_answers=rejected,
         avg_resolve_hours=avg_resolve_hours,
         feedback_up=feedback_up,

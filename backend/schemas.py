@@ -180,6 +180,8 @@ class DocumentOut(BaseModel):
 
 class DocumentDetailOut(DocumentOut):
     chunks: list[dict] = []   # 向量库里的分块（真上传的文档才有）
+    chunks_total: int = 0
+    chunks_truncated: bool = False
     preview: str = ""         # 分块为空时回退：直接读原文件的正文（种子文档只有记录没有分块）
 
 
@@ -207,10 +209,11 @@ class StatsOut(BaseModel):
     unanswered_pending: int = 0        # 待处理反馈数
     unanswered_resolved: int = 0       # 已解答反馈数
     recent_unanswered: list[dict] = [] # [{id, question, status, created_at, answered_at}] 最近反馈
-    # 质量指标（拒答率 = 未命中 / 提问总数；命中率 = 1 - 拒答率）
+    # 质量指标（命中率 = 正常回答 / 提问总数；拒答率 = 拒答 / 提问总数）
     hit_rate: float | None = None      # 命中率 0~1
     reject_rate: float | None = None   # 拒答率 0~1
     total_questions: int = 0           # 提问消息总数（质量指标分母）
+    answered_answers: int = 0          # 正常回答数（质量指标命中分子）
     rejected_answers: int = 0          # 拒答回答数（质量指标分子）
     avg_resolve_hours: float | None = None  # 反馈平均解决时长（小时）
     feedback_up: int = 0               # 学生点「有帮助」次数

@@ -17,7 +17,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 
 from ..config import settings
-from .llm_service import get_llm
+from .llm_service import get_llm, unload_ollama_llm
 from .rag_prompts import (
     ANSWERABILITY_PROMPT,
     COURSE_STRONG_KEYWORDS,
@@ -41,6 +41,22 @@ class Answerability(str, Enum):
     ANSWERABLE = "answerable"
     UNANSWERABLE = "unanswerable"
     ERROR = "error"
+    RESOURCE_ERROR = "resource_error"
+
+
+_MODEL_RESOURCE_ERROR_MARKERS = (
+    "out-of-memory",
+    "failed to allocate",
+    "memory allocation failed",
+    "not enough memory",
+    "insufficient memory",
+)
+
+
+def _is_model_resource_error(exc: BaseException) -> bool:
+    """识别 Ollama/llama.cpp 拉不起模型时的内存不足错误。"""
+    text = str(exc).lower()
+    return any(marker in text for marker in _MODEL_RESOURCE_ERROR_MARKERS)
 
 
 def _max_similarity(docs: list[tuple[Document, float]]) -> float:
@@ -314,21 +330,27 @@ async def can_answer(
     所以拆成一个只输出"有/没有"的窄任务。
 
     模型明确回答“没有”才是 UNANSWERABLE；超时、空响应或无法解析都返回 ERROR。
-    ERROR 必须由上层提示重试，不能生成拒答，更不能写未命中反馈。
+    ERROR 是“增强判定不可用”，由上层提示重试，不能降级为无校验生成。
     """
     timeout = settings.ANSWERABILITY_TIMEOUT if timeout is None else timeout
     try:
-        llm = get_llm()
+        llm = get_llm(num_predict=8, streaming=False)
+        context = _format_context(docs[:3])
+        max_chars = settings.ANSWERABILITY_MAX_CONTEXT_CHARS
+        if len(context) > max_chars:
+            context = context[:max_chars] + "\n…（判定上下文已截断）"
         resp = await asyncio.wait_for(
             llm.ainvoke(
                 [
                     ("system", ANSWERABILITY_PROMPT),
-                    ("human", f"学生的问题：{question}\n\n检索到的资料：\n{_format_context(docs)}"),
+                    ("human", f"学生的问题：{question}\n\n检索到的资料：\n{context}"),
                 ]
             ),
             timeout=timeout,
         )
         text = (getattr(resp, "content", "") or "").strip()
+        if text.startswith(("无法", "不能确定", "不确定")):
+            return Answerability.ERROR
         if text.startswith("有"):
             return Answerability.ANSWERABLE
         if text.startswith(("没有", "无", "否")):
@@ -338,7 +360,14 @@ async def can_answer(
     except asyncio.TimeoutError:
         logger.warning("资料可答性判定超时（%s）", question[:30])
         return Answerability.ERROR
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        if _is_model_resource_error(exc):
+            logger.warning(
+                "资料可答性判定失败：本地模型内存不足（%s）",
+                question[:30],
+                exc_info=True,
+            )
+            return Answerability.RESOURCE_ERROR
         logger.warning("资料可答性判定失败（%s）", question[:30], exc_info=True)
         return Answerability.ERROR
 
@@ -439,7 +468,9 @@ async def _generate_stream(
     if finish_info is not None:
         # langchain_ollama 的 response_metadata 里完成原因是 done_reason（取值 stop/length/load），
         # 不是 finish_reason。之前拼错字段名，truncated 恒为 False，「回答可能不完整」永远不提示。
-        finish_info["finish_reason"] = last_meta.get("done_reason")
+        finish_info["finish_reason"] = (
+            last_meta.get("done_reason") or last_meta.get("finish_reason")
+        )
 
 
 def _unmatched_result(question: str, docs: list[tuple[Document, float]]) -> dict:
@@ -460,6 +491,7 @@ async def _generate_answer_locked(
     error="timeout"/"empty" 表示生成失败，调用方不能当已解决写入。
     """
     # 向量化 + Chroma 查询是同步 IO，放线程里跑，避免阻塞事件循环
+    await asyncio.to_thread(unload_ollama_llm)
     docs = await asyncio.to_thread(vector_search, question, settings.TOP_K, courses)
     if not docs:
         return {
@@ -471,6 +503,13 @@ async def _generate_answer_locked(
         return _unmatched_result(question, docs)
     if settings.ANSWERABILITY_CHECK:
         answerability = await can_answer(question, docs)
+        if answerability is Answerability.RESOURCE_ERROR:
+            return {
+                "answer": "",
+                "recommended": [],
+                "matched": False,
+                "error": "resource",
+            }
         if answerability is Answerability.ERROR:
             return {
                 "answer": "",
@@ -492,6 +531,11 @@ async def _generate_answer_locked(
     except asyncio.TimeoutError:
         # 超时提示不是答案，不混进 answer
         return {"answer": "", "recommended": [], "matched": False, "error": "timeout"}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("非流式回答生成失败")
+        if _is_model_resource_error(exc):
+            return {"answer": "", "recommended": [], "matched": False, "error": "resource"}
+        return {"answer": "", "recommended": [], "matched": False, "error": "generation"}
     answer = "".join(answer_parts).strip()
     if not answer:
         return {"answer": "", "recommended": [], "matched": False, "error": "empty"}
@@ -598,6 +642,10 @@ def _timeout_message() -> str:
 
 def _answerability_error_message() -> str:
     return "资料可答性判定超时或模型暂时不可用，这不表示知识库未收录。请稍后重试。"
+
+
+def model_resource_error_message() -> str:
+    return "本地模型内存不足，无法加载并完成这次回答。请关闭占用内存较大的程序，或换用更小的模型后再试。"
 
 
 def _phase_event(phase: str, status: str, started: float) -> dict:
@@ -752,10 +800,12 @@ async def _stream_answer_locked(
         search_query = await _rewrite_query(question, history)
         if search_query != question:
             logger.info("查询改写：%s → %s", question[:30], search_query[:30])
+        await asyncio.to_thread(unload_ollama_llm)
         docs = await asyncio.to_thread(vector_search, search_query, settings.TOP_K, courses)
         yield _phase_event("retrieval", "done", retrieval_started)
         # 知识库没有任何内容时直接拒绝，不调模型
         if not docs:
+            yield {"type": "outcome", "outcome": "empty_kb"}
             yield {
                 "type": "token",
                 "content": "知识库里还没有相关内容，先添加课程资料，或者问点跟课程有关的问题。",
@@ -773,9 +823,19 @@ async def _stream_answer_locked(
             answerability_started = time.monotonic()
             yield _phase_event("answerability", "running", answerability_started)
             answerability = await can_answer(question, docs)
-            if answerability is Answerability.ERROR:
+            if answerability in (Answerability.ERROR, Answerability.RESOURCE_ERROR):
+                logger.warning(
+                    "资料可答性判定不可用（%s），拒绝生成：%s",
+                    answerability.value,
+                    question[:30],
+                )
                 yield _phase_event("answerability", "error", answerability_started)
-                yield {"type": "error", "message": _answerability_error_message()}
+                message = (
+                    model_resource_error_message()
+                    if answerability is Answerability.RESOURCE_ERROR
+                    else _answerability_error_message()
+                )
+                yield {"type": "error", "message": message}
                 return
             yield _phase_event("answerability", "done", answerability_started)
             if answerability is Answerability.UNANSWERABLE:
@@ -793,6 +853,9 @@ async def _stream_answer_locked(
             yield event
     except Exception as exc:  # noqa: BLE001
         logger.exception("RAG 流式回答失败")
+        if _is_model_resource_error(exc):
+            yield {"type": "error", "message": model_resource_error_message()}
+            return
         err = str(exc)
         # 模型缺失（Ollama 404）：给一句人话，细节写日志
         if "404" in err or "model not found" in err.lower():

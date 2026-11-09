@@ -8,7 +8,7 @@
 
 ```bash
 # 1. 确保 Ollama 已启动并拉取模型
-ollama pull qwen3:8b
+ollama pull qwen3:4b-instruct-2507-q4_K_M
 ollama pull bge-m3
 
 # 2. 生成演示学生、会话、消息反馈和未命中问题

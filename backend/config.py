@@ -48,9 +48,16 @@ class Settings:
 
     # Ollama
     OLLAMA_BASE_URL: str = _get("OLLAMA_BASE_URL", "http://localhost:11434")
-    OLLAMA_LLM_MODEL: str = _get("OLLAMA_LLM_MODEL", "qwen3:8b")
+    OLLAMA_LLM_MODEL: str = _get(
+        "OLLAMA_LLM_MODEL", "qwen3:4b-instruct-2507-q4_K_M"
+    )
     OLLAMA_EMBED_MODEL: str = _get("OLLAMA_EMBED_MODEL", "bge-m3")
     OLLAMA_TEMPERATURE: float = float(_get("OLLAMA_TEMPERATURE", "0.3"))
+    # 0 = 向量化请求结束立即从显存/内存卸载。16 GB 机器上 bge-m3 若常驻，
+    # 随后加载对话模型会因两个模型争内存而 OOM。
+    OLLAMA_EMBED_KEEP_ALIVE: int = int(_get("OLLAMA_EMBED_KEEP_ALIVE", "0"))
+    # 同一轮里的改写、可答性判定和生成复用同一个模型；下一次检索前显式卸载。
+    OLLAMA_LLM_KEEP_ALIVE: int = int(_get("OLLAMA_LLM_KEEP_ALIVE", "30"))
 
     # OpenAI 兼容 API
     OPENAI_API_BASE: str = _get("OPENAI_API_BASE", "https://api.deepseek.com/v1")
@@ -73,7 +80,8 @@ class Settings:
     # 大模型单次回答的超时上限（秒）：超过即停止生成并返回错误提示，防止回答卡死
     LLM_TIMEOUT: float = float(_get("LLM_TIMEOUT", "180"))
     # 模型上下文窗口（token 总数，prompt + 输出共用）；Ollama num_ctx 取同一值。
-    # 预留输出额度与安全边际，超长时先裁历史、再裁检索段落（见 rag_service）。
+    # 默认配合 4B Instruct，16 GB 内存可稳定加载 8192；超长时由 rag_service
+    # 自动裁剪历史与检索段落。
     LLM_CTX: int = int(_get("LLM_CTX", "8192"))
     # 预留的输出 token 上限（对应 num_predict）；可用上下文 = LLM_CTX - LLM_MAX_TOKENS - 安全边际。
     LLM_MAX_TOKENS: int = int(_get("LLM_MAX_TOKENS", "1024"))
@@ -91,7 +99,11 @@ class Settings:
     # 默认开启，与 .env.example 保持一致：三重拒答是系统的核心设计，不能因为少建 .env 就退化成两道。
     ANSWERABILITY_CHECK: bool = _get("ANSWERABILITY_CHECK", "true").lower() in ("1", "true", "yes")
     # 可答性判定是独立模型调用，超时是系统错误，不应升级成“资料不可答”
-    ANSWERABILITY_TIMEOUT: float = float(_get("ANSWERABILITY_TIMEOUT", "25"))
+    ANSWERABILITY_TIMEOUT: float = float(_get("ANSWERABILITY_TIMEOUT", "45"))
+    # 只把最相关的有限证据交给短分类，避免长上下文让 CPU 推理拖过超时。
+    ANSWERABILITY_MAX_CONTEXT_CHARS: int = int(
+        _get("ANSWERABILITY_MAX_CONTEXT_CHARS", "1000")
+    )
     # 多轮追问的检索 query 改写：把最近的历史轮拼接进 query，让「它」「这个」类指代能召回对的内容。
     QUERY_REWRITE_HISTORY_TURNS: int = 3  # 拼入检索的最近历史轮数
     # 引用资料相对裁剪：只保留与 top1 相似度之比不低于该值的资料（相对判据，跨模型稳定）。

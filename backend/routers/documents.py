@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import uuid
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import (
     APIRouter,
@@ -21,18 +22,15 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import SessionLocal, get_db
 from ..deps import get_current_user
-from ..models import Document, KnowledgePoint, UnansweredQuestion, User
+from ..models import Document, KnowledgePoint, UnansweredQuestion, User, VectorCleanupTask
 from ..schemas import DocumentDetailOut, DocumentOut
 from ..services.chunker import split_text
+from ..services.document_dedup import find_duplicate, fingerprint_text
 from ..services.document_parser import is_supported, parse_file
 from ..services.kb_scope import assert_writable_course
 from ..services.like import LIKE_ESCAPE, contains, escape_like
-from ..services.vector_store import (
-    add_document_chunks,
-    delete_document,
-    delete_knowledge_point,
-    get_collection,
-)
+from ..services.vector_reconcile import run_vector_cleanup_task
+from ..services.vector_store import add_document_chunks, delete_document, get_collection
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -122,6 +120,55 @@ def process_document(doc_id: int, course: str) -> None:
         if doc is None:
             return
         text = parse_file(Path(doc.stored_path))
+        fingerprint = fingerprint_text(text)
+        doc.content_hash = fingerprint.content_hash
+        doc.content_simhash = str(fingerprint.simhash)
+        doc.content_length = fingerprint.length
+
+        # 老数据没有指纹时按需补算一次；否则新上传只能和升级后的文档比较，
+        # 历史资料仍会漏过去重。
+        candidates = list(
+            session.scalars(
+                select(Document).where(
+                    Document.course == course,
+                    Document.id != doc.id,
+                    Document.status.in_(("ready", "processing")),
+                )
+            ).all()
+        )
+        for candidate in candidates:
+            if (
+                candidate.content_hash
+                and candidate.content_simhash
+                and candidate.content_length > 0
+            ):
+                continue
+            if not candidate.stored_path or not Path(candidate.stored_path).exists():
+                continue
+            try:
+                candidate_text = parse_file(Path(candidate.stored_path))
+                candidate_fingerprint = fingerprint_text(candidate_text)
+                candidate.content_hash = candidate_fingerprint.content_hash
+                candidate.content_simhash = str(candidate_fingerprint.simhash)
+                candidate.content_length = candidate_fingerprint.length
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "补算历史文档内容指纹失败 doc_id=%s",
+                    candidate.id,
+                    exc_info=True,
+                )
+
+        duplicate = find_duplicate(doc.id, fingerprint, candidates)
+        if duplicate is not None:
+            doc.status = "failed"
+            doc.chunk_count = 0
+            doc.error = (
+                f"检测到与「{duplicate.filename}」内容相同或高度相似，已跳过入库。"
+                "如需更新，请先删除旧文档后重新上传。"
+            )
+            session.commit()
+            return
+
         chunks = split_text(text)
         if not chunks:
             doc.status = "failed"
@@ -257,27 +304,45 @@ def document_detail(
     doc_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    chunk_limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> DocumentDetailOut:
     doc = db.get(Document, doc_id)
     if doc is None or (user.role != "admin" and doc.uploaded_by != user.id):
         raise HTTPException(status_code=404, detail="文档不存在")
     chunks: list[dict] = []
+    chunks_total = 0
     if doc.status == "ready":
         try:
             collection = get_collection()
             # Chroma 的 where 只接受一个操作符，多条件必须写 $and
-            data = collection.get(
+            metadata = collection.get(
                 where={"$and": [{"source_type": "document"}, {"doc_id": str(doc.id)}]},
-                include=["documents", "metadatas"],
+                include=["metadatas"],
             )
-            items = sorted(
-                zip(data["ids"], data["documents"], data["metadatas"]),
-                key=lambda x: int(x[2].get("chunk_index", 0)),
+            ordered = sorted(
+                zip(metadata["ids"], metadata["metadatas"]),
+                key=lambda x: int(x[1].get("chunk_index", 0)),
             )
-            chunks = [
-                {"index": int(meta.get("chunk_index", 0)), "text": text}
-                for _id, text, meta in items
-            ]
+            chunks_total = len(ordered)
+            selected = ordered[:chunk_limit]
+            if selected:
+                data = collection.get(
+                    ids=[item_id for item_id, _meta in selected],
+                    include=["documents", "metadatas"],
+                )
+                by_id = {
+                    item_id: (text, meta)
+                    for item_id, text, meta in zip(
+                        data["ids"], data["documents"], data["metadatas"], strict=False
+                    )
+                }
+                chunks = [
+                    {
+                        "index": int(meta.get("chunk_index", 0)),
+                        "text": by_id.get(item_id, ("", meta))[0],
+                    }
+                    for item_id, meta in selected
+                ]
         except Exception:  # noqa: BLE001
             logger.warning("读取文档分块失败 doc_id=%s", doc.id, exc_info=True)
             chunks = []
@@ -302,6 +367,8 @@ def document_detail(
             "created_at": doc.created_at,
         },
         chunks=chunks,
+        chunks_total=chunks_total,
+        chunks_truncated=chunks_total > len(chunks),
         preview=preview,
     )
 
@@ -350,19 +417,34 @@ def remove_document(
     # 先删 DB 记录（事务），成功后再异步清理向量与文件。
     # 反过来的话：文件/向量删了、DB 删除失败，就出现「文件没了引用还在」或「向量没了记录还在」。
     stored_path = doc.stored_path
-    deleted_doc_id = doc.id
-    deleted_kp_ids = [kp.id for kp in auto_kps]
     for kp in auto_kps:
         db.delete(kp)
+    cleanup_tasks = [
+        VectorCleanupTask(kind="document", object_id=str(doc.id)),
+        *(
+            VectorCleanupTask(kind="knowledge_point", object_id=str(kp.id))
+            for kp in auto_kps
+        ),
+    ]
+    db.add_all(cleanup_tasks)
     db.delete(doc)
     db.commit()
 
-    # DB 已删，向量与文件清理失败可重试（不影响主流程），只记日志。
-    if not delete_document(deleted_doc_id, strict=False):
-        logger.error("文档记录已删除，但向量清理失败，需重建向量库 doc_id=%s", deleted_doc_id)
-    for kp_id in deleted_kp_ids:
-        if not delete_knowledge_point(kp_id, strict=False):
-            logger.error("文档记录已删除，但自动知识点向量清理失败 point_id=%s", kp_id)
+    # 记录与清理任务同一事务提交，向量服务异常时任务仍可在启动后重试。
+    for task in cleanup_tasks:
+        try:
+            run_vector_cleanup_task(task)
+        except Exception as exc:  # noqa: BLE001
+            task.last_error = str(exc)[:1000]
+            logger.error(
+                "文档记录已删除，但向量清理失败，已保留重试任务 kind=%s object_id=%s",
+                task.kind,
+                task.object_id,
+            )
+        else:
+            task.status = "done"
+            task.last_error = ""
+    db.commit()
     if stored_path:
         Path(stored_path).unlink(missing_ok=True)
     return {"ok": True}

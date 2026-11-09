@@ -125,7 +125,7 @@ const AdminView = (() => {
     const rejectedAnswers = s.rejected_answers || 0;
 
     const items = [
-      { label: "回答命中率", value: hit, hint: `${totalQuestions - rejectedAnswers} / ${totalQuestions} 次提问`, cls: "green" },
+      { label: "回答命中率", value: hit, hint: `${s.answered_answers || 0} / ${totalQuestions} 次提问`, cls: "green" },
       { label: "拒答率", value: reject, hint: `${rejectedAnswers} / ${totalQuestions} 次提问`, cls: "red" },
       { label: "平均解决时长", value: resolve, hint: "反馈从提交到解答", cls: "blue" },
       { label: "回答好评率", value: upRate != null ? upRate + "%" : "—", hint: `${s.feedback_up || 0} 赞 / ${totalFb} 次已评价`, cls: "orange" },

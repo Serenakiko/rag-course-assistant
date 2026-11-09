@@ -9,11 +9,12 @@ from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from ..constants import NO_ANSWER_HINT
 from ..database import SessionLocal, get_db
 from ..deps import get_current_user, require_role
 from ..models import Conversation, Message, UnansweredQuestion, User, utcnow
@@ -34,7 +35,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 # 一个字都没生成就结束时落库的占位提示，不当作回答喂给模型
-_NO_ANSWER_HINT = "（这条提问没有生成出回答，可能被中断了，重新发一次试试。）"
+_NO_ANSWER_HINT = NO_ANSWER_HINT
 
 # ---------- 每用户问答限流 ----------
 # 单机本地模型一次只吐一路 token，一个学生连点就能把闸门与排队打满。
@@ -75,12 +76,17 @@ def _ask_release(user_id: int) -> None:
 def _bump_gen_seq(conversation_id: int) -> int:
     """原子自增会话生成序号并返回新值（用于同会话新提问顶掉旧流）。"""
     with SessionLocal() as session:
-        conv = session.get(Conversation, conversation_id)
-        if conv is None:
-            return 0
-        conv.gen_seq = int(conv.gen_seq or 0) + 1
+        next_seq = session.execute(
+            text(
+                "UPDATE conversations "
+                "SET gen_seq = COALESCE(gen_seq, 0) + 1 "
+                "WHERE id = :conversation_id "
+                "RETURNING gen_seq"
+            ),
+            {"conversation_id": conversation_id},
+        ).scalar_one_or_none()
         session.commit()
-        return conv.gen_seq
+        return int(next_seq or 0)
 
 
 def _current_gen_seq(conversation_id: int) -> int:
@@ -101,6 +107,7 @@ def _save_answer(
     sources: str,
     interrupted: int,
     rejected: int = 0,
+    outcome: str = "answered",
 ) -> int | None:
     """把一轮回答落库并返回 message.id。
 
@@ -122,6 +129,7 @@ def _save_answer(
             sources=sources,
             interrupted=interrupted,
             rejected=rejected,
+            outcome=outcome,
         )
         session.add(msg)
         session.commit()
@@ -674,6 +682,7 @@ async def ask(
         failed = False
         completed = False
         saved = False   # 正常路径已经落过库，finally 里不再重复保存
+        outcome = "answered"
         try:
             async for event in rag_service.stream_answer(
                 payload.message,
@@ -688,9 +697,13 @@ async def ask(
                     sources_json = json.dumps(event["sources"], ensure_ascii=False)
                 elif event["type"] == "unmatched":
                     unmatched = event
+                    outcome = "rejected"
+                elif event["type"] == "outcome":
+                    outcome = event["outcome"]
                 elif event["type"] == "error":
                     # 失败不写进正文，也不落库成正式回答
                     failed = True
+                    outcome = "failed"
                     yield _sse(event)
                     break
                 yield _sse(event)
@@ -701,6 +714,7 @@ async def ask(
             full_answer = "".join(answer_parts) or ""
             is_rejected = bool(unmatched) or is_unmatched_answer(full_answer)
             if is_rejected:
+                outcome = "rejected"
                 _record_unmatched(payload.message, user.id, unmatched)
 
             # 正常结束：先落库拿 id，再告诉前端（评价按钮要用）
@@ -709,11 +723,13 @@ async def ask(
                 saved_id = _save_answer(
                     conversation_id, turn_user_id, partial, sources_json, 0,
                     rejected=1 if is_rejected else 0,
+                    outcome=outcome,
                 )
                 if saved_id:
                     saved = True
                     yield _sse({"type": "saved", "message_id": saved_id})
         except Exception as exc:  # noqa: BLE001
+            outcome = "failed"
             yield _sse({"type": "error", "message": f"服务异常：{exc}"})
         finally:
             release()
@@ -725,12 +741,16 @@ async def ask(
                 if not saved:
                     partial = "".join(answer_parts).strip()
                     if partial:
+                        final_outcome = (
+                            "failed" if outcome == "failed" else "interrupted"
+                        )
                         _save_answer(
                             conversation_id,
                             turn_user_id,
                             partial,
                             sources_json,
                             0 if completed else 1,
+                            outcome=final_outcome,
                         )
                     else:
                         # 一个字都没生成就结束：落一句提示，避免留下没回答的提问
@@ -740,6 +760,7 @@ async def ask(
                             _NO_ANSWER_HINT,
                             "[]",
                             0,
+                            outcome="failed",
                         )
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")

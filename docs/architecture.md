@@ -11,7 +11,7 @@ flowchart LR
     F --> U[用户 / 统计 / 反馈]
     C --> R[RAG Service]
     R --> V[(ChromaDB<br/>向量库)]
-    R --> O[Ollama<br/>qwen3:8b + bge-m3]
+    R --> O[Ollama<br/>qwen3:4b-instruct + bge-m3]
     A --> D[(SQLite<br/>WAL)]
     K --> D
     U --> D

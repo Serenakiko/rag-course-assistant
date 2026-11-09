@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import socket
 import sys
 import time
 import webbrowser
 from threading import Thread
+from urllib.request import urlopen
 
 from backend.seed_data import DEFAULT_ADMIN
 
@@ -48,6 +50,19 @@ def _port_in_use(host: str, port: int) -> bool:
         return sock.connect_ex((target, port)) == 0
 
 
+def _is_our_service(host: str, port: int) -> bool:
+    """端口占用时通过健康检查确认是否为本应用。"""
+    from backend.config import settings
+
+    target = "127.0.0.1" if host in ("", "0.0.0.0", "::") else host
+    try:
+        with urlopen(f"http://{target}:{port}/api/health", timeout=2.0) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return False
+    return payload.get("app") == settings.APP_NAME
+
+
 def _open_browser_when_listening(url: str, host: str, port: int, timeout: float = 30.0) -> None:
     """等端口真的开始监听再打开浏览器。
 
@@ -81,11 +96,15 @@ def main() -> None:
     from backend.config import settings
 
     port = args.port or settings.PORT
-    url = f"http://{settings.HOST}:{port}"
+    browser_host = "127.0.0.1" if settings.HOST in ("", "0.0.0.0", "::") else settings.HOST
+    url = f"http://{browser_host}:{port}"
 
     if _port_in_use(settings.HOST, port):
-        print(f"  端口 {port} 上已经有服务在跑，本次启动跳过。")
-        return
+        if _is_our_service(settings.HOST, port):
+            print(f"  端口 {port} 上已经有本系统在跑，本次启动跳过。")
+            return
+        print(f"  端口 {port} 已被其他程序占用，请换一个端口，例如：python run.py --port 8001")
+        sys.exit(1)
 
     print()
     print("=" * 64)

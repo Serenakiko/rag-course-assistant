@@ -7,9 +7,25 @@ from sqlalchemy import select
 
 from ..database import SessionLocal
 from ..models import VectorCleanupTask, utcnow
-from .vector_store import delete_knowledge_base_vectors
+from .vector_store import (
+    delete_document,
+    delete_knowledge_base_vectors,
+    delete_knowledge_point,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def run_vector_cleanup_task(task: VectorCleanupTask) -> None:
+    """执行一条持久化向量清理任务；失败时抛异常由调用方记录。"""
+    task.attempts = int(task.attempts or 0) + 1
+    task.updated_at = utcnow()
+    if task.kind == "document":
+        delete_document(int(task.object_id), strict=True)
+    elif task.kind == "knowledge_point":
+        delete_knowledge_point(int(task.object_id), strict=True)
+    else:
+        delete_knowledge_base_vectors(task.knowledge_base_id, task.course_name)
 
 
 def retry_pending_vector_cleanups(limit: int = 20) -> int:
@@ -25,12 +41,8 @@ def retry_pending_vector_cleanups(limit: int = 20) -> int:
             )
         )
         for task in tasks:
-            task.attempts = int(task.attempts or 0) + 1
-            task.updated_at = utcnow()
             try:
-                delete_knowledge_base_vectors(
-                    task.knowledge_base_id, task.course_name
-                )
+                run_vector_cleanup_task(task)
             except Exception as exc:  # noqa: BLE001
                 task.last_error = str(exc)[:1000]
                 logger.warning(

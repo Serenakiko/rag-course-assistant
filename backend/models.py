@@ -64,6 +64,10 @@ class Document(Base):
     is_seed: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str] = mapped_column(Text, default="")
+    # 内容指纹：同一知识库内阻止换名重传和轻微改动的近似文档重复入库
+    content_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
+    content_simhash: Mapped[str] = mapped_column(String(20), default="")
+    content_length: Mapped[int] = mapped_column(Integer, default=0)
     uploaded_by: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
@@ -118,8 +122,16 @@ class VectorCleanupTask(Base):
     __tablename__ = "vector_cleanup_tasks"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    knowledge_base_id: Mapped[str] = mapped_column(String(64), index=True)
-    course_name: Mapped[str] = mapped_column(String(128), index=True)
+    kind: Mapped[str] = mapped_column(
+        String(24), default="knowledge_base", server_default="knowledge_base", index=True
+    )
+    knowledge_base_id: Mapped[str] = mapped_column(
+        String(64), default="", server_default="", index=True
+    )
+    object_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    course_name: Mapped[str] = mapped_column(
+        String(128), default="", server_default="", index=True
+    )
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     last_error: Mapped[str] = mapped_column(Text, default="")
@@ -265,6 +277,8 @@ class Message(Base):
     rejected: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # 学生对这条回答的评价："" 未评 / "up" 有帮助 / "down" 没帮助（质量反馈信号）
     feedback: Mapped[str] = mapped_column(String(8), default="", server_default="")
+    # 本轮结果：answered / rejected / empty_kb / failed / interrupted
+    outcome: Mapped[str] = mapped_column(String(16), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
     )

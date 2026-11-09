@@ -116,7 +116,11 @@ def _prune_expired(now: float) -> None:
 
 
 def _is_trusted_proxy(host: str) -> bool:
-    """直连方是否为本机/内网代理（cpolar、nginx 等）。"""
+    """直连方是否为可信反向代理。
+
+    默认只信任本机代理。将任意内网地址都视为可信，会让局域网客户端通过
+    伪造 X-Forwarded-For 绕过登录限流。
+    """
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
@@ -124,7 +128,7 @@ def _is_trusted_proxy(host: str) -> bool:
     # IPv4-mapped IPv6（::ffff:127.0.0.1）按 IPv4 判断
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
-    return ip.is_loopback or ip.is_private
+    return ip.is_loopback
 
 
 def _client_ip(request: Request) -> str:
@@ -249,20 +253,17 @@ def login(
 ) -> LoginResponse:
     client = _client_ip(request)
     key = _login_key(request, payload.account)
-    # 先验密，再按失败次数限流：限流必须在「确认这是一次失败尝试」之后，
-    # 否则隧道下共用一个 IP 时，恶意方连错 10 次就能把别人正确的密码也挡在门外。
+    # 达到上限后必须在验密前拒绝，否则仍然允许无限次密码猜测。
+    if _recent_fails(key) >= _LOGIN_MAX_FAILS or _recent_ip_fails(client) >= _IP_MAX_FAILS:
+        raise HTTPException(status_code=429, detail="登录失败次数过多，请 10 分钟后再试")
     user = db.scalar(select(User).where(User.account == payload.account))
     if user is None:
         # 账号不存在也走一遍哈希，抹平「不存在的号返回更快」这个信号
         verify_password(payload.password, _DUMMY_HASH)
-        if _recent_fails(key) >= _LOGIN_MAX_FAILS or _recent_ip_fails(client) >= _IP_MAX_FAILS:
-            raise HTTPException(status_code=429, detail="登录失败次数过多，请 10 分钟后再试")
         _note_fail(key)
         _note_ip_fail(client)
         raise HTTPException(status_code=401, detail="账号或密码错误")
     if not verify_password(payload.password, user.password_hash):
-        if _recent_fails(key) >= _LOGIN_MAX_FAILS or _recent_ip_fails(client) >= _IP_MAX_FAILS:
-            raise HTTPException(status_code=429, detail="登录失败次数过多，请 10 分钟后再试")
         _note_fail(key)
         _note_ip_fail(client)
         raise HTTPException(status_code=401, detail="账号或密码错误")

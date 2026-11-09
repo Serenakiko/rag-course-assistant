@@ -238,7 +238,7 @@ def test_can_answer_timeout_is_error_not_unanswerable(monkeypatch):
         async def ainvoke(self, _messages):
             await asyncio.sleep(1)
 
-    monkeypatch.setattr(rag_service, "get_llm", lambda: SlowLLM())
+    monkeypatch.setattr(rag_service, "get_llm", lambda **_kwargs: SlowLLM())
 
     result = asyncio.run(
         rag_service.can_answer(
@@ -251,8 +251,8 @@ def test_can_answer_timeout_is_error_not_unanswerable(monkeypatch):
     assert result is rag_service.Answerability.ERROR
 
 
-def test_answerability_timeout_streams_retry_error_without_unmatched(monkeypatch):
-    """可答性超时只返回可重试错误，不生成拒答事件，也不写未命中反馈。"""
+def test_answerability_timeout_fails_closed(monkeypatch):
+    """可答性判定超时必须拒绝生成，避免 near-miss 问题被模型编造。"""
     from langchain_core.documents import Document
 
     from backend.services import rag_service
@@ -268,7 +268,6 @@ def test_answerability_timeout_streams_retry_error_without_unmatched(monkeypatch
         return rag_service.Answerability.ERROR
 
     monkeypatch.setattr(rag_service, "can_answer", _timeout)
-
     async def run():
         events = []
         async for event in rag_service._stream_answer_locked(
@@ -280,9 +279,173 @@ def test_answerability_timeout_streams_retry_error_without_unmatched(monkeypatch
     events = asyncio.run(run())
     errors = [event for event in events if event["type"] == "error"]
     assert len(errors) == 1
-    assert "可重试" in errors[0]["message"] or "重试" in errors[0]["message"]
+    assert "重试" in errors[0]["message"]
     assert all(event["type"] != "unmatched" for event in events)
     assert all(event["type"] != "sources" for event in events)
+
+
+def test_answerability_oom_fails_with_resource_message(monkeypatch):
+    """可答性判定因内存不足失败时，应明确报资源不足而不是继续生成。"""
+    from langchain_core.documents import Document
+
+    from backend.services import rag_service
+
+    class OutOfMemoryLLM:
+        async def ainvoke(self, _messages):
+            raise RuntimeError(
+                "llama-server reported out-of-memory during startup: "
+                "failed to allocate buffer for kv cache"
+            )
+
+    doc = Document(
+        page_content="进程是资源分配单位，线程是调度单位。",
+        metadata={"course": "操作系统", "title": "进程与线程"},
+    )
+    monkeypatch.setattr(rag_service, "get_llm", lambda **_kwargs: OutOfMemoryLLM())
+    monkeypatch.setattr(rag_service, "vector_search", lambda *a, **k: [(doc, 0.9)])
+    monkeypatch.setattr(rag_service.settings, "ANSWERABILITY_CHECK", True)
+    async def run():
+        events = []
+        async for event in rag_service._stream_answer_locked(
+            "进程和线程有什么区别？"
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(run())
+    errors = [event for event in events if event["type"] == "error"]
+    assert len(errors) == 1
+    assert "内存不足" in errors[0]["message"]
+    assert all(event["type"] != "unmatched" for event in events)
+    assert all(event["type"] != "sources" for event in events)
+
+
+def test_nonstream_answerability_failure_returns_retryable_error(monkeypatch):
+    """管理员重新生成时，可答性判定失败不能写成已解决回答。"""
+    from langchain_core.documents import Document
+
+    from backend.services import rag_service
+
+    doc = Document(
+        page_content="进程是资源分配单位，线程是调度单位。",
+        metadata={"course": "操作系统", "title": "进程与线程"},
+    )
+    monkeypatch.setattr(rag_service, "vector_search", lambda *a, **k: [(doc, 0.9)])
+    monkeypatch.setattr(rag_service.settings, "ANSWERABILITY_CHECK", True)
+
+    async def _resource_error(*_a, **_k):
+        return rag_service.Answerability.RESOURCE_ERROR
+
+    monkeypatch.setattr(rag_service, "can_answer", _resource_error)
+
+    result = asyncio.run(
+        rag_service._generate_answer_locked("进程和线程有什么区别？")
+    )
+
+    assert result["error"] == "resource"
+    assert result["matched"] is False
+
+
+def test_can_answer_uses_short_nonstream_profile(monkeypatch):
+    """短分类任务不能用正常回答的 1024-token 流式预算。"""
+    from langchain_core.documents import Document
+
+    from backend.services import rag_service
+
+    captured: dict = {}
+
+    class FakeLLM:
+        async def ainvoke(self, _messages):
+            class Response:
+                content = "有"
+
+            return Response()
+
+    def fake_get_llm(**kwargs):
+        captured.update(kwargs)
+        return FakeLLM()
+
+    monkeypatch.setattr(rag_service, "get_llm", fake_get_llm)
+    result = asyncio.run(
+        rag_service.can_answer(
+            "TCP 三次握手是什么？",
+            [(Document(page_content="TCP 三次握手建立连接。", metadata={}), 0.9)],
+        )
+    )
+
+    assert result is rag_service.Answerability.ANSWERABLE
+    assert captured["streaming"] is False
+    assert 1 <= captured["num_predict"] <= 32
+
+
+def test_ollama_embedding_releases_memory_after_request(monkeypatch):
+    """向量模型默认不常驻，避免与生成模型同时加载导致 OOM。"""
+    from backend.services import embedding_service
+
+    captured: dict = {}
+
+    def fake_ollama_embeddings(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(embedding_service.settings, "LLM_PROVIDER", "ollama")
+    monkeypatch.setattr(embedding_service.settings, "EMBEDDING_PROVIDER", "")
+    monkeypatch.setattr(embedding_service.settings, "OLLAMA_EMBED_KEEP_ALIVE", 0)
+    monkeypatch.setattr(embedding_service, "OllamaEmbeddings", fake_ollama_embeddings)
+
+    embedding_service.get_embeddings()
+
+    assert captured["keep_alive"] == 0
+
+
+def test_ollama_llm_releases_memory_after_request(monkeypatch):
+    """对话模型完成回答后卸载，避免下一次向量检索时两个模型同时驻留。"""
+    from backend.services import llm_service
+
+    captured: dict = {}
+
+    def fake_chat_ollama(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(llm_service.settings, "LLM_PROVIDER", "ollama")
+    monkeypatch.setattr(llm_service.settings, "OLLAMA_LLM_KEEP_ALIVE", 0)
+    monkeypatch.setattr(llm_service, "ChatOllama", fake_chat_ollama)
+
+    llm_service.get_llm()
+
+    assert captured["keep_alive"] == 0
+
+
+def test_can_answer_compacts_retrieved_context(monkeypatch):
+    """可答性判定只保留有限证据，避免长检索上下文把短分类拖成超时。"""
+    from langchain_core.documents import Document
+
+    from backend.services import rag_service
+
+    captured: dict = {}
+
+    class FakeLLM:
+        async def ainvoke(self, messages):
+            captured["messages"] = messages
+
+            class Response:
+                content = "有"
+
+            return Response()
+
+    monkeypatch.setattr(rag_service, "get_llm", lambda **_kwargs: FakeLLM())
+    monkeypatch.setattr(rag_service.settings, "ANSWERABILITY_MAX_CONTEXT_CHARS", 600)
+    docs = [
+        (Document(page_content="证据" * 2000, metadata={"course": "计算机网络"}), 0.9),
+        (Document(page_content="补充" * 2000, metadata={"course": "计算机网络"}), 0.8),
+    ]
+
+    result = asyncio.run(rag_service.can_answer("TCP 三次握手是什么？", docs))
+
+    assert result is rag_service.Answerability.ANSWERABLE
+    human = captured["messages"][1][1]
+    assert len(human) <= 700
 
 
 def test_knowledge_bases_get_non_reusable_vector_keys():

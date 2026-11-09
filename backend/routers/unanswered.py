@@ -302,7 +302,7 @@ async def regenerate_answer(
         raise HTTPException(status_code=404, detail="记录不存在")
 
     from ..services.kb_scope import allowed_course_names
-    from ..services.rag_service import generate_answer
+    from ..services.rag_service import generate_answer, model_resource_error_message
 
     # 按提问学生的可见范围重新检索，避免跨到别人的私有知识库
     scope = allowed_course_names(q.creator, db) if q.creator is not None else None
@@ -316,6 +316,8 @@ async def regenerate_answer(
             "answerability": (
                 "资料可答性判定超时或模型暂时不可用，这不表示知识库未收录，请稍后重试"
             ),
+            "resource": model_resource_error_message(),
+            "generation": "回答生成失败，模型服务暂时不可用，请稍后重试",
         }.get(result["error"], "这次没生成出有效回答，检查模型服务后再试")
         return {"ok": False, "answer": "", "resolved": False, "message": message}
     if result["recommended"]:

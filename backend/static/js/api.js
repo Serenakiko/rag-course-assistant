@@ -82,7 +82,7 @@ const API = (() => {
     // 总时长必须比后端 LLM_TIMEOUT（180s）**略长**：两者相等时，前端会在后端收尾前后
     // 抢跑 abort，最后一段 token 和 saved 事件（message_id）被丢掉，而 AbortError 走
     // finish() 不报错，用户以为正常结束，被截掉的那半句就当没发生。
-    const totalTimeout = opts.totalTimeout != null ? opts.totalTimeout : 200_000; // 后端 180s + 20s 余量
+    const totalTimeout = opts.totalTimeout != null ? opts.totalTimeout : 380_000; // 排队 + 判定 + 生成 + 余量
     const controller = new AbortController();
     let finished = false;
     let idleTimer = null;

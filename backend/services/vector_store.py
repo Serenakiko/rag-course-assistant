@@ -429,7 +429,9 @@ def _delete_point_versions(
         ]
         if ids:
             collection.delete(ids=ids)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        if "does not exist" in str(exc).lower():
+            return True
         logger.error(
             "删除知识点向量失败 point_id=%s（该知识点可能仍会被检索到）",
             point_id,

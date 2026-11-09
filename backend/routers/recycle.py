@@ -237,6 +237,11 @@ def restore_item(
                 failed_docs += 1
                 logger.exception("恢复文档向量失败 doc_id=%s", doc.id)
 
+        if failed_points or failed_docs:
+            raise RuntimeError(
+                f"恢复未完成：知识点失败 {failed_points} 条，文档失败 {failed_docs} 条"
+            )
+
         # 最后统一提交：库 + 知识点 + 文档一次落库，中间失败整体回滚不留半套。
         # 注意 created_by 指向的用户若已被删，这里会因 FK 违约抛 500——所以先校验，
         # 用户没了就落到当前管理员名下，避免空库已经 commit 进去。

@@ -1,12 +1,15 @@
 /* ============ 视图：个人中心 ============ */
 const ProfileView = (() => {
 
+  const SYSTEM_ADMIN_ACCOUNT = "23040101";
   const EYE_ON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>';
   const EYE_OFF = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/></svg>';
 
   function render(container, editing = false) {
     const user = API.getUser();
-    const roleText = user.role === "admin" ? "管理员" : "学生";
+    const roleText = user.account === SYSTEM_ADMIN_ACCOUNT
+      ? "系统管理员"
+      : (user.role === "admin" ? "管理员" : "学生");
     const ro = editing ? "" : "readonly";
     container.innerHTML = `
       <div style="max-width:520px;margin:0 auto">
@@ -183,9 +186,6 @@ const ProfileView = (() => {
     const box = Common.openModal(`
       <div class="modal-header">
         <h3>首次登录：请修改管理员密码</h3>
-      </div>
-      <div class="alert-msg mb-16">
-        当前使用的是系统生成的初始密码。修改后旧会话立即失效，需要使用新密码重新登录。
       </div>
       <div class="form-group">
         <label for="force-old-pwd">初始密码</label>

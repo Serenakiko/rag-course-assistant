@@ -730,8 +730,8 @@ const ChatView = (() => {
         // 空闲超时 > 后端 LLM_TIMEOUT(180s)：排队段有 10 秒心跳，生成段没有，
         // 冷启动首 token 可能一两分钟
         idleTimeout: 200_000,
-        // 总超时 = 排队上限(120s) + LLM_TIMEOUT(180s) + 余量，兜底真断网
-        totalTimeout: 320_000,
+        // 总超时 = 排队(120s) + 改写(8s) + 可答性(45s) + 生成(180s) + 余量
+        totalTimeout: 380_000,
       });
 
       abortController = req.controller;  // 同步拿到 controller，从这一刻起「停止生成」能停

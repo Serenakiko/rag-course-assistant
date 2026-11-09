@@ -57,7 +57,7 @@
 确保 `.env` 已配置，知识库和文档已入库：
 
 ```bash
-ollama pull qwen3:8b
+ollama pull qwen3:4b-instruct-2507-q4_K_M
 ollama pull bge-m3
 python demo/seed_demo.py
 ```

@@ -41,6 +41,85 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
+def _merge_duplicate_unanswered_questions(conn) -> None:
+    """合并历史重复反馈，优先保留已解决状态和最新非空答案。"""
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            text(
+                "SELECT id, question, created_by, course, status, related_points, "
+                "answer, answered_at, read_at, admin_read_at, created_at, updated_at "
+                "FROM unanswered_questions "
+                "WHERE created_by IS NOT NULL "
+                "ORDER BY id"
+            )
+        ).mappings()
+    ]
+    groups: dict[tuple[str, int], list[dict]] = {}
+    for row in rows:
+        groups.setdefault((row["question"], row["created_by"]), []).append(row)
+
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        keep = group[0]
+        answered_rows = [row for row in group if (row.get("answer") or "").strip()]
+        answer_row = answered_rows[-1] if answered_rows else None
+        status = (
+            "resolved"
+            if answer_row is not None
+            and any(row["status"] == "resolved" for row in group)
+            else "pending"
+        )
+        course = next(
+            (row["course"] for row in reversed(group) if (row.get("course") or "").strip()),
+            keep.get("course") or "",
+        )
+        related_points = next(
+            (
+                row["related_points"]
+                for row in reversed(group)
+                if (row.get("related_points") or "").strip() not in ("", "[]")
+            ),
+            keep.get("related_points") or "[]",
+        )
+        admin_read_at = next(
+            (row["admin_read_at"] for row in reversed(group) if row.get("admin_read_at")),
+            None,
+        )
+        updated_at = next(
+            (row["updated_at"] for row in reversed(group) if row.get("updated_at")),
+            keep.get("updated_at"),
+        )
+        conn.execute(
+            text(
+                "UPDATE unanswered_questions SET "
+                "course = :course, status = :status, related_points = :related_points, "
+                "answer = :answer, answered_at = :answered_at, read_at = :read_at, "
+                "admin_read_at = :admin_read_at, updated_at = :updated_at "
+                "WHERE id = :id"
+            ),
+            {
+                "id": keep["id"],
+                "course": course,
+                "status": status,
+                "related_points": related_points,
+                "answer": (answer_row or {}).get("answer") or "",
+                "answered_at": (answer_row or {}).get("answered_at"),
+                "read_at": (answer_row or {}).get("read_at"),
+                "admin_read_at": admin_read_at,
+                "updated_at": updated_at,
+            },
+        )
+        duplicate_ids = [row["id"] for row in group[1:]]
+        conn.execute(
+            text(
+                f"DELETE FROM unanswered_questions WHERE id IN "
+                f"({','.join(str(int(item)) for item in duplicate_ids)})"
+            )
+        )
+
+
 def init_db() -> None:
     """建表（幂等），并对旧库补列 / 重命名列。"""
     from . import models  # noqa: F401  确保模型已注册
@@ -114,17 +193,9 @@ def init_db() -> None:
                 "WHERE display_no IS NULL OR display_no = 0"
             )
         )
-        # (question, created_by) 唯一约束：先清掉历史竞态可能留下的重复行，再建唯一索引。
-        # 保留每组里 id 最小（最早）的一条，删除其余重复；否则唯一索引建不起来。
-        conn.execute(
-            text(
-                "DELETE FROM unanswered_questions WHERE id NOT IN ("
-                "  SELECT MIN(id) FROM unanswered_questions "
-                "  WHERE created_by IS NOT NULL "
-                "  GROUP BY question, created_by"
-                ") AND created_by IS NOT NULL"
-            )
-        )
+        # (question, created_by) 唯一约束：先合并历史竞态可能留下的重复行，再建唯一索引。
+        # 合并时保留最早记录作为主键载体，但状态、答案和已读信息取各组最新有效值。
+        _merge_duplicate_unanswered_questions(conn)
         conn.execute(
             text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_unanswered_question_user "
@@ -135,6 +206,24 @@ def init_db() -> None:
         doc_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(documents)"))]
         if "is_seed" not in doc_cols:
             conn.execute(text("ALTER TABLE documents ADD COLUMN is_seed INTEGER DEFAULT 0"))
+        if "content_hash" not in doc_cols:
+            conn.execute(
+                text("ALTER TABLE documents ADD COLUMN content_hash VARCHAR(64) DEFAULT ''")
+            )
+        if "content_simhash" not in doc_cols:
+            conn.execute(
+                text("ALTER TABLE documents ADD COLUMN content_simhash VARCHAR(20) DEFAULT ''")
+            )
+        if "content_length" not in doc_cols:
+            conn.execute(
+                text("ALTER TABLE documents ADD COLUMN content_length INTEGER DEFAULT 0")
+            )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_documents_content_hash "
+                "ON documents (content_hash)"
+            )
+        )
         # 后台解析任务不会跨进程存活：启动时把上次残留的「解析中」标成失败，
         # 否则文档会永远停在 processing，前端也一直轮询。
         # 但热重载 / 多 worker 下，新进程启动时旧进程可能还在正常解析——无条件改 failed
@@ -162,6 +251,19 @@ def init_db() -> None:
         # 这一轮是否拒答：1=拒答。统计拒答率直接读这个字段，不用中文文案 LIKE。
         if "rejected" not in msg_cols:
             conn.execute(text("ALTER TABLE messages ADD COLUMN rejected INTEGER DEFAULT 0"))
+        if "outcome" not in msg_cols:
+            conn.execute(
+                text("ALTER TABLE messages ADD COLUMN outcome VARCHAR(16) DEFAULT ''")
+            )
+        conn.execute(
+            text(
+                "UPDATE messages SET outcome = CASE "
+                "WHEN rejected = 1 THEN 'rejected' "
+                "WHEN interrupted = 1 THEN 'interrupted' "
+                "ELSE outcome END "
+                "WHERE role = 'assistant' AND (outcome IS NULL OR outcome = '')"
+            )
+        )
         # knowledge_points 增量迁移：文档自动生成的知识点标记
         kp_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(knowledge_points)"))]
         if "is_auto" not in kp_cols:
@@ -193,3 +295,21 @@ def init_db() -> None:
                 "ON knowledge_bases (vector_key)"
             )
         )
+        cleanup_cols = [
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(vector_cleanup_tasks)"))
+        ]
+        if "kind" not in cleanup_cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE vector_cleanup_tasks "
+                    "ADD COLUMN kind VARCHAR(24) DEFAULT 'knowledge_base'"
+                )
+            )
+        if "object_id" not in cleanup_cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE vector_cleanup_tasks "
+                    "ADD COLUMN object_id VARCHAR(64) DEFAULT ''"
+                )
+            )

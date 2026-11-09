@@ -176,8 +176,12 @@ def test_document_upload_list_and_delete(api, monkeypatch):
 
     # 后台解析和向量清理不在这里测；上传链路只关心 DB 记录与文件落盘
     monkeypatch.setattr(documents, "process_document", lambda *args, **kwargs: None)
-    monkeypatch.setattr(documents, "delete_document", lambda *args, **kwargs: True)
-    monkeypatch.setattr(documents, "delete_knowledge_point", lambda *args, **kwargs: True)
+    from backend.services import vector_reconcile
+
+    monkeypatch.setattr(vector_reconcile, "delete_document", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        vector_reconcile, "delete_knowledge_point", lambda *args, **kwargs: True
+    )
 
     r = client.post(
         "/api/documents/upload",

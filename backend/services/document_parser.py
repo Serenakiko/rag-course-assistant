@@ -1,6 +1,7 @@
 """文档解析：支持 PDF / TXT / Markdown / CSV。"""
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 SUPPORTED_EXTS: dict[str, str] = {
@@ -28,7 +29,7 @@ def parse_file(path: Path) -> str:
 
     try:
         if ext in (".txt", ".md", ".markdown"):
-            return path.read_text(encoding="utf-8", errors="ignore")
+            return _read_text(path)
         if ext == ".pdf":
             return _parse_pdf(path)
         if ext == ".csv":
@@ -38,6 +39,17 @@ def parse_file(path: Path) -> str:
     except Exception as exc:  # noqa: BLE001
         raise ParseError(f"文件读取失败：{exc}") from exc
     raise ParseError("未知解析错误")
+
+
+def _read_text(path: Path) -> str:
+    """优先 UTF-8，兼容 Windows 中文环境常见的 GB18030 文本。"""
+    data = path.read_bytes()
+    for encoding in ("utf-8-sig", "gb18030"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise ParseError("文本编码无法识别，请保存为 UTF-8 或 GB18030")
 
 
 def _parse_pdf(path: Path) -> str:
@@ -68,7 +80,8 @@ def _parse_csv(path: Path) -> str:
     import csv
 
     rows: list[str] = []
-    with open(path, newline="", encoding="utf-8", errors="ignore") as f:
+    text = _read_text(path)
+    with io.StringIO(text, newline="") as f:
         for row in csv.reader(f):
             rows.append(" | ".join(cell.strip() for cell in row))
     if not rows:
