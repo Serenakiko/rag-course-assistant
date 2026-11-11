@@ -42,6 +42,7 @@ def init_seed() -> None:
         session.commit()
 
         # 3. 示例知识点（按标题幂等创建；向量化失败回滚该条）
+        failed: list[str] = []
         for item in SAMPLE_POINTS:
             if session.scalar(
                 select(KnowledgePoint).where(KnowledgePoint.title == item["title"])
@@ -61,7 +62,15 @@ def init_seed() -> None:
                 add_knowledge_point(p.id, p.title, p.content, p.course, p.tags)
             except Exception:  # noqa: BLE001
                 logger.warning("知识点「%s」写入向量库失败，已回滚（请确认 Ollama 已启动并拉取向量模型）", p.title)
+                failed.append(p.title)
                 session.delete(p)
                 session.commit()
+        if failed:
+            # 逐条 warning 容易被日志淹没：汇总成一条 ERROR，明确当前知识库不可检索。
+            logger.error(
+                "初始化完成，但有 %d 个知识点未能写入向量库，这些知识点无法被检索：%s",
+                len(failed),
+                "、".join(failed[:10]),
+            )
     finally:
         session.close()

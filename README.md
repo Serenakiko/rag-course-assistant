@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![LangChain](https://img.shields.io/badge/LangChain-1.x-1C3C3C?logo=langchain&logoColor=white)](https://www.langchain.com/)
-[![ChromaDB](https://img.shields.io/badge/ChromaDB-0.4%2B-FFD700)](https://www.trychroma.com/)
+[![ChromaDB](https://img.shields.io/badge/ChromaDB-1.5.9-FFD700)](https://www.trychroma.com/)
 [![CI](https://github.com/Serenakiko/rag-course-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/Serenakiko/rag-course-assistant/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -23,7 +23,7 @@
 
 ## ✨ 功能特性
 
-- **流式问答 + 引用溯源** — 回答附文档、章节、页码、分块与命中片段；旧向量缺 metadata 时从正文自动回填
+- **流式问答 + 引用溯源** — 回答附文档、章节、页码、分块与命中片段；答案内联 `[编号]` 引用，后端校验编号是否属于本次检索结果，越界引用写日志并通过 `citation_stats` 返回；旧向量缺 metadata 时从正文自动回填
 - **混合重排** — 向量候选叠加 BM25 词法分数，零额外模型调用；知识点库 MRR 保持 1.0，混合语料 MRR 从 0.85 提升到 0.8778
 - **三重拒答防线** — 距离门控、未收录标记、可答性判定，知识库没覆盖就明确拒答
 - **反馈闭环** — 未命中问题自动记录，管理员按问题聚类、补资料后一键重新生成回答
@@ -66,6 +66,8 @@ cp .env.example .env
 # 4. 启动（自动打开 http://127.0.0.1:8000）
 python run.py
 ```
+
+> 首次启动无需手动准备向量目录：如果 `data/chroma/chroma.sqlite3` 不存在，会先复制内置的已迁移空库模板 `backend/resources/chroma_template.sqlite3`，再初始化 Chroma。这同时规避了部分 Windows + chromadb 1.5.x 环境无法从零创建持久化库的问题。健康检查见 `GET /api/health`。
 
 > Windows 用户也可直接双击 `start.bat`（一键启动）：优先使用项目内 `venv\Scripts\python.exe`，没有建 venv 时自动回退到 PATH 里的 `python`，两者都能启动。
 
@@ -119,6 +121,7 @@ rag-course-assistant/
 │   ├── routers/            # API 路由（auth/chat/knowledge/documents/users/stats/unanswered/recycle）
 │   ├── services/           # 业务服务（llm/embedding/parser/chunker/vector_store/rag_service/...）
 │   ├── static/             # 前端静态资源（零构建 HTML/CSS/JS）
+│   ├── resources/          # 内置资源（Chroma 已迁移空库模板）
 │   ├── config.py           # 配置加载（.env）
 │   ├── models.py           # SQLAlchemy 模型
 │   └── security.py         # PBKDF2 哈希 + JWT
@@ -150,7 +153,7 @@ python -m evaluation.evaluate --scope full --thresholds  # 拒答阈值扫描
 python -m evaluation.evaluate --scope knowledge_points \
   --golden evaluation/student_questions.json             # 21 条真实学生问题
 python -m evaluation.pdf_extraction                      # PDF 页码抽取质量
-python .tools/rebuild_vectors.py                         # 旧文档补页码/章节 metadata
+python .tools/rebuild_vectors.py                         # 重建向量库（先备份 data/chroma，再原地清空重入库）
 python demo/seed_demo.py                      # 生成答辩演示数据
 ```
 
@@ -163,9 +166,9 @@ python demo/seed_demo.py                      # 生成答辩演示数据
 - **页面显示「127.0.0.1 拒绝了连接请求」** — 服务还没启动完（冷启动约 15s），等日志出现监听信息再刷新；若报错，常见原因是 `JWT_SECRET` 未配置。
 - **问答报「模型服务还没准备好」** — Ollama 未启动或无对应模型，`ollama list` 确认后 `ollama pull`。
 - **问答卡在「判断可答性」或模型输出一长串推理** — 优先使用 `qwen3:4b-instruct-2507-q4_K_M`。`qwen3:4b` 当前标签是 Thinking-only 模型，即使请求 `think=false` 仍会先输出推理，不要用于本系统；`qwen3:8b` 在 16 GB 内存机器上容易因 KV cache 不足而 OOM。
-- **回答总被拒答 / 检索异常** — 先停后端运行 `python .tools/rebuild_vectors.py` 重建向量，再 `python .tools/kb_probe.py` 看距离分布。升级前入库的旧文档也应由该命令补齐章节/页码 metadata；换过向量模型必须重新标定阈值。
+- **回答总被拒答 / 检索异常** — 先停后端运行 `python .tools/rebuild_vectors.py` 重建向量（脚本会自动备份 `data/chroma` 再从数据库重新入库），再 `python .tools/kb_probe.py` 看相似度分布。不要手工删除 `data/chroma`：数据库里的文档记录还在，但向量会全部丢失。升级前入库的旧文档也应由该命令补齐章节/页码 metadata；换过向量模型必须重新标定阈值。
 - **误删知识库** — 管理员登录进回收站，30 天内可恢复。
-- **清空所有数据** — 删除 `data/app.db`、`data/chroma/`、`data/trash/` 后重启。
+- **清空所有数据** — 删除 `data/app.db`、`data/chroma/`、`data/trash/`、`data/uploads/` 后重启：空库会用内置模板重建向量目录，并重新创建管理员、四门课程知识库与示例知识点；演示文档需再跑 `python demo/seed_demo.py`。只想重置检索索引时用 `python .tools/rebuild_vectors.py`，不要单独删 `data/chroma`。
 
 ## 📄 License
 

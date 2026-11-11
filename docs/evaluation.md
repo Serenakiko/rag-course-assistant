@@ -78,7 +78,7 @@ python -m evaluation.evaluate --scope full --json evaluation/results/full_corpus
 
 ## 当前结果
 
-环境：`bge-m3`，`top_k=5`，`UNMATCHED_SIMILARITY=0.56`，混合 reranker 权重 `0.95/0.05`。
+环境：`bge-m3`，`top_k=5`，`UNMATCHED_SIMILARITY=0.55`，混合 reranker 权重 `0.95/0.05`。
 
 | 作用域 | recall@5 | MRR | 拒答准确率 | 误拒率 | 跨课程误召回 |
 | --- | --- | --- | --- | --- | --- |

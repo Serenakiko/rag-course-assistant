@@ -239,10 +239,26 @@ def list_bases(
             .group_by(KnowledgePoint.course)
         ).all()
     )
+    # 文档条数与分块总数：与 /bases/page 口径保持一致
+    names = [b.name for b in bases]
+    doc_stats: dict[str, tuple[int, int]] = {}
+    if names:
+        for course, doc_count, chunk_total in db.execute(
+            select(
+                Document.course,
+                func.count(Document.id),
+                func.coalesce(func.sum(Document.chunk_count), 0),
+            )
+            .where(Document.course.in_(names))
+            .group_by(Document.course)
+        ).all():
+            doc_stats[course] = (int(doc_count or 0), int(chunk_total or 0))
+
     result: list[KnowledgeBaseSummary] = []
     for b in bases:
         summary = KnowledgeBaseSummary.model_validate(b)
         summary.point_count = counts.get(b.name, 0)
+        summary.document_count, summary.chunk_count = doc_stats.get(b.name, (0, 0))
         summary.creator_name = (
             b.creator.username or b.creator.account if b.creator else ""
         )

@@ -310,6 +310,45 @@ def test_delete_knowledge_point_without_collection_is_noop(monkeypatch, tmp_path
     assert vector_store.delete_knowledge_point(999) is True
 
 
+def test_ask_request_rejects_blank_message():
+    """纯空白问题没有检索意义，必须在入口按 422 拒绝，而不是落成未命中记录。"""
+    from pydantic import ValidationError
+
+    from backend.schemas import AskRequest
+
+    with pytest.raises(ValidationError):
+        AskRequest(message="   ")
+    assert AskRequest(message="  死锁的四个必要条件  ").message == "死锁的四个必要条件"
+
+
+def test_citation_audit_filters_out_of_range_numbers():
+    """答案里的 [n] 必须落在本次来源数量内，越界编号要能被审计出来。"""
+    from backend.services.rag_service import _citation_audit
+
+    assert _citation_audit("结论见[1]，补充见[3]。", 2) == ([1], [3])
+    assert _citation_audit("这句话没有角标。", 2) == ([], [])
+
+
+def test_knowledge_point_source_has_section_and_locator():
+    """知识点来源没有页码/章节时，用标题兜底并提供可定位的 locator。"""
+    from langchain_core.documents import Document as LangChainDoc
+
+    from backend.services.rag_service import _format_sources
+
+    doc = LangChainDoc(
+        page_content="死锁指多个进程互相等待。",
+        metadata={
+            "source_type": "knowledge_point",
+            "point_id": "13",
+            "title": "死锁及其处理",
+            "course": "操作系统",
+        },
+    )
+    source = _format_sources([(doc, 0.8)])[0]
+    assert source["section"] == "死锁及其处理"
+    assert source["locator"] == "point:13"
+
+
 def test_text_parser_falls_back_to_gb18030(tmp_path):
     """常见中文 GBK/GB18030 文本应按原意读取。"""
     from backend.services.document_parser import parse_file
@@ -697,3 +736,19 @@ def test_start_bat_falls_back_when_venv_python_is_broken(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert marker.exists()
+
+
+def test_fresh_chroma_dir_bootstraps_from_bundled_template(tmp_path, monkeypatch):
+    """全新向量目录应能用内置模板初始化，避免 chromadb 首次迁移失败。"""
+    from backend.config import settings
+    from backend.services import vector_store
+
+    target = tmp_path / 'chroma'
+    monkeypatch.setattr(settings, 'CHROMA_DIR', target)
+    monkeypatch.setattr(vector_store, '_client', None)
+    monkeypatch.setattr(vector_store, '_vector_store', None)
+
+    client = vector_store._get_client()
+
+    assert (target / 'chroma.sqlite3').is_file()
+    assert client.heartbeat() > 0

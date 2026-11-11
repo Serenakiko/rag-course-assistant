@@ -82,6 +82,15 @@ def _open_browser_when_listening(url: str, host: str, port: int, timeout: float 
 
 
 def main() -> None:
+    # Windows 控制台/重定向文件默认用 GBK，中文日志会和 UTF-8 混在一起变成乱码。
+    # 入口统一改成 UTF-8，uvicorn/logging 继承同一套 stdio。
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
     parser = argparse.ArgumentParser(description="智答系统（基于 RAG 大模型的智能问答）")
     parser.add_argument("--reload", action="store_true", help="开发模式：代码修改后自动重启")
     parser.add_argument("--port", type=int, default=None, help="服务端口（默认读取 .env 的 PORT）")

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 from pathlib import Path
 
 import chromadb
@@ -26,15 +27,52 @@ logger = logging.getLogger(__name__)
 _client: chromadb.ClientAPI | None = None
 _vector_store: Chroma | None = None
 
+# 内置的「已迁移、无数据」Chroma 库模板。部分环境（如 Windows 上的 chromadb 1.5.x）
+# 首次初始化全新的持久化目录会因迁移引导失败而报 (code: 14)；预置迁移表后可正常打开。
+_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "resources" / "chroma_template.sqlite3"
+
 # Chroma 的 cosine space 返回的距离其实是 1 - cosine_similarity（值域 [0, 2]），
 # 与归一化向量的平方 L2 距离正好相等。这里显式转回「相似度」：sim = 1 - distance。
 _COSINE_DISTANCE = "cosine"
 
 
+def _chroma_dir_exists() -> bool:
+    """向量目录是否存在。
+
+    目录不存在说明库还没建过（新装/被清理），此时没有任何向量可读可删；
+    删除类操作应当按 no-op 处理，而不是因为打开数据库失败抛 500。
+    """
+    return Path(settings.CHROMA_DIR).exists()
+
+
+def _bootstrap_chroma_dir() -> None:
+    """全新向量目录先用内置模板落一份已迁移的 chroma.sqlite3。
+
+    只在 `chroma.sqlite3` 不存在时执行，绝不覆盖既有库；模板缺失时保持原行为，
+    由 PersistentClient 自己报错（便于定位环境问题）。
+    """
+    db_file = Path(settings.CHROMA_DIR) / "chroma.sqlite3"
+    if db_file.exists() or not _TEMPLATE_PATH.is_file():
+        return
+    Path(settings.CHROMA_DIR).mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(_TEMPLATE_PATH, db_file)
+    logger.info("向量库为空，已使用内置模板初始化：%s", db_file)
+
+
 def _get_client() -> chromadb.ClientAPI:
     global _client
     if _client is None:
-        _client = chromadb.PersistentClient(path=str(settings.CHROMA_DIR))
+        Path(settings.CHROMA_DIR).mkdir(parents=True, exist_ok=True)
+        _bootstrap_chroma_dir()
+        try:
+            _client = chromadb.PersistentClient(path=str(settings.CHROMA_DIR))
+        except Exception:
+            logger.error(
+                "向量库初始化失败 path=%s（请确认目录可写；目录异常时需备份后重建）",
+                settings.CHROMA_DIR,
+                exc_info=True,
+            )
+            raise
     return _client
 
 
@@ -352,6 +390,8 @@ def _delete_document_versions(
     返回是否成功。strict=True 时失败会抛出，供「先删向量、再删 DB」的调用方
     保留记录让用户重试；strict=False 用于 DB 已删后的收尾，失败只记日志。
     """
+    if not _chroma_dir_exists():
+        return True
     try:
         collection = get_collection()
         if keep_version is not None:
@@ -417,6 +457,8 @@ def add_knowledge_point(
 def _delete_point_versions(
     point_id: int, keep_version: int | None = None, *, strict: bool = False
 ) -> bool:
+    if not _chroma_dir_exists():
+        return True
     try:
         collection = get_collection()
         data = collection.get(
@@ -457,6 +499,8 @@ def delete_knowledge_base_vectors(
     knowledge_base_id: str, course: str, *, strict: bool = True
 ) -> bool:
     """删除某知识库的全部向量，包括没有 knowledge_base_id 的旧版记录。"""
+    if not _chroma_dir_exists():
+        return True
     try:
         try:
             collection = get_collection()

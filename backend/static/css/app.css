@@ -248,13 +248,6 @@ body.role-admin  .avatar { background: var(--primary); }
 
 /* 输入区 */
 .chat-input-area { padding: 6px 20px 16px; background: var(--surface-1); flex-shrink: 0; }
-.chat-scope { display: flex; align-items: center; gap: 8px; margin: 0 2px 8px; font-size: 12px; color: var(--text-3); }
-.chat-scope select {
-  border: 1px solid var(--border); border-radius: var(--radius);
-  background: var(--card); color: var(--text-1); font-size: 12px;
-  padding: 4px 8px; outline: none; max-width: 220px;
-}
-.chat-scope select:focus { border-color: var(--primary); }
 .chat-input-box {
   display: flex; align-items: flex-end; gap: 10px;
   border: 1.5px solid var(--border); border-radius: var(--radius-lg);
@@ -1094,8 +1087,6 @@ body.nav-open .nav-backdrop { display: block; }
   .chat-input-area { padding: 6px 10px 12px; }
   .chat-input-box { padding-left: 12px; }
   .send-btn { width: 44px; height: 44px; }
-  .chat-scope { flex-wrap: wrap; }
-  .chat-scope select { max-width: 100%; min-height: 40px; }
 }
 
 @media (max-width: 640px) {

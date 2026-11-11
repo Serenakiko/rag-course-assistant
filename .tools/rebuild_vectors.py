@@ -1,7 +1,11 @@
-"""向量库重建脚本：清理 Chroma 数据并重新入库文档与知识点。
+"""向量库重建脚本：清空 Chroma 集合内容并重新入库文档与知识点。
 
 升级后旧向量缺少 knowledge_base_id、页码或章节 metadata 时，也可运行本脚本
 一次性回填；新版上传与重建会自动带这些字段。
+
+与旧版不同，本脚本不再删除 data/chroma 目录，而是复用已有数据库、逐个删除
+集合后重建。这样在“新建 Chroma 持久库失败”的机器上也能完成重建（目录一旦
+删除就无法重新初始化），并在删除前自动保留一份目录备份。
 
 用法（先停止后端服务再运行）：
     python .tools/rebuild_vectors.py
@@ -10,6 +14,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+import time
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -22,18 +27,40 @@ from backend.database import SessionLocal  # noqa: E402
 from backend.models import Document, KnowledgePoint  # noqa: E402
 from backend.services.chunker import split_text  # noqa: E402
 from backend.services.document_parser import parse_file  # noqa: E402
+from backend.services import vector_store  # noqa: E402
 from backend.services.vector_store import (  # noqa: E402
     add_document_chunks,
     add_knowledge_point,
 )
 
 
+def _reset_collections() -> None:
+    """复用已有数据库，删除全部集合（不删除 data/chroma 目录）。"""
+    client = vector_store._get_client()  # noqa: SLF001
+    for collection in client.list_collections():
+        client.delete_collection(collection.name)
+    # 集合已删，缓存的 Chroma 包装对象必须失效，后续才能重新建集合
+    vector_store._vector_store = None  # noqa: SLF001
+
+
 def main() -> None:
-    # 1. 清空旧的向量库目录（索引损坏时强制重建）
+    # 1. 先备份，再清空集合。绝不 rmtree：新建持久库失败的机器上删除目录后无法恢复。
     if settings.CHROMA_DIR.exists():
-        shutil.rmtree(settings.CHROMA_DIR)
-    settings.CHROMA_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"已清理向量库目录：{settings.CHROMA_DIR}")
+        backup = settings.CHROMA_DIR.with_name(
+            f"{settings.CHROMA_DIR.name}_backup_{time.strftime('%Y%m%d_%H%M%S')}"
+        )
+        shutil.copytree(settings.CHROMA_DIR, backup)
+        print(f"已备份向量库目录：{backup}")
+    else:
+        settings.CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+
+    try:
+        _reset_collections()
+    except Exception as exc:  # noqa: BLE001
+        print(f"清空向量集合失败：{exc}")
+        print("未删除原目录；如需恢复，直接使用上面的备份目录替换 data/chroma。")
+        raise SystemExit(1) from exc
+    print(f"已清空向量集合：{settings.CHROMA_DIR}")
 
     session = SessionLocal()
     try:

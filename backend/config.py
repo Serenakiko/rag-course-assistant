@@ -93,7 +93,7 @@ class Settings:
     # 0.54 拒答 8/10、误拒 1/30；0.56 拒答 8/10、误拒 2/30；
     # 0.58 拒答 9/10、误拒 2/30。0.56 保留为较保守的默认值，
     # 剩余 near_miss 交给 ANSWERABILITY_CHECK。换模型或资料后需重新标定。
-    UNMATCHED_SIMILARITY: float = float(_get("UNMATCHED_SIMILARITY", "0.56"))
+    UNMATCHED_SIMILARITY: float = float(_get("UNMATCHED_SIMILARITY", "0.55"))
     # 二次可答性判定：距离门控通过后，再让模型只回答"有/没有"，判断资料里是否直接讲了这个问题。
     # 防的是"资料讲二叉树、学生问红黑树"这类相近但未覆盖的情况；代价是每次提问多一次模型调用。
     # 默认开启，与 .env.example 保持一致：三重拒答是系统的核心设计，不能因为少建 .env 就退化成两道。

@@ -7,8 +7,9 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 
 from .config import settings
 from .database import SessionLocal, init_db
@@ -79,8 +80,31 @@ app.include_router(recycle.router, prefix="/api/admin/recycle", tags=["回收站
 
 
 @app.get("/api/health", tags=["系统"], summary="健康检查")
-def health() -> dict:
-    return {"status": "ok", "app": settings.APP_NAME, "version": settings.APP_VERSION}
+def health() -> JSONResponse:
+    """探活：数据库不可用时返回 503；向量库不可用只降级标注，不阻断服务。"""
+    checks = {"database": "ok", "vector_store": "ok"}
+    db_ok = True
+    try:
+        with SessionLocal() as db:
+            db.execute(text("SELECT 1"))
+    except Exception:  # noqa: BLE001
+        logger.exception("健康检查失败：数据库不可用")
+        checks["database"] = "error"
+        db_ok = False
+    try:
+        from .services.vector_store import get_collection
+
+        get_collection().count()
+    except Exception as exc:  # noqa: BLE001
+        checks["vector_store"] = "unavailable"
+        logger.warning("健康检查：向量库不可用（%s）", exc)
+    payload = {
+        "status": "ok" if db_ok else "degraded",
+        "app": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "checks": checks,
+    }
+    return JSONResponse(payload, status_code=200 if db_ok else 503)
 
 
 # 前端静态资源

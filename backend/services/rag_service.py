@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import weakref
 from collections.abc import AsyncGenerator, Callable
@@ -129,6 +130,9 @@ def _format_sources(docs: list[tuple[Document, float]]) -> list[dict]:
     for _i, (doc, _score) in enumerate(docs, start=1):
         src = doc.metadata
         section = src.get("section") or src.get("chapter") or ""
+        if not section and src.get("source_type") == "knowledge_point":
+            # 知识点没有页码/章节，用标题兜底，至少能定位到具体知识点
+            section = src.get("title") or ""
         page = src.get("page") or src.get("page_number")
         if src.get("source_type") == "document" and (not section or page is None):
             inferred_page, inferred_section = _chunk_locator(doc.page_content)
@@ -142,16 +146,42 @@ def _format_sources(docs: list[tuple[Document, float]]) -> list[dict]:
                 "point_id": src.get("point_id"),
                 "chunk_id": src.get("chunk_id"),
                 "chunk_index": src.get("chunk_index"),
+                "locator": src.get("chunk_id")
+                or (f"point:{src.get('point_id')}" if src.get("point_id") else None),
                 "filename": src.get("filename"),
                 "title": src.get("title") or src.get("filename") or "未知来源",
                 "course": src.get("course") or "未分类",
                 "section": section,
                 "chapter": src.get("chapter") or "",
                 "page": page,
-                "content": doc.page_content[:200],
+                "content": doc.page_content[:400],
+                "content_length": len(doc.page_content),
             }
         )
     return out
+
+
+_CITATION_RE = re.compile(r"\[(\d{1,2})\]")
+
+
+def _citation_audit(answer: str, source_count: int) -> tuple[list[int], list[int]]:
+    """校验答案里的 [n] 角标：返回 (有效编号, 越界编号)，编号从 1 开始。"""
+    cited = [int(n) for n in _CITATION_RE.findall(answer)]
+    valid = sorted({n for n in cited if 1 <= n <= source_count})
+    invalid = sorted({n for n in cited if n < 1 or n > source_count})
+    return valid, invalid
+
+
+def _citation_stats(answer: str, source_count: int) -> dict:
+    """记录引用越界（答案编造了不存在的来源编号），并随 sources 事件返回。"""
+    valid, invalid = _citation_audit(answer, source_count)
+    if invalid:
+        logger.warning(
+            "回答引用了不存在的来源编号 %s（本次来源 %d 条）", invalid, source_count
+        )
+    elif valid:
+        logger.info("回答引用编号 %s（来源 %d 条）", valid, source_count)
+    return {"valid": valid, "invalid": invalid}
 
 
 async def _rewrite_query(question: str, history: list[tuple[str, str]]) -> str:
@@ -500,6 +530,13 @@ async def _generate_answer_locked(
             "matched": False,
         }
     if _max_similarity(docs) < settings.UNMATCHED_SIMILARITY:
+        logger.info(
+            "非流式检索未命中 top_similarity=%.4f threshold=%.2f docs=%d question=%s",
+            _max_similarity(docs),
+            settings.UNMATCHED_SIMILARITY,
+            len(docs),
+            question[:40],
+        )
         return _unmatched_result(question, docs)
     if settings.ANSWERABILITY_CHECK:
         answerability = await can_answer(question, docs)
@@ -704,6 +741,9 @@ async def _handle_unmatched(
 ) -> AsyncGenerator[dict, None]:
     """知识库未覆盖该问题：先判课程相关性，学习相关才记录反馈并拒答。"""
     if not await is_course_related(question):
+        # 明确跑题的问题只拒答，不进未命中反馈池（避免天气/闲聊污染统计）；
+        # 仍打 outcome 标记，便于区分「跑题」与「知识库缺资料」。
+        yield {"type": "outcome", "outcome": "out_of_scope"}
         yield {"type": "token", "content": "这个问题不在我的回答范围内，我只解答课程知识库中的内容。"}
         return
     course = docs[0][0].metadata.get("course") or ""
@@ -761,6 +801,7 @@ async def _handle_generate(
         "sources": _format_sources(kept),
         "answer": answer,
         "truncated": truncated,
+        "citation_stats": _citation_stats(answer, len(kept)),
     }
     if phase_started is not None:
         yield _phase_event("generation", "done", phase_started)
@@ -813,7 +854,15 @@ async def _stream_answer_locked(
             return
 
         # 2. 无匹配门控：最相似资料的相似度仍低于阈值 → 知识库未覆盖该问题
-        if _max_similarity(docs) < settings.UNMATCHED_SIMILARITY:
+        top_similarity = _max_similarity(docs)
+        logger.info(
+            "检索结果 top_similarity=%.4f threshold=%.2f docs=%d question=%s",
+            top_similarity,
+            settings.UNMATCHED_SIMILARITY,
+            len(docs),
+            question[:40],
+        )
+        if top_similarity < settings.UNMATCHED_SIMILARITY:
             async for event in _handle_unmatched(question, docs):
                 yield event
             return
@@ -865,4 +914,7 @@ async def _stream_answer_locked(
                 "message": "模型服务还没准备好，这次答不了。过一会儿再试，一直这样的话找老师看一下。",
             }
             return
-        yield {"type": "error", "message": f"回答生成失败：{exc}"}
+        yield {
+            "type": "error",
+            "message": "回答生成失败，请稍后重试；如果一直失败，请联系老师查看服务日志。",
+        }

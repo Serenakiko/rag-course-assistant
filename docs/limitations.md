@@ -33,9 +33,10 @@
 
 ## 5. 拒答阈值与 embedding 模型耦合
 
-- `UNMATCHED_SIMILARITY=0.56` 是按 `bge-m3` 在当前 20 个知识点上标定的；换 embedding 模型后必须重新跑 `python -m evaluation.evaluate --thresholds`。
+- `UNMATCHED_SIMILARITY=0.55` 是按 `bge-m3` 在当前 20 个知识点上标定的；换 embedding 模型后必须重新跑 `python -m evaluation.evaluate --thresholds`。
 - `vector_store` 会校验向量维度和 cosine space；同维度换模型时，会在 `data/chroma/embedding_model.txt` 记录模型名并在变化时打警告，避免阈值静默漂移。
-- 如果语义空间差异较大，仅改阈值不够，需要删除 `data/chroma` 重建向量库。
+- 如果语义空间差异较大，仅改阈值不够，需要用 `python .tools/rebuild_vectors.py` 重建向量库：脚本会先备份 `data/chroma`，再在原目录内清空 collection 重新入库；不要手工删除 `data/chroma`，部分环境删掉后无法从零重建。
+- 全新环境首次启动时，如果 `data/chroma/chroma.sqlite3` 不存在，会先从 `backend/resources/chroma_template.sqlite3`（已迁移、无数据的模板库）复制一份再打开 Chroma。个别 Windows + chromadb 1.5.x 环境无法从零创建持久化库（`code: 14 unable to open database file`），模板用于绕开该问题；模板缺失时保持原行为，并在日志中记录初始化失败原因。
 
 ## 6. 前端零构建
 

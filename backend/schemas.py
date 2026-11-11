@@ -98,6 +98,15 @@ class AskRequest(BaseModel):
     # 由后端按用户可见范围兜底。传了就按会话落库，恢复会话级课程隔离。
     courses: list[str] = Field(default_factory=list)
 
+    @field_validator("message")
+    @classmethod
+    def _message_not_blank(cls, v: str) -> str:
+        """纯空白问题没有检索意义，直接按空问题拒绝，避免污染未命中统计。"""
+        text = v.strip()
+        if not text:
+            raise ValueError("问题不能为空")
+        return text
+
 
 class RenameConversationRequest(BaseModel):
     title: str = Field(min_length=1, max_length=255)
