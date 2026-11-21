@@ -159,7 +159,7 @@ python demo/seed_demo.py                      # 生成答辩演示数据
 
 真实学生问题集来自 `messages` 表中 21 条去重后的学生提问，保留 `source_message_id` 便于追溯；`evaluation/pdf_extraction.py` 在 `data/uploads` 没有 PDF 时输出 `status=no_samples`，不会伪造质量数字。
 
-测试覆盖后端单元（pytest，模型用 fake）、前端纯函数（node 回归）、端到端（`.tools/kb_e2e.py`）和性能/安全场景。阈值标定可参考 `.tools/kb_probe.py` / `.tools/kb_calibrate.py`。
+自动化测试分三层：后端单元 / 接口（`pytest`，模型用 fake，CI 每次跑）、前端纯函数回归（`node tests/frontend_*.mjs`，CI 每次跑）、端到端脚本（`.tools/kb_e2e.py`，需要真实模型，手动执行）。性能与阈值标定是手动脚本（`.tools/kb_probe.py` / `.tools/kb_calibrate.py`），不在 pytest 里，不要当成自动化覆盖。
 
 ## 🔧 常见问题
 

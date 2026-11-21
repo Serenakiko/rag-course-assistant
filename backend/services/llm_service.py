@@ -14,6 +14,19 @@ from ..config import settings
 logger = logging.getLogger(__name__)
 
 
+class LLMConfigError(RuntimeError):
+    """模型配置不全（缺 key 等），应在请求模型前就说清楚。"""
+
+
+def _require_openai_key() -> str:
+    key = (settings.OPENAI_API_KEY or "").strip()
+    if not key:
+        raise LLMConfigError(
+            "LLM_PROVIDER=openai 但 OPENAI_API_KEY 为空，请在 .env 里配置密钥后重启服务"
+        )
+    return key
+
+
 def unload_ollama_llm() -> None:
     """请求 Ollama 立即卸载对话模型，避免与下一次 embedding 争内存。"""
     if settings.LLM_PROVIDER != "ollama":
@@ -48,12 +61,14 @@ def get_llm(*, num_predict: int | None = None, streaming: bool = True) -> BaseCh
     if settings.LLM_PROVIDER == "openai":
         return ChatOpenAI(
             model=settings.OPENAI_LLM_MODEL,
-            api_key=settings.OPENAI_API_KEY,
+            api_key=_require_openai_key(),
             base_url=settings.OPENAI_API_BASE,
             temperature=settings.OPENAI_TEMPERATURE,
             streaming=streaming,
-            max_retries=1,
-            timeout=120,
+            # 与 Ollama 分支共用同一个超时配置：以前这里写死 120s，Ollama 用 LLM_TIMEOUT(180s)，
+            # 两套超时让"回答失败"的边界随 provider 漂移
+            max_retries=2,
+            timeout=settings.LLM_TIMEOUT,
             **({"max_tokens": num_predict} if num_predict is not None else {}),
         )
     # 默认 ollama

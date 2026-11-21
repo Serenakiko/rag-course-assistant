@@ -81,6 +81,13 @@ def api(monkeypatch, tmp_path):
     upload_dir = tmp_path / "uploads"
     upload_dir.mkdir()
     monkeypatch.setattr(settings, "UPLOAD_DIR", upload_dir)
+    # recycle.TRASH_DIR 是模块常量，只在 import 时算过一次；不 patch 的话删除文档
+    # 会写真实 data/trash/，在 Windows 上还容易撞上 PermissionError。
+    from backend.services import recycle
+
+    trash_dir = tmp_path / "trash"
+    trash_dir.mkdir()
+    monkeypatch.setattr(recycle, "TRASH_DIR", trash_dir)
 
     with SessionFactory() as db:
         admin = User(
@@ -104,7 +111,7 @@ def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def _login(client: TestClient, account: str, password: str = "secret1") -> str:
+def _login(client: TestClient, account: str, password: str = "secret1x") -> str:
     r = client.post("/api/auth/login", json={"account": account, "password": password})
     assert r.status_code == 200, r.text
     return r.json()["token"]
@@ -113,7 +120,7 @@ def _login(client: TestClient, account: str, password: str = "secret1") -> str:
 def _register(client: TestClient, account: str, username: str = "测试学生") -> str:
     r = client.post(
         "/api/auth/register",
-        json={"account": account, "password": "secret1", "username": username},
+        json={"account": account, "password": "secret1x", "username": username},
     )
     assert r.status_code == 200, r.text
     return _login(client, account)
@@ -129,12 +136,24 @@ def test_register_login_and_me(api):
     assert r.json()["role"] == "student"
 
 
+def _assert_forbidden(r, what: str) -> None:
+    """403 不只是状态码：错误体要是给人看的中文原因，不能漏内部细节。"""
+    assert r.status_code == 403, f"{what}: {r.text}"
+    body = r.json()
+    assert body["detail"] == "当前角色无权执行此操作", body
+    assert "Traceback" not in r.text and "sqlalchemy" not in r.text.lower()
+
+
 def test_student_cannot_access_admin_endpoints(api):
     client, _ = api
     student = _register(client, "24000002")
-    assert client.get("/api/admin/users", headers=_auth(student)).status_code == 403
-    assert client.get("/api/admin/recycle", headers=_auth(student)).status_code == 403
-    assert client.get("/api/admin/unanswered/stats", headers=_auth(student)).status_code == 403
+    for path in ("/api/admin/users", "/api/admin/recycle", "/api/admin/unanswered/stats"):
+        _assert_forbidden(client.get(path, headers=_auth(student)), path)
+    # 越权请求不能留下任何副作用：用户表仍然只有种子管理员 + 刚注册的学生
+    admin = _login(client, DEFAULT_ADMIN[0], DEFAULT_ADMIN[1])
+    users = client.get("/api/admin/users", headers=_auth(admin)).json()
+    items = users["items"] if isinstance(users, dict) else users
+    assert {u["account"] for u in items} == {DEFAULT_ADMIN[0], "24000002"}
 
     admin = _login(client, DEFAULT_ADMIN[0], DEFAULT_ADMIN[1])
     assert client.get("/api/admin/users", headers=_auth(admin)).status_code == 200
@@ -147,30 +166,57 @@ def test_knowledge_base_visibility(api):
     alice = _register(client, "24000003", "学生A")
     bob = _register(client, "24000004", "学生B")
 
-    for token, name in ((alice, "A的私有库"), (bob, "B的私有库")):
+    # 学生只读：建库/改名/删库都应收敛到管理员（报告 F2/R1）
+    r = client.post(
+        "/api/knowledge/bases",
+        json={"name": "学生不该建的库", "description": ""},
+        headers=_auth(alice),
+    )
+    assert r.status_code == 403, r.text
+
+    admin = _login(client, DEFAULT_ADMIN[0], DEFAULT_ADMIN[1])
+    for name in ("A的私有库", "B的私有库"):
         r = client.post(
             "/api/knowledge/bases",
             json={"name": name, "description": ""},
-            headers=_auth(token),
+            headers=_auth(admin),
         )
         assert r.status_code == 200, r.text
 
-    alice_names = {b["name"] for b in client.get("/api/knowledge/bases", headers=_auth(alice)).json()}
-    assert "A的私有库" in alice_names
-    assert "B的私有库" not in alice_names
+    base_id = client.get("/api/knowledge/bases", headers=_auth(admin)).json()[0]["id"]
+    before = client.get("/api/knowledge/bases", headers=_auth(admin)).json()
+    _assert_forbidden(
+        client.put(
+            f"/api/knowledge/bases/{base_id}",
+            json={"name": "学生改不动", "description": ""},
+            headers=_auth(alice),
+        ),
+        "学生改库名",
+    )
+    _assert_forbidden(
+        client.delete(f"/api/knowledge/bases/{base_id}", headers=_auth(alice)),
+        "学生删库",
+    )
+    # 越权被拒后数据必须原样：名字没变、库还在
+    after = client.get("/api/knowledge/bases", headers=_auth(admin)).json()
+    assert after == before
+    assert after[0]["name"] != "学生改不动"
 
-    admin = _login(client, DEFAULT_ADMIN[0], DEFAULT_ADMIN[1])
-    admin_names = {b["name"] for b in client.get("/api/knowledge/bases", headers=_auth(admin)).json()}
-    assert {"A的私有库", "B的私有库"} <= admin_names
+    # 管理员建的课程库，学生可只读浏览
+    alice_names = {b["name"] for b in client.get("/api/knowledge/bases", headers=_auth(alice)).json()}
+    assert {"A的私有库", "B的私有库"} <= alice_names
+    bob_names = {b["name"] for b in client.get("/api/knowledge/bases", headers=_auth(bob)).json()}
+    assert {"A的私有库", "B的私有库"} <= bob_names
 
 
 def test_document_upload_list_and_delete(api, monkeypatch):
     client, _ = api
-    token = _register(client, "24000005", "上传学生")
+    student = _register(client, "24000005", "上传学生")
+    admin = _login(client, DEFAULT_ADMIN[0], DEFAULT_ADMIN[1])
     r = client.post(
         "/api/knowledge/bases",
         json={"name": "上传测试库", "description": ""},
-        headers=_auth(token),
+        headers=_auth(admin),
     )
     assert r.status_code == 200, r.text
 
@@ -183,9 +229,18 @@ def test_document_upload_list_and_delete(api, monkeypatch):
         vector_reconcile, "delete_knowledge_point", lambda *args, **kwargs: True
     )
 
+    # 学生上传应收敛到管理员（报告 F2/R1）
     r = client.post(
         "/api/documents/upload",
-        headers=_auth(token),
+        headers=_auth(student),
+        data={"course": "上传测试库"},
+        files={"file": ("note.txt", b"hello world", "text/plain")},
+    )
+    assert r.status_code == 403, r.text
+
+    r = client.post(
+        "/api/documents/upload",
+        headers=_auth(admin),
         data={"course": "上传测试库"},
         files={"file": ("note.txt", b"hello world", "text/plain")},
     )
@@ -194,12 +249,15 @@ def test_document_upload_list_and_delete(api, monkeypatch):
     assert doc["filename"] == "note.txt"
     assert doc["course"] == "上传测试库"
 
-    r = client.get("/api/documents", headers=_auth(token), params={"limit": 10, "offset": 0})
+    r = client.get("/api/documents", headers=_auth(admin), params={"limit": 10, "offset": 0})
     assert r.status_code == 200, r.text
     assert any(item["id"] == doc["id"] for item in r.json()["items"])
 
-    r = client.delete(f"/api/documents/{doc['id']}", headers=_auth(token))
+    # 删除改为进回收站（报告 U3），返回回收条目 id
+    r = client.delete(f"/api/documents/{doc['id']}", headers=_auth(admin))
     assert r.status_code == 200, r.text
+    assert r.json().get("recycled") is True
+    assert r.json().get("item_id")
 
 
 def test_chat_session_lifecycle_and_feedback(api):

@@ -216,13 +216,21 @@ def admin_stats(
     # 取被问得最多的问题。不用分词（无 jieba），原问归一化更能反映「高频困惑点」，
     # 便于管理员针对性补料。
     hot_questions: list[dict] = []
+    # 只扫近 N 天、最多 M 条最近的提问：热点看的是「近期」，不必把历史全量读一遍
+    hot_cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, settings.STATS_HOT_DAYS))
     question_result = db.execute(
-        select(Message.content).where(
-            Message.role == "user", Message.content.isnot(None), Message.content != ""
+        select(Message.content)
+        .where(
+            Message.role == "user",
+            Message.content.isnot(None),
+            Message.content != "",
+            Message.created_at >= hot_cutoff,
         )
+        .order_by(Message.id.desc())
+        .limit(max(1, settings.STATS_HOT_SCAN_LIMIT))
     )
     qcount: dict[str, int] = {}
-    # 分批取，避免消息量上来后一次性把全部提问读进内存
+    # 分批取，避免一次性把窗口内的提问读进内存
     while batch := question_result.fetchmany(1000):
         for (raw,) in batch:
             norm = " ".join((raw or "").strip().split())
@@ -263,6 +271,8 @@ def admin_stats(
 
 @router.get("/admin/doc-usage", summary="文档引用排行（管理员）")
 def doc_usage_stats(
+    days: int = 90,
+    limit: int = 20000,
     admin: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -273,12 +283,23 @@ def doc_usage_stats(
     未命中时系统塞进 sources 的「相近资料推荐」没有 source_type，
     title 是被截断的问题文本，必须排除，否则会把问题当资料名混进排行。
 
-    死资料 = documents（ready 状态）中从未作为真实来源被引用的那一部分。
+    死资料 = documents（ready 状态）中在统计窗口内从未作为真实来源被引用的
+    那一部分。窗口默认最近 90 天、最多 20000 条回答：原先全表拉
+    messages.sources 再逐条 JSON 解析，历史回答一多就把管理页拖慢。
     """
+    days = min(max(days, 1), 3650)
+    limit = min(max(limit, 1000), 50000)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     source_result = db.execute(
-        select(Message.sources).where(
-            Message.role == "assistant", Message.sources.isnot(None), Message.sources != "[]"
+        select(Message.sources)
+        .where(
+            Message.role == "assistant",
+            Message.sources.isnot(None),
+            Message.sources != "[]",
+            Message.created_at >= cutoff,
         )
+        .order_by(Message.id.desc())
+        .limit(limit)
     )
 
     # 用 (source_type, doc_id) 作为统计键，而不是标题字符串：
@@ -287,8 +308,10 @@ def doc_usage_stats(
     key_count: dict[tuple, int] = {}
     key_course: dict[tuple, str] = {}
     key_title: dict[tuple, str] = {}
+    scanned = 0
     # 分批取，避免历史回答多时把全部 sources 一次性读进内存
     while batch := source_result.fetchmany(1000):
+        scanned += len(batch)
         for (raw,) in batch:
             try:
                 sources = json.loads(raw or "[]")
@@ -344,7 +367,11 @@ def doc_usage_stats(
 
     return {
         "ranked": ranked,          # 文档引用排行（降序）
-        "dead_docs": dead_docs,    # 从未被引用的文档
+        "dead_docs": dead_docs,    # 窗口内从未被引用的文档
         "cited_count": len(ranked),
         "dead_count": len(dead_docs),
+        # 让前端/排查知道这次统计的范围，避免把「近期未引用」误读成「从未引用」
+        "window_days": days,
+        "scanned_messages": scanned,
+        "truncated": scanned >= limit,
     }

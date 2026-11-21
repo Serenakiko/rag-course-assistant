@@ -3,8 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#17505e">
+  <link rel="manifest" href="/static/manifest.webmanifest">
   <title>登录 - 智答系统</title>
-  <script>/* 尽早应用主题，避免闪白 */try{var t=localStorage.getItem("app-theme")||"system";var d=t==="dark"||(t==="system"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.setAttribute("data-theme",d?"dark":"light");}catch(e){}</script>
+  <script src="/static/js/theme-boot.js?v=1"></script>
   <link rel="stylesheet" href="/static/css/common.css?v=30">
   <link rel="stylesheet" href="/static/css/auth.css?v=15">
 </head>
@@ -62,8 +64,10 @@
   </div>
 
   <div id="toast-root"></div>
-  <script src="/static/js/common.js?v=29"></script>
-<script src="/static/js/api.js?v=25"></script>
-  <script src="/static/js/auth.js?v=15"></script>
+  <script src="/static/js/common.js?v=29" defer></script>
+<script src="/static/js/api.js?v=25" defer></script>
+  <script src="/static/js/auth.js?v=15" defer></script>
+  <!-- PWA：注册 Service Worker（/api/ 请求直连，不进缓存） -->
+  <script src="/static/js/sw-boot.js?v=1" defer></script>
 </body>
 </html>

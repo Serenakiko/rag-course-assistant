@@ -9,10 +9,13 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from .database import get_db
-from .models import User
+from .models import RevokedToken, User
 from .security import decode_token
 
 bearer_scheme = HTTPBearer(auto_error=False)
+
+# 会话 Cookie 名。前端不再持久化 token，浏览器刷新后靠它恢复登录态。
+ACCESS_TOKEN_COOKIE = "access_token"
 
 
 def get_current_user(
@@ -20,18 +23,28 @@ def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> User:
-    """解析 Bearer Token，返回当前用户。"""
+    """解析当前用户：优先 Authorization: Bearer，其次 HttpOnly Cookie。
+
+    保留 Bearer 分支是为了兼容旧客户端和脚本；浏览器走 Cookie，JS 读不到 token。
+    """
     unauthorized = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="登录状态无效或已过期，请重新登录",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    if credentials is None:
+    token = credentials.credentials if credentials is not None else request.cookies.get(
+        ACCESS_TOKEN_COOKIE
+    )
+    if not token:
         raise unauthorized
     try:
-        payload = decode_token(credentials.credentials)
+        payload = decode_token(token)
         user_id = int(payload.get("sub", "0"))
     except (jwt.PyJWTError, ValueError, TypeError):
+        raise unauthorized
+    # 已登出的令牌：登出时把 jti 记入黑名单，即使 token 未过期也拒绝
+    jti = payload.get("jti")
+    if jti and db.get(RevokedToken, jti) is not None:
         raise unauthorized
     user = db.get(User, user_id)
     if user is None:

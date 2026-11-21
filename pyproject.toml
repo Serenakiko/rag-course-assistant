@@ -13,7 +13,12 @@ select = ["E", "F", "I"]
 [tool.ruff.lint.per-file-ignores]
 # 提示词正文按整句保留，拆行反而难核对；其余文件仍按 120 列
 "backend/services/rag_prompts.py" = ["E501"]
+# 该文件从 test_api 导入 api fixture，各用例再以同名参数接收：pytest 的 fixture
+# 解析依赖这个名字，参数遮蔽导入是正常写法，F811 属误报。
+"tests/test_fix_documents.py" = ["F811"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# -ra：任何 skip / xfail 都要在摘要里列出来。以前默认的 -q 会把「本机没 node
+# 所以这条回归没跑」吞掉，看着全绿其实少跑了用例。
+addopts = "-q -ra"

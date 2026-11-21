@@ -32,6 +32,17 @@ class Settings:
     JWT_SECRET: str = _get("JWT_SECRET", "")
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_HOURS: int = int(_get("JWT_EXPIRE_HOURS", "24"))
+    # Cookie 是否带 Secure：留空表示按 X-Forwarded-Proto / 请求 scheme 自动判断；
+    # 反代终止 TLS 又没传 X-Forwarded-Proto 时，显式填 true 兜底。
+    COOKIE_SECURE: str = _get("COOKIE_SECURE", "")
+    # 运行环境：dev（默认）/ prod。prod 时关闭 /docs、/redoc、/openapi.json，
+    # 避免公网部署时把全部接口、参数与示例暴露出去（毕设演示用 dev 即可）。
+    APP_ENV: str = _get("APP_ENV", "dev")
+    # 热门问题统计的时间窗口与最大扫描行数：原先每次刷新仪表盘都要把全部历史提问
+    # 读进内存做归一化聚合，消息表上百万行时这个接口会变成全表扫描 + O(n) 内存。
+    # 现在只统计近 N 天、最多扫 M 条最近的提问，够看「近期高频困惑点」。
+    STATS_HOT_DAYS: int = int(_get("STATS_HOT_DAYS", "90"))
+    STATS_HOT_SCAN_LIMIT: int = int(_get("STATS_HOT_SCAN_LIMIT", "20000"))
     # 可选：显式指定管理员首次创建密码。留空则生成随机初始密码并写入
     # data/admin_initial_credentials.txt；与公开默认密码相同也会被拒绝使用。
     DEFAULT_ADMIN_PASSWORD: str = _get("DEFAULT_ADMIN_PASSWORD", "")
@@ -72,6 +83,11 @@ class Settings:
     # ---------- RAG 参数 ----------
     CHUNK_SIZE: int = int(_get("CHUNK_SIZE", "800"))
     CHUNK_OVERLAP: int = int(_get("CHUNK_OVERLAP", "120"))
+    # 向量化分批大小：整份文档一次提交给 Ollama/OpenAI 时，几百上千个片段
+    # 常常超时或被网关截断；分批发还能把失败限制在一批之内重试。
+    EMBED_BATCH_SIZE: int = int(_get("EMBED_BATCH_SIZE", "16"))
+    # 单批向量化失败后的重试次数（指数退避，总耗时上限约 7 秒）
+    EMBED_MAX_RETRIES: int = int(_get("EMBED_MAX_RETRIES", "3"))
     TOP_K: int = int(_get("TOP_K", "5"))
     COLLECTION_NAME: str = _get("COLLECTION_NAME", "course_knowledge")
 
@@ -100,9 +116,10 @@ class Settings:
     ANSWERABILITY_CHECK: bool = _get("ANSWERABILITY_CHECK", "true").lower() in ("1", "true", "yes")
     # 可答性判定是独立模型调用，超时是系统错误，不应升级成“资料不可答”
     ANSWERABILITY_TIMEOUT: float = float(_get("ANSWERABILITY_TIMEOUT", "45"))
-    # 只把最相关的有限证据交给短分类，避免长上下文让 CPU 推理拖过超时。
+    # 交给短分类的证据上限。1000 字符约等于 1 条 chunk，答案落在第 2/3 条时会被
+    # 误判「未收录」；默认放宽到 4000（约 3~5 条），同时仍限制 CPU 推理时长。
     ANSWERABILITY_MAX_CONTEXT_CHARS: int = int(
-        _get("ANSWERABILITY_MAX_CONTEXT_CHARS", "1000")
+        _get("ANSWERABILITY_MAX_CONTEXT_CHARS", "4000")
     )
     # 多轮追问的检索 query 改写：把最近的历史轮拼接进 query，让「它」「这个」类指代能召回对的内容。
     QUERY_REWRITE_HISTORY_TURNS: int = 3  # 拼入检索的最近历史轮数
@@ -113,6 +130,14 @@ class Settings:
     RERANK_CANDIDATES: int = int(_get("RERANK_CANDIDATES", "12"))
     RERANK_VECTOR_WEIGHT: float = float(_get("RERANK_VECTOR_WEIGHT", "0.95"))
     RERANK_LEXICAL_WEIGHT: float = float(_get("RERANK_LEXICAL_WEIGHT", "0.05"))
+    # 标题/章节命中项的权重。三项权重不要求归一化（rerank_score 上限 = 三项之和），
+    # 检索结果对外返回的仍然是原始向量相似度，不受影响。
+    RERANK_TITLE_WEIGHT: float = float(_get("RERANK_TITLE_WEIGHT", "0.05"))
+
+    # 首次启动是否写入示例课程知识库与知识点。
+    # 置 false 时只创建默认管理员，知识库/知识点完全空白（适合从零开始搭自己的数据）。
+    # 注意：该开关只在启动初始化时生效，已有数据不会被删除。
+    SEED_SAMPLE_DATA: bool = _get("SEED_SAMPLE_DATA", "true").lower() in ("1", "true", "yes")
 
     def ensure_dirs(self) -> None:
         """确保运行时目录存在。"""

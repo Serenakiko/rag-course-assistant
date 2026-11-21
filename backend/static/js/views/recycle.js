@@ -123,9 +123,12 @@ const RecycleView = (() => {
 
   async function restore(item) {
     if (!item) return;
+    const isDocument = item.kind === "document";
     const ok = await Common.confirmDialog({
-      title: "恢复知识库",
-      message: `将恢复「${Common.escapeHtml(item.name)}」：${item.points} 个知识点、${item.documents} 个文档，恢复时要重新生成向量，可能需要几秒。`,
+      title: isDocument ? "恢复文档" : "恢复知识库",
+      message: isDocument
+        ? `将恢复文档「${Common.escapeHtml(item.name)}」，恢复后需要重新解析并生成向量，可能需要几秒。`
+        : `将恢复「${Common.escapeHtml(item.name)}」：${item.points} 个知识点、${item.documents} 个文档，恢复时要重新生成向量，可能需要几秒。`,
       okText: "恢复",
       danger: false,
     });
@@ -134,26 +137,71 @@ const RecycleView = (() => {
     if (btn) { btn.disabled = true; btn.textContent = "恢复中…"; }
     try {
       const r = await API.request("POST", `/api/admin/recycle/${item.id}/restore`);
-      const dull = [];
-      if (r.failed_points) dull.push(`${r.failed_points} 个知识点向量化失败`);
-      if (r.failed_documents) dull.push(`${r.failed_documents} 个文档向量化失败`);
-      Common.toast(
-        `已恢复为「${r.name}」：知识点 ${r.points}，文档 ${r.documents}` +
-          (dull.length ? `（${dull.join("，")}，可稍后重新解析）` : ""),
-        dull.length ? "error" : "success"
-      );
+      handleRestoreResult(item, r);
       load();
     } catch (err) {
+      // 恢复失败（409）时后端把 failed 清单放在 detail 里，不是「已恢复但有遗漏」
+      const detail = err && err.body && err.body.detail;
+      if (detail && typeof detail === "object" && Array.isArray(detail.failed)) {
+        handleRestoreResult(item, detail);
+        load();
+        return;
+      }
       Common.toast(err.message, "error");
       if (btn) { btn.disabled = false; btn.textContent = "恢复"; }
     }
+  }
+
+  function handleRestoreResult(item, r) {
+    // 契约：failed: [{name, reason}]；老契约只有 failed_points / failed_documents 计数
+    const failed = Array.isArray(r.failed) ? r.failed.slice() : [];
+    if (!failed.length) {
+      if (r.failed_points) failed.push({ name: `${r.failed_points} 个知识点`, reason: "向量化失败" });
+      if (r.failed_documents) failed.push({ name: `${r.failed_documents} 个文档`, reason: "向量化失败" });
+    }
+    if (failed.length) {
+      showRestoreFailed(item, r, failed);
+    } else {
+      Common.toast(`已恢复为「${r.name}」：知识点 ${r.points}，文档 ${r.documents}`, "success");
+    }
+  }
+
+  /* 恢复可能部分失败：把失败条目和原因摆出来，并给一键重试（重试会重新走恢复） */
+  function showRestoreFailed(item, r, failed) {
+    const nothingRestored = r.ok === false || r.restored === false;
+    const title = nothingRestored ? "恢复失败，未做任何改动" : "已恢复，但有内容没恢复完";
+    const note = nothingRestored
+      ? `「${Common.escapeHtml(r.name || item.name)}」没有恢复。原因：`
+      : `「${Common.escapeHtml(r.name || item.name)}」已恢复，知识点 ${r.points || 0}、文档 ${r.documents || 0}。以下条目没能恢复，可以重试：`;
+    const box = Common.openModal(`
+      <div class="modal-header">
+        <h3>${title}</h3>
+        <button class="modal-close" data-close>×</button>
+      </div>
+      <p class="modal-note">${note}</p>
+      <div class="restore-failed-list">
+        ${failed.map((f) => `
+          <div class="restore-failed-row">
+            <span class="restore-failed-name">${Common.escapeHtml(f.name || "-")}</span>
+            <span class="restore-failed-reason">${Common.escapeHtml(f.reason || "未知原因")}</span>
+          </div>`).join("")}
+      </div>
+      <div class="modal-footer">
+        <button class="btn" data-close>稍后处理</button>
+        <button class="btn btn-primary" data-retry>重试恢复</button>
+      </div>`, { size: "modal-lg" });
+    box.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", Common.closeModal));
+    box.querySelector("[data-retry]").addEventListener("click", () => {
+      Common.closeModal();
+      restore(item);
+    });
   }
 
   async function purge(item) {
     if (!item) return;
     const ok = await Common.confirmDialog({
       title: "彻底删除",
-      message: `将永久删除「${Common.escapeHtml(item.name)}」的快照与源文件，恢复不了。确认？`,
+      message: `将永久删除「${item.name}」的快照与源文件，恢复不了。确认？`,
       okText: "彻底删除",
     });
     if (!ok) return;

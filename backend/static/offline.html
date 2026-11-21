@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>离线 - 智答系统</title>
+  <meta name="theme-color" content="#17505e">
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <link rel="stylesheet" href="/static/css/common.css?v=30">
+  <style>
+    /* 离线页不加载 app.css，避免为一屏提示多缓存一份大样式 */
+    body { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: var(--bg); padding: 24px; }
+    .offline-card {
+      width: 100%; max-width: 420px; text-align: center; padding: 36px 28px;
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); box-shadow: var(--shadow-lg);
+    }
+    .offline-mark { width: 48px; height: 48px; border-radius: 10px; background: var(--primary); display: inline-flex; align-items: center; justify-content: center; margin-bottom: 16px; }
+    .offline-mark svg { width: 26px; height: 26px; stroke: #fff; fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+    .offline-card h1 { font-size: 19px; margin-bottom: 8px; }
+    .offline-card p { color: var(--text-3); font-size: 14px; line-height: 1.8; margin-bottom: 22px; }
+    .offline-card .btn { min-width: 132px; min-height: 40px; }
+  </style>
+</head>
+<body>
+  <div class="offline-card">
+    <div class="offline-mark" aria-hidden="true">
+      <svg viewBox="0 0 48 48"><path d="M24 16.8c-3.2-2.4-7.1-3.4-12-3.4-.7 0-1.2.5-1.2 1.2v18.2c0 .7.5 1.2 1.2 1.2 4.9 0 8.8 1 12 3.4"/><path d="M24 16.8c3.2-2.4 7.1-3.4 12-3.4.7 0 1.2.5 1.2 1.2v18.2c0 .7-.5 1.2-1.2 1.2-4.9 0-8.8 1-12 3.4"/><path d="M24 16.8v20.4"/></svg>
+    </div>
+    <h1>当前处于离线状态</h1>
+    <p>网络恢复后即可继续提问。已缓存的页面可以重新打开，但智能问答、文档管理需要联网。</p>
+    <button class="btn btn-primary" type="button" id="offline-reload">重新加载</button>
+  </div>
+  <!-- 内联 onclick 会被 CSP 的 script-src 'self' 拦掉，重试按钮交给外部脚本绑定 -->
+  <script src="/static/js/sw-boot.js?v=1" defer></script>
+</body>
+</html>

@@ -28,9 +28,18 @@ flowchart LR
 | `backend/routers/documents.py` | 文档上传、解析、列表、重新解析、删除 |
 | `backend/routers/unanswered.py` | 未命中问题列表、聚类、统计、补资料后重新生成 |
 | `backend/routers/recycle.py` | 知识库删除快照、30 天恢复、彻底删除 |
+| `backend/routers/courses.py` | 学期 / 课程 / 班级 / 成员管理 |
+| `backend/routers/notifications.py` | 站内通知列表与已读标记 |
+| `backend/routers/export.py` | 对话导出与只读分享链接 |
+| `backend/routers/retrieval_debug.py` | 管理员检索调试：候选、重排前后名次、阈值决策 |
 | `backend/routers/stats.py` | 学生工作台与管理员数据概览 |
 | `backend/services/rag_service.py` | 检索、门控、提示词拼装、流式生成、引用来源 |
 | `backend/services/vector_store.py` | Chroma 封装、版本化写入、按课程过滤、删除 |
+| `backend/services/vector_reconcile.py` | 启动维护：对齐 embedding 模型、清理孤儿向量 |
+
+前端路由：地址栏 `#/view` 决定当前页面，`#/view?q=关键字&page=2` 这类短参数承载筛选与分页
+（目前用于「历史会话」的关键字与页码），刷新与复制链接都能回到同一屏；参数只在视图内变化时
+用 `history.replaceState` 更新，不触发重新渲染。
 | `backend/static/` | 零构建前端；`views/` 下按页面拆分 |
 
 ## 数据模型
@@ -157,5 +166,7 @@ sequenceDiagram
 - **SSE 流式**：`/api/chat/ask` 逐 token 推送，前端断线后可用 `regenerate` 补生成。
 - **会话级并发控制**：`conversations.gen_seq` 让新提问顶掉旧流，避免两轮回答互相覆盖。
 - **生成闸门**：`rag_service._llm_slots` 限制同时生成路数，排队超时返回明确错误。
-- **向量版本化**：先写新版本再删旧版本，避免写入失败时把旧向量删光；检索后再做 BM25+向量混合重排。
+- **向量版本化**：先写新版本再删旧版本，避免写入失败时把旧向量删光；检索后再做混合重排。
+- **重排分数组成**（`backend/services/reranker.py`）：`0.95 × 向量相似度 + 0.05 × BM25 归一化 + 0.05 × 标题/章节命中`，三项权重分别由 `RERANK_VECTOR_WEIGHT` / `RERANK_LEXICAL_WEIGHT` / `RERANK_TITLE_WEIGHT` 控制。不是 cross-encoder，不加载额外模型；`rerank_score` 上限是三项之和（默认 1.05），对外返回的相似度仍是原始向量分数。
+- **启动维护**：`run_startup_maintenance()` 会（1）比对 `data/chroma/embedding_model.txt`，换了 embedding 模型就清空并按新模型重建全部知识库；（2）扫描向量库，删除 DB 里已不存在的文档 / 知识点留下的孤儿分块。
 - **回收站**：删除前落快照，恢复时重新向量化；提交失败保留 trash 原件。

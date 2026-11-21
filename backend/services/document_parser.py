@@ -79,11 +79,30 @@ def _parse_pdf(path: Path) -> str:
 def _parse_csv(path: Path) -> str:
     import csv
 
-    rows: list[str] = []
+    rows: list[list[str]] = []
     text = _read_text(path)
     with io.StringIO(text, newline="") as f:
         for row in csv.reader(f):
-            rows.append(" | ".join(cell.strip() for cell in row))
+            cells = [cell.strip() for cell in row]
+            if any(cells):          # 跳过空行，避免数据里夹一堆 " |  | "
+                rows.append(cells)
     if not rows:
         raise ParseError("CSV 文件为空")
-    return "\n".join(rows)
+
+    header, body = rows[0], rows[1:]
+    if not body:
+        return " | ".join(header)
+
+    # 每 20 行拼一块，并在每块开头重复表头：CSV 是按行铺开的纯文本，
+    # 只写一次表头的话，按字符切分后除第一块外的片段都没有列名，
+    # 单独看「1 | 张三 | 90」根本不知道是哪三列。
+    blocks: list[str] = []
+    lines: list[str] = [" | ".join(header)]
+    for i, cells in enumerate(body, start=1):
+        lines.append(" | ".join(cells))
+        if i % 20 == 0:
+            blocks.append("\n".join(lines))
+            lines = [" | ".join(header)]
+    if len(lines) > 1:
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)

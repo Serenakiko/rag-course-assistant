@@ -73,8 +73,15 @@ def rerank_documents(
     *,
     vector_weight: float = 0.95,
     lexical_weight: float = 0.05,
+    title_weight: float = 0.05,
 ) -> list[tuple[Document, float]]:
-    """按混合分数重排候选，但保留原向量相似度作为返回分数。"""
+    """按混合分数重排候选，但保留原向量相似度作为返回分数。
+
+    分数组成（三项都参与排序，别只看前两项）：
+        0.95 × 向量相似度 + 0.05 × BM25 归一化分数 + 0.05 × 标题/章节命中率
+    所以 rerank_score 上限是 1.05、不是 1.0。这里没有 cross-encoder，
+    也不加载额外模型；标题项是硬编码前就存在的启发式，现在显式参数化并写进文档。
+    """
     if not ranked:
         return []
     docs = [doc for doc, _score in ranked]
@@ -85,11 +92,11 @@ def rerank_documents(
         zip(ranked, lexical, strict=False)
     ):
         lexical_norm = lexical_score / lexical_max if lexical_max > 0 else 0.0
-        boost = _title_boost(query, doc) * 0.05
+        boost = _title_boost(query, doc)
         combined = (
             vector_weight * max(0.0, min(1.0, float(vector_score)))
             + lexical_weight * lexical_norm
-            + boost
+            + title_weight * boost
         )
         metadata = dict(doc.metadata or {})
         metadata["rerank_score"] = round(combined, 6)

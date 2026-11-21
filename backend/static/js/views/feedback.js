@@ -100,9 +100,16 @@ const FeedbackView = (() => {
     list.innerHTML = rows.map((it) => `
       <div class="fb-item" data-id="${it.id}">
         <div class="fb-head">
-          ${it.status === "resolved" ? `<span class="fb-badge fb-badge-done">已解决</span>` : ""}
+          ${it.status === "resolved"
+            ? `<span class="fb-badge fb-badge-done">已解决</span>`
+            : `<span class="fb-badge fb-badge-pending">待处理</span>`}
           <b class="fb-q" title="${Common.escapeHtml(it.question)}">${Common.escapeHtml(it.question)}</b>
           <span class="fb-time">${Common.fmtTime(it.status === "resolved" ? it.answered_at : it.created_at)}</span>
+        </div>
+        <div class="fb-meta">
+          ${it.status === "resolved"
+            ? `提交于 ${Common.fmtTime(it.created_at)}${it.answered_at ? ` · 解决于 ${Common.fmtTime(it.answered_at)}` : ""}`
+            : `提交于 ${Common.fmtTime(it.created_at)} · 已等待 ${waitedText(it.created_at)}`}
         </div>
         ${it.status === "resolved"
           ? `<div class="fb-answer md-body">${Markdown.render(it.answer)}</div>`
@@ -132,21 +139,30 @@ const FeedbackView = (() => {
     });
   }
 
+  /* 待处理等了多久：让「提交跟进」不再是黑盒，知道大概进度 */
+  function waitedText(iso) {
+    if (!iso) return "-";
+    const s = String(iso);
+    const t = new Date(/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s) ? s : s + "Z").getTime();
+    if (!isFinite(t)) return "-";
+    const sec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (sec < 3600) return `${Math.max(1, Math.floor(sec / 60))} 分钟`;
+    if (sec < 86400) return `${Math.floor(sec / 3600)} 小时`;
+    return `${Math.floor(sec / 86400)} 天`;
+  }
+
   async function markRead(id) {
     const item = rows.find((x) => x.id === id);
     if (!item || item.status !== "resolved" || item.read) return;
-    const ok = await Common.confirmDialog({
-      title: "标记已读",
-      message: `将「${Common.escapeHtml(item.question)}」标记为已读，确认？`,
-      okText: "标为已读",
-    });
-    if (!ok) return;
+    // 标为已读只影响自己的角标、可撤销性为零：直接执行，不弹确认
     try {
       await API.request("POST", `/api/chat/unanswered/${id}/read`);
       item.read = true;
       renderList();
       await NotifyCenter.refresh();   // 已读后立即刷新顶部未读角标
-    } catch { /* 忽略：下次再点 */ }
+    } catch (err) {
+      Common.toast("标记失败：" + err.message, "error");
+    }
   }
 
   return { render };

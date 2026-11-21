@@ -1,29 +1,40 @@
 """用户管理路由：管理员全局管理。"""
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..constants import SYSTEM_ADMIN_ACCOUNT
 from ..database import get_db
 from ..deps import require_role
-from ..models import Conversation, KnowledgeBase, Message, User
+from ..models import (
+    Conversation,
+    Document,
+    KnowledgeBase,
+    KnowledgePoint,
+    Message,
+    User,
+)
 from ..schemas import AdminUserUpdate, UserOut
 from ..security import hash_password
 from ..services.like import contains
 
 router = APIRouter()
 
+logger = logging.getLogger(__name__)
+
 # 系统管理员账号：其他管理员不能修改或删除，避免误操作把超管降级
 
 
 class AdminUserCreate(BaseModel):
-    # 和注册同规则：账号固定 8 位数字
+    # 和注册同规则：账号固定 8 位数字，密码下限 8 位（与注册/改密一致）
     account: str = Field(min_length=8, max_length=8, pattern=r"^\d{8}$")
-    password: str = Field(min_length=6, max_length=64)
+    password: str = Field(min_length=8, max_length=64)
     username: str = Field(default="", max_length=32)
     role: str = Field(default="student", pattern=r"^(student|admin)$")
 
@@ -164,6 +175,10 @@ def admin_update_user(
     if payload.new_password:
         target.password_hash = hash_password(payload.new_password)
         changed_auth = True
+        # 管理员代设的密码是「临时密码」：本人下次登录必须先改成自己的密码。
+        # 改自己的密码走 /api/auth/change-password，不走这里。
+        if target.id != admin.id:
+            target.must_change_password = 1
     if changed_auth:
         target.token_version = int(target.token_version or 0) + 1
     try:
@@ -215,9 +230,66 @@ def admin_delete_user(
         heir = db.get(User, transfer_to)
         if heir is None:
             raise HTTPException(status_code=404, detail="知识库接收人不存在")
+    elif transfer_to is not None:
+        if transfer_to == target.id:
+            raise HTTPException(status_code=400, detail="接收人不能是待删除的用户")
+        heir = db.get(User, transfer_to)
+        if heir is None:
+            raise HTTPException(status_code=404, detail="接收人不存在")
+    else:
+        # 没指定接收人且名下没有知识库：把上传的文档 / 知识点交给兜底账号，
+        # 优先系统管理员，其次当前操作的管理员。否则 uploaded_by 会被置 NULL，
+        # 文档变成无主但仍可检索，等于留下孤儿数据。
+        heir = db.scalar(select(User).where(User.account == SYSTEM_ADMIN_ACCOUNT))
+        heir = heir or admin
+
+    moved_docs = 0
+    moved_points = 0
+    try:
         for base in owned:
             base.created_by = heir.id
-
-    db.delete(target)
-    db.commit()
-    return {"ok": True, "transferred_bases": len(owned)}
+        # 批量改归属：用 SQL 侧 update，避免把这名学生的历史文档/知识点全量
+        # 加载进 Session（毕业设计里可能有上千条）
+        moved_docs = (
+            db.execute(
+                update(Document)
+                .where(Document.uploaded_by == target.id)
+                .values(uploaded_by=heir.id)
+                .execution_options(synchronize_session=False)
+            ).rowcount
+            or 0
+        )
+        moved_points = (
+            db.execute(
+                update(KnowledgePoint)
+                .where(KnowledgePoint.created_by == target.id)
+                .values(created_by=heir.id)
+                .execution_options(synchronize_session=False)
+            ).rowcount
+            or 0
+        ) + (
+            db.execute(
+                update(KnowledgePoint)
+                .where(KnowledgePoint.updated_by == target.id)
+                .values(updated_by=heir.id)
+                .execution_options(synchronize_session=False)
+            ).rowcount
+            or 0
+        )
+        db.delete(target)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        # 仍有外键/唯一约束挡住（例如删除过程中有人同时上传文档）时不抛 500，
+        # 回滚后让管理员重试；转交已回滚，不会留下半更新的数据。
+        db.rollback()
+        logger.warning("删除用户失败：%s", exc)
+        raise HTTPException(
+            status_code=409,
+            detail="删除失败，数据仍在被引用或并发修改，请重试",
+        )
+    return {
+        "ok": True,
+        "transferred_bases": len(owned),
+        "transferred_docs": int(moved_docs),
+        "transferred_points": int(moved_points),
+    }

@@ -39,3 +39,17 @@ jobs:
 
       - name: Test
         run: python -m pytest -q
+
+      # 前端三个回归脚本是纯 node 跑的，pytest 收不到它们：
+      # 不单独跑的话，markdown 转义 / 导航 / 分页坏了 CI 也全绿。
+      - name: Frontend syntax check
+        run: |
+          for f in backend/static/js/*.js backend/static/js/views/*.js backend/static/sw.js; do
+            node --check "$f"
+          done
+
+      - name: Frontend tests
+        run: |
+          node tests/frontend_markdown.mjs
+          node tests/frontend_navigation.mjs
+          node tests/frontend_pagination.mjs

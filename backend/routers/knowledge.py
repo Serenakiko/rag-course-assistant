@@ -1,12 +1,13 @@
-"""知识点 / 知识库路由：浏览（按可见性过滤）+ 维护（创建者本人或管理员）。
+"""知识点 / 知识库路由：浏览（按可见性过滤）+ 维护（仅管理员）。
 
 可见性规则：
   - 管理员：能看到所有人的知识库
-  - 学生：只看到管理员发布的知识库 + 自己创建的
+  - 学生：只看到管理员发布的知识库 + 自己创建的（只读）
+  - 学生端不再提供建库 / 上传 / 编辑知识库与知识点，写操作统一 403
 
 权限规则：
-  - 新增知识点、新增知识库：所有登录用户
-  - 编辑 / 删除知识点、编辑或删除知识库：创建者本人或管理员
+  - 新增/编辑/删除知识库、知识点：仅管理员（require_role("admin")）
+  - 知识库仍沿用 can_manage：管理员可管理自己创建的知识库
 """
 from __future__ import annotations
 
@@ -17,10 +18,11 @@ from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from ..database import SessionLocal, get_db
-from ..deps import get_current_user
+from ..deps import get_current_user, require_role
 from ..models import (
     Document,
     KnowledgeBase,
@@ -269,7 +271,7 @@ def list_bases(
 @router.post("/bases", response_model=KnowledgeBaseOut, summary="新增知识库")
 def create_base(
     payload: KnowledgeBaseIn,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
 ) -> KnowledgeBase:
     name = payload.name.strip()
@@ -284,23 +286,54 @@ def create_base(
         created_by=user.id,
     )
     db.add(base)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # 并发建同名库时预检查会同时通过，唯一索引兜底，回 409 而不是 500
+        db.rollback()
+        raise HTTPException(status_code=409, detail="已存在同名知识库")
     db.refresh(base)
     return base
+
+
+def _finish_vector_task(task_id: int | None, error: str = "") -> None:
+    """后台向量任务收尾：成功置 done，失败保留 pending 让启动重试接手。"""
+    if task_id is None:
+        return
+    session = SessionLocal()
+    try:
+        task = session.get(VectorCleanupTask, task_id)
+        if task is None:
+            return
+        task.attempts = int(task.attempts or 0) + 1
+        if error:
+            task.last_error = error[:1000]
+        else:
+            task.status = "done"
+            task.last_error = ""
+        session.commit()
+    except Exception:  # noqa: BLE001
+        session.rollback()
+        logger.exception("向量后台任务状态回写失败 task_id=%s", task_id)
+    finally:
+        session.close()
 
 
 def _rebuild_base_vectors(
     point_rows: list[tuple[int, str, str, str]],
     doc_rows: list[tuple[int, str, str]],
     course: str,
+    task_id: int | None = None,
 ) -> None:
     """改名后异步重建向量。
 
     改名已经提交，重建期间旧 course 的向量暂时查不到；放在后台是为了避免大库
     在请求内同步重算导致网关超时。只处理仍在库里、且 course 已改到新名字的记录，
-    防止给刚被删除的资料写回孤儿向量。
+    防止给刚被删除的资料写回孤儿向量。任何一条失败都把持久任务留在 pending，
+    进程重启后由 vector_reconcile 的重试兜底。
     """
     session = SessionLocal()
+    errors: list[str] = []
     try:
         for point_id, title, content, tags in point_rows:
             still_exists = session.scalar(
@@ -315,6 +348,7 @@ def _rebuild_base_vectors(
                 update_knowledge_point(point_id, title, content, course, tags)
             except Exception:  # noqa: BLE001
                 logger.exception("改名后重建知识点向量失败 point_id=%s", point_id)
+                errors.append(f"knowledge_point:{point_id}")
                 # 旧 course 的向量必须清掉，否则检索 filter 永远匹配不到
                 delete_knowledge_point(point_id, strict=False)
         for doc_id, stored_path, filename in doc_rows:
@@ -334,9 +368,14 @@ def _rebuild_base_vectors(
                     add_document_chunks(doc_id, filename, course, chunks)
             except Exception:  # noqa: BLE001
                 logger.exception("改名后重建文档向量失败 doc_id=%s", doc_id)
+                errors.append(f"document:{doc_id}")
                 delete_document(doc_id, strict=False)
     finally:
         session.close()
+        _finish_vector_task(
+            task_id,
+            error=("重建失败：" + "、".join(errors[:10])) if errors else "",
+        )
 
 
 @router.put("/bases/{base_id}", response_model=KnowledgeBaseOut, summary="更新知识库")
@@ -344,7 +383,7 @@ def update_base(
     base_id: int,
     payload: KnowledgeBaseIn,
     background: BackgroundTasks,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
 ) -> KnowledgeBase:
     base = db.get(KnowledgeBase, base_id)
@@ -382,11 +421,23 @@ def update_base(
             .where(UnansweredQuestion.course == old_name)
             .values(course=name)
         )
+        # 先落持久化重建任务，再提交改名：后台重建途中进程重启时，任务行还在，
+        # 由 vector_reconcile 的启动重试兜底（kind=knowledge_base_rebuild）。
+        rebuild_task = VectorCleanupTask(
+            kind="knowledge_base_rebuild",
+            knowledge_base_id=base.vector_key,
+            course_name=name,
+        )
+        db.add(rebuild_task)
         base.name = name
         base.description = payload.description.strip()
+        db.flush()
+        task_id = rebuild_task.id
         db.commit()
         db.refresh(base)
-        background.add_task(_rebuild_base_vectors, point_rows, doc_rows, name)
+        background.add_task(
+            _rebuild_base_vectors, point_rows, doc_rows, name, task_id
+        )
         return base
     base.description = payload.description.strip()
     db.commit()
@@ -394,11 +445,39 @@ def update_base(
     return base
 
 
+def _run_base_cleanup(task_id: int, vector_key: str, course_name: str) -> None:
+    """后台清理已删知识库的向量；失败留 pending，由启动重试继续删。"""
+    session = SessionLocal()
+    try:
+        task = session.get(VectorCleanupTask, task_id)
+        if task is None:
+            return
+        task.attempts = int(task.attempts or 0) + 1
+        try:
+            delete_knowledge_base_vectors(vector_key, course_name)
+        except Exception as exc:  # noqa: BLE001
+            task.last_error = str(exc)[:1000]
+            logger.error(
+                "知识库已删除，但向量清理失败，已保留待重试任务 knowledge_base_id=%s",
+                vector_key,
+            )
+        else:
+            task.status = "done"
+            task.last_error = ""
+        session.commit()
+    except Exception:  # noqa: BLE001
+        session.rollback()
+        logger.exception("向量清理任务状态回写失败 task_id=%s", task_id)
+    finally:
+        session.close()
+
+
 @router.delete("/bases/{base_id}", summary="删除知识库（级联删除其下知识点）")
 def remove_base(
     base_id: int,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
+    background: BackgroundTasks = None,
 ) -> dict:
     base = db.get(KnowledgeBase, base_id)
     if base is None:
@@ -432,6 +511,8 @@ def remove_base(
         select(VectorCleanupTask).where(
             VectorCleanupTask.knowledge_base_id == vector_key,
             VectorCleanupTask.status == "pending",
+            # 改名重建任务和删除清理任务不能复用：复用会把仍在跑的重建标成 done
+            VectorCleanupTask.kind != "knowledge_base_rebuild",
         )
     )
     if task is None:
@@ -465,19 +546,14 @@ def remove_base(
     for path in stored_paths:
         path.unlink(missing_ok=True)
 
-    task.attempts = int(task.attempts or 0) + 1
-    try:
-        delete_knowledge_base_vectors(vector_key, course_name)
-    except Exception as exc:  # noqa: BLE001
-        task.last_error = str(exc)[:1000]
-        logger.error(
-            "知识库已删除，但向量清理失败，已保留待重试任务 knowledge_base_id=%s",
-            vector_key,
-        )
+    task_id = task.id
+    # 向量清理由后台任务执行，接口立即返回；进程重启时该任务仍是 pending，
+    # 由 vector_reconcile 的启动重试继续清理。
+    if background is None:
+        # 直接调用（单元测试 / 非 FastAPI 场景）时同步完成，保持旧行为
+        _run_base_cleanup(task_id, vector_key, course_name)
     else:
-        task.status = "done"
-        task.last_error = ""
-    db.commit()
+        background.add_task(_run_base_cleanup, task_id, vector_key, course_name)
     return {"ok": True, "removed_points": len(points), "removed_documents": len(docs)}
 
 
@@ -535,7 +611,7 @@ def page_points(
 @router.post("/points", response_model=KnowledgePointOut, summary="新增知识点")
 def create_point(
     payload: KnowledgePointIn,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
 ) -> KnowledgePoint:
     # 只能写进自己可见的知识库（管理员不受限）
@@ -566,7 +642,7 @@ def create_point(
 def update_point(
     point_id: int,
     payload: KnowledgePointIn,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
 ) -> KnowledgePoint:
     # 只有创建者本人或管理员能改；改挂知识库同样要目标库可写
@@ -621,7 +697,7 @@ def update_point(
 @router.delete("/points/{point_id}", summary="删除知识点")
 def remove_point(
     point_id: int,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
 ) -> dict:
     point = db.get(KnowledgePoint, point_id)

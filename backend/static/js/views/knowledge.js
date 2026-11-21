@@ -16,9 +16,8 @@ const KnowledgeView = (() => {
 
   function canManage(creatorId) {
     const user = API.getUser();
-    if (!user) return false;
-    if (user.role === "admin") return true;
-    return creatorId != null && Number(creatorId) === Number(user.id);
+    // 学生端只读：建库/上传/编辑入口对学生隐藏（后端同样会拒绝写操作）
+    return !!user && user.role === "admin";
   }
 
   /* 搜索栏 HTML（带图标 / 清空按钮），用于知识库与知识点搜索 */
@@ -63,7 +62,7 @@ const KnowledgeView = (() => {
           </select>
           ${searchBoxHtml("kb-search", "搜索知识库名称")}
         </div>
-        <button class="btn btn-primary" id="kb-add"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>新建知识库</button>
+        ${canManage() ? `<button class="btn btn-primary" id="kb-add"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>新建知识库</button>` : ""}
       </div>
       <div class="kb-grid" id="kb-grid">
         <div style="grid-column:1/-1;text-align:center;padding:40px"><span class="loading-spinner"></span></div>
@@ -87,7 +86,8 @@ const KnowledgeView = (() => {
       searchInput.placeholder = kbPlaceholders[e.target.value] || "搜索…";
       doSearch();
     });
-    document.getElementById("kb-add").addEventListener("click", () => openBaseEditor(null));
+    const addBtn = document.getElementById("kb-add");
+    if (addBtn) addBtn.addEventListener("click", () => openBaseEditor(null));
     kbPage = 1;
     loadBases();
   }
@@ -124,7 +124,9 @@ const KnowledgeView = (() => {
       grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1">
         <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
         <p>${keyword ? "没搜到相关的知识库，换个关键词试试" : "还没有知识库"}</p>
-        ${!keyword ? `<p class="mt-8">点击右上角「新建知识库」，创建第一个课程知识库</p>` : ""}
+        ${!keyword ? (canManage()
+          ? `<p class="mt-8">点击右上角「新建知识库」，创建第一个课程知识库</p>`
+          : `<p class="mt-8">这里还没有可浏览的课程知识库，请联系老师添加</p>`) : ""}
       </div>`;
       Common.renderPagination("kb-pagination", 0, 1, kbPageSize, () => {});
       return;
@@ -227,7 +229,7 @@ const KnowledgeView = (() => {
   async function removeBase(base) {
     const ok = await Common.confirmDialog({
       title: "删除知识库",
-      message: `将删除知识库「${Common.escapeHtml(base.name)}」及其下 ${base.point_count} 个知识点与向量索引，删除后进入回收站，30 天内可由管理员恢复。确认？`,
+      message: `将删除知识库「${base.name}」及其下 ${base.point_count} 个知识点与向量索引，删除后进入回收站，30 天内可由管理员恢复。确认？`,
       okText: "删除",
     });
     if (!ok) return;
@@ -251,7 +253,7 @@ const KnowledgeView = (() => {
           ${searchBoxHtml("kp-search", "搜索知识点")}
         </div>
         <div class="toolbar-right">
-          <button class="btn btn-primary" id="kp-upload"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>上传文档</button>
+          ${canManage() ? `<button class="btn btn-primary" id="kp-upload"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>上传文档</button>` : ""}
         </div>
       </div>
       <div class="kp-grid" id="kp-grid"><div style="grid-column:1/-1;text-align:center;padding:40px"><span class="loading-spinner"></span></div></div>
@@ -262,7 +264,8 @@ const KnowledgeView = (() => {
       renderOverview(container);
     });
 
-    document.getElementById("kp-upload").addEventListener("click", openKpUploadModal);
+    const upBtn = document.getElementById("kp-upload");
+    if (upBtn) upBtn.addEventListener("click", openKpUploadModal);
 
     const kpSearch = document.getElementById("kp-search");
     const kpWrap = document.getElementById("kp-search-box");
@@ -384,7 +387,7 @@ const KnowledgeView = (() => {
         : `<div class="empty-state" style="grid-column:1/-1">
           <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
           <p>这个知识库还没有知识点</p>
-          <p class="mt-8">点击右上角「上传文档」添加课程资料</p>
+          <p class="mt-8">${canManage() ? "点击右上角「上传文档」添加课程资料" : "课程资料由老师上传，你可以先浏览已有内容"}</p>
         </div>`;
       Common.renderPagination("kp-pagination", 0, 1, kpPageSize, () => {});
       return;
@@ -532,7 +535,7 @@ const KnowledgeView = (() => {
   async function removePoint(point) {
     const ok = await Common.confirmDialog({
       title: "删除知识点",
-      message: `删除知识点「${Common.escapeHtml(point.title)}」后，将从知识库和向量索引中移除，确认？`,
+      message: `删除知识点「${point.title}」后，将从知识库和向量索引中移除，确认？`,
       okText: "删除",
     });
     if (!ok) return;

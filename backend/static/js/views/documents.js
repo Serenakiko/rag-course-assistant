@@ -7,6 +7,25 @@ const DocumentsView = (() => {
   let docProcessing = 0;  // 全量里正在解析的条数：决定要不要轮询
   let docPage = 1;
   let docPageSize = 10;
+  let pollTimedOut = false;  // 解析超时：停止轮询，但给用户「继续查询」出口
+
+  /* 解析已用时：后端暂时没给阶段字段，先按上传时间算，配 stage（有就显示）说明卡在哪 */
+  function elapsedText(iso) {
+    if (!iso) return "";
+    const s = String(iso);
+    const t = new Date(/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s) ? s : s + "Z").getTime();
+    if (!isFinite(t)) return "";
+    const sec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (sec < 60) return `${sec} 秒`;
+    const min = Math.floor(sec / 60);
+    return min < 60 ? `${min} 分 ${sec % 60} 秒` : `${Math.floor(min / 60)} 小时 ${min % 60} 分`;
+  }
+
+  function procStage(d) {
+    // 兼容后端可能给出的字段名；都没有就只说「解析中」
+    const stage = d.stage || d.progress_stage || d.status_detail || "";
+    return stage ? String(stage) : "解析中";
+  }
 
   function render(container) {
     container.innerHTML = `
@@ -190,7 +209,7 @@ const DocumentsView = (() => {
       renderDocTableRows();
       // 轮询看全量的 processing 数：正在解析的文档可能落在别的页上
       if (docProcessing > 0) startPolling();
-      else stopPolling();
+      else { stopPolling(); pollTimedOut = false; hideParseTimeout(); }
     } catch (err) {
       tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:36px;color:var(--danger)">${Common.escapeHtml(err.message)}</td></tr>`;
     }
@@ -208,14 +227,14 @@ const DocumentsView = (() => {
       tbody.innerHTML = docRows.map((d, i) => `
         <tr>
           <td data-label="序号">${start + i + 1}</td>
-          <td data-label="文件名" title="${Common.escapeHtml(d.error || "")}" style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Common.escapeHtml(d.filename)}${d.status === "failed" ? ' <span class="file-type-badge" style="background:var(--danger-bg);color:var(--danger)">解析失败</span>' : d.status === "processing" ? ' <span class="file-type-badge">解析中</span>' : ""}</td>
+          <td data-label="文件名" title="${Common.escapeHtml(d.error || "")}" style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Common.escapeHtml(d.filename)}${d.status === "failed" ? ' <span class="file-type-badge" style="background:var(--danger-bg);color:var(--danger)">解析失败</span>' : d.status === "processing" ? ` <span class="file-type-badge doc-proc-badge" title="后端未提供阶段时只显示已用时">${Common.escapeHtml(procStage(d))}${elapsedText(d.created_at) ? " · 已用 " + elapsedText(d.created_at) : ""}</span>` : ""}</td>
           <td data-label="所属知识库">${Common.escapeHtml(d.course || "-")}</td>
           <td data-label="类型"><span class="file-type-badge">${Common.escapeHtml(d.file_type.toUpperCase())}</span></td>
           <td data-label="大小">${Common.fmtSize(d.file_size)}</td>
           <td data-label="上传时间" class="muted">${Common.fmtTime(d.created_at)}</td>
           <td data-label="操作">
             <button class="ops-link" data-view="${d.id}">查看</button>
-            ${d.status === "failed" ? `<button class="ops-link" data-retry="${d.id}">重新解析</button>` : ""}
+            ${d.status === "failed" || (d.status === "processing" && pollTimedOut) ? `<button class="ops-link" data-retry="${d.id}">重新解析</button>` : ""}
             <button class="ops-link del" data-del="${d.id}" data-name="${Common.escapeHtml(d.filename)}">删除</button>
           </td>
         </tr>`).join("");
@@ -300,25 +319,52 @@ const DocumentsView = (() => {
   async function removeDoc(id, name) {
     const ok = await Common.confirmDialog({
       title: "删除文档",
-      message: `将删除文档「${Common.escapeHtml(name || "#" + id)}」及其全部向量索引，删除后不可恢复。确认？`,
-      okText: "删除",
+      message: `将把文档「${name || "#" + id}」移入回收站，30 天内可恢复。确认？`,
+      okText: "移入回收站",
     });
     if (!ok) return;
     try {
       await API.request("DELETE", `/api/documents/${id}`);
-      Common.toast("已删除", "success");
+      Common.toast("已移入回收站，30 天内可恢复", "success");
       loadDocuments();
     } catch (err) { Common.toast(err.message, "error"); }
+  }
+
+  /* 解析超时后不能只弹个 toast 就没了：给「继续查询」出口 */
+  function showParseTimeout() {
+    hideParseTimeout();
+    const toolbar = document.querySelector(".page-toolbar");
+    if (!toolbar) return;
+    const note = document.createElement("div");
+    note.className = "doc-timeout-note";
+    note.id = "doc-parse-timeout";
+    note.innerHTML = `<span>有文档解析超过 1 分钟仍未完成，页面已停止自动刷新。可以继续查询，或对卡住的文档点「重新解析」。</span>
+      <button type="button" class="btn btn-sm" data-continue>继续查询</button>`;
+    note.querySelector("[data-continue]").addEventListener("click", () => {
+      hideParseTimeout();
+      pollTimedOut = false;
+      startPolling();
+      loadDocuments();
+    });
+    toolbar.insertAdjacentElement("afterend", note);
+  }
+
+  function hideParseTimeout() {
+    const el = document.getElementById("doc-parse-timeout");
+    if (el) el.remove();
   }
 
   function startPolling() {
     if (pollTimer) return;  // 已在轮询：不要重置计数，否则永远到不了上限
     pollCount = 0;
+    pollTimedOut = false;
     pollTimer = setInterval(() => {
       pollCount += 1;
-      if (pollCount > 30) {  // 60 秒还没解析完，停止轮询
+      if (pollCount > 30) {  // 60 秒还没解析完：停止轮询，但把「继续查询/重新解析」留在页面
         stopPolling();
-        Common.toast("文档解析时间较长，稍后刷新页面查看结果", "error");
+        pollTimedOut = true;
+        showParseTimeout();
+        renderDocTableRows();
         return;
       }
       loadDocuments();

@@ -13,6 +13,28 @@ const ChatView = (() => {
   const convMeta = new Map(); // id -> 会话概要：当前会话被挤出这一页时还能钉在最上面
   const SIDEBAR_LIMIT = 20;   // 侧边栏只取这么多条，再多去「对话历史」页
   const SEARCH_LIMIT = 50;    // 搜索结果最多取这么多条
+  const MSG_PAGE = 50;        // 会话消息分页：先取最近 50 条，更早的按需加载
+  let selectedCourse = "";    // 聊天页课程筛选：空 = 全部课程
+
+  /* 拒答原因：后端 reason 可能是代号，也可能是一整句中文说明 */
+  const UNMATCHED_REASONS = {
+    empty_base: "这门课的知识库还是空的，暂时没有可检索的资料",
+    no_content: "这门课还没有上传可检索的资料",
+    no_hit: "没有检索到能回答这个问题的资料",
+    out_of_scope: "这个问题不在课程知识库的覆盖范围内",
+    not_answerable: "资料里没有讲到这个知识点",
+    low_score: "检索到的资料和这个问题关系不大",
+    failed: "检索/生成时出了点问题",
+  };
+
+  function unmatchedReason(evt) {
+    const r = evt && evt.reason;
+    if (!r) return "该问题暂未在知识库中命中";
+    if (UNMATCHED_REASONS[r]) return UNMATCHED_REASONS[r];
+    return typeof r === "string" && /[\u4e00-\u9fa5]/.test(r)
+      ? r
+      : "该问题暂未在知识库中命中";
+  }
 
   const ICON_SEND = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3.4 20.4l17.45-7.48a1 1 0 0 0 0-1.84L3.4 3.6a.993.993 0 0 0-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z"/></svg>';
   const ICON_STOP = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
@@ -62,6 +84,14 @@ const ChatView = (() => {
           <div class="chat-more" id="chat-more"></div>
         </aside>
         <section class="chat-main">
+          <div class="chat-filter">
+            <label class="chat-filter-label" for="chat-course-filter">检索范围</label>
+            <select class="form-control" id="chat-course-filter" aria-label="选择课程知识库" disabled>
+              <option value="">全部课程</option>
+            </select>
+            <span class="chat-filter-hint" id="chat-filter-hint"></span>
+          </div>
+          <div class="sr-only" id="chat-announcer" role="status" aria-live="polite"></div>
           <div class="chat-messages" id="chat-messages"></div>
           <div class="chat-input-area">
             <div class="chat-input-box">
@@ -169,10 +199,46 @@ const ChatView = (() => {
       }
     });
 
+    // 课程筛选：接口可用就填真实知识库列表，不可用就保持「全部课程」占位并禁用
+    const courseSel = document.getElementById("chat-course-filter");
+    courseSel.addEventListener("change", () => {
+      selectedCourse = courseSel.value;
+      const hint = document.getElementById("chat-filter-hint");
+      if (hint) hint.textContent = selectedCourse ? `只检索《${selectedCourse}》` : "";
+    });
+    loadCourseFilter();
+
     // 从首页「继续上次对话」等入口带会话 id 进来：直接打开该会话
     if (opts && opts.convId) currentConvId = opts.convId;
 
     loadSessions();
+  }
+
+  /* 课程/知识库筛选下拉：拉不到列表就保留「全部课程」占位并禁用，不假装能筛 */
+  async function loadCourseFilter() {
+    const sel = document.getElementById("chat-course-filter");
+    if (!sel) return;
+    try {
+      const bases = await API.request("GET", "/api/knowledge/bases");
+      const list = Array.isArray(bases) ? bases : [];
+      if (!list.length) return;
+      sel.innerHTML = `<option value="">全部课程</option>` +
+        list.map((b) => `<option value="${Common.escapeHtml(b.name)}">${Common.escapeHtml(b.name)}</option>`).join("");
+      sel.disabled = false;
+      if (selectedCourse && !list.some((b) => b.name === selectedCourse)) selectedCourse = "";
+      sel.value = selectedCourse;
+    } catch { /* 接口不可用：保持占位并禁用 */ }
+  }
+
+  /* 点「换个问法」/相关知识点：把内容填回输入框，让用户接着改，而不是重发原问题 */
+  function fillChatInput(text) {
+    const inputEl = document.getElementById("chat-input");
+    if (!inputEl) return;
+    inputEl.value = text;
+    inputEl.style.height = "auto";
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + "px";
+    inputEl.placeholder = "换个问法再试一次：说具体一点，或换个关键词";
+    inputEl.focus();
   }
 
   /* 左侧会话列表：没有会话显示欢迎页（带示例问题），有会话默认打开最近一个 */
@@ -300,9 +366,13 @@ const ChatView = (() => {
     const messagesEl = document.getElementById("chat-messages");
     if (!messagesEl) return;
     try {
-      const msgs = await API.request("GET", `/api/chat/sessions/${id}/messages`);
+      // 新接口分页返回 {items, has_more}；老接口直接是数组，两种都兼容
+      const data = await API.request("GET", `/api/chat/sessions/${id}/messages?limit=${MSG_PAGE}`);
+      const msgs = Array.isArray(data) ? data : ((data && data.items) || []);
+      const hasMore = !Array.isArray(data) && !!(data && data.has_more);
       messagesEl.innerHTML = "";
       msgs.forEach((m) => renderMessage(m.role, m.content, m.sources, m.interrupted, m.id, m.feedback));
+      if (hasMore && msgs.length) prependLoadMore(messagesEl, id, msgs[0].id);
       scrollBottom();
       // 返回「生成未完成」的会话：带 regenerate 补生成
       const last = msgs[msgs.length - 1];
@@ -334,6 +404,45 @@ const ChatView = (() => {
     } catch {
       showWelcome();
     }
+  }
+
+  /* 更早的消息按需加载：用当前第一条消息的 id 作为 before_id 往前翻 */
+  function prependLoadMore(messagesEl, convId, firstId) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn btn-sm load-more-msgs";
+    btn.textContent = "加载更早的消息";
+    messagesEl.prepend(btn);
+    btn.addEventListener("click", async () => {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.textContent = "加载中…";
+      const anchor = messagesEl.querySelector(".msg");
+      try {
+        const data = await API.request("GET",
+          `/api/chat/sessions/${convId}/messages?limit=${MSG_PAGE}&before_id=${firstId}`);
+        const older = Array.isArray(data) ? data : ((data && data.items) || []);
+        const prevHeight = messagesEl.scrollHeight;
+        older.forEach((m) => {
+          const el = renderMessage(m.role, m.content, m.sources, m.interrupted, m.id, m.feedback);
+          if (el && anchor) messagesEl.insertBefore(el, anchor);
+        });
+        // 往上补内容后保持当前阅读位置不跳
+        messagesEl.scrollTop += messagesEl.scrollHeight - prevHeight;
+        const more = !Array.isArray(data) && !!(data && data.has_more);
+        if (more && older.length) {
+          firstId = older[0].id;
+          btn.disabled = false;
+          btn.textContent = "加载更早的消息";
+        } else {
+          btn.remove();
+        }
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = "加载更早的消息";
+        Common.toast("加载更早的消息失败：" + err.message, "error");
+      }
+    });
   }
 
   async function renameSession(id) {
@@ -375,7 +484,7 @@ const ChatView = (() => {
   async function deleteSession(id, title) {
     const ok = await Common.confirmDialog({
       title: "删除会话",
-      message: `将删除会话「${Common.escapeHtml(title || "#" + id)}」及其全部消息，不可恢复。确认？`,
+      message: `将删除会话「${title || "#" + id}」及其全部消息，不可恢复。确认？`,
       okText: "删除",
     });
     if (!ok) return;
@@ -419,8 +528,11 @@ const ChatView = (() => {
       const chapter = s.section || s.chapter || "";
       const page = s.page ?? s.page_number ?? "";
       const chunk = s.chunk_index ?? s.chunk ?? "";
+      // doc_id 是打开原文的关键；知识点条目可能没有原文文件，就不做成可点
+      const docId = s.doc_id ?? s.document_id;
+      const canOpen = docId !== undefined && docId !== null && docId !== "";
       return `
-      <div class="src-item">
+      <div class="src-item${canOpen ? " src-item-link" : ""}"${canOpen ? ` data-doc="${Common.escapeHtml(String(docId))}" title="点击打开原文"` : ` title="该来源没有原文文件（知识点/片段），无法打开"`}>
         <div class="src-item-head">
           <span class="src-title">${Common.escapeHtml(documentName)}</span>
           ${s.course ? `<button type="button" class="src-course" data-course="${Common.escapeHtml(s.course)}" title="查看《${Common.escapeHtml(s.course)}》知识库">${Common.escapeHtml(s.course)}</button>` : ""}
@@ -449,6 +561,15 @@ const ChatView = (() => {
       c.addEventListener("click", (e) => {
         e.stopPropagation();
         App.navigate("knowledge", { course: c.dataset.course });
+      });
+    });
+    // 来源卡可点：打开文档原文（新窗口，带鉴权走同源接口）
+    wrap.querySelectorAll(".src-item[data-doc]").forEach((item) => {
+      item.addEventListener("click", (e) => {
+        if (e.target.closest("button")) return;
+        const id = item.dataset.doc;
+        if (!id) return;
+        window.open(`/api/documents/${encodeURIComponent(id)}/file`, "_blank", "noopener");
       });
     });
     bodyEl.appendChild(wrap);
@@ -486,6 +607,48 @@ const ChatView = (() => {
   const ICON_UP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg>';
   const ICON_DOWN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zM17 2h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3"/></svg>';
 
+  /* 点踩原因：预设最常见的几类，也允许自己写，允许跳过直接提交 */
+  const DOWN_REASONS = [
+    { v: "inaccurate", label: "内容不准确" },
+    { v: "irrelevant", label: "答非所问" },
+    { v: "incomplete", label: "回答不完整" },
+    { v: "unreadable", label: "排版/表述难读" },
+  ];
+
+  function askDownReason(onSubmit) {
+    const box = Common.openModal(`
+      <div class="modal-header">
+        <h3>这条回答哪里不好？</h3>
+        <button class="modal-close" data-close>×</button>
+      </div>
+      <div class="fb-reasons" id="fb-reasons">
+        ${DOWN_REASONS.map((r) => `<button type="button" class="fb-reason" data-reason="${r.v}">${r.label}</button>`).join("")}
+      </div>
+      <div class="form-group" style="margin-top:12px">
+        <label for="fb-reason-extra">补充说明 <span class="muted">（可选）</span></label>
+        <textarea class="form-control" id="fb-reason-extra" rows="3" maxlength="200" placeholder="具体哪里不对？例如：公式写错了、例子和问题无关"></textarea>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" data-skip>跳过，直接提交</button>
+        <button class="btn btn-primary" data-ok>提交</button>
+      </div>`);
+    let picked = "";
+    const buttons = [...box.querySelectorAll(".fb-reason")];
+    const extra = box.querySelector("#fb-reason-extra");
+    buttons.forEach((b) => b.addEventListener("click", () => {
+      picked = picked === b.dataset.reason ? "" : b.dataset.reason;
+      buttons.forEach((x) => x.classList.toggle("active", x.dataset.reason === picked));
+    }));
+    box.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", Common.closeModal));
+    box.querySelector("[data-skip]").onclick = () => { Common.closeModal(); onSubmit(""); };
+    box.querySelector("[data-ok]").onclick = () => {
+      const label = (DOWN_REASONS.find((r) => r.v === picked) || {}).label || "";
+      const text = extra.value.trim();
+      Common.closeModal();
+      onSubmit([label, text].filter(Boolean).join("；"));
+    };
+  }
+
   function renderFeedbackBar(bodyEl, id, feedback) {
     if (!bodyEl || bodyEl.querySelector(".msg-feedback")) return;
     const bar = document.createElement("div");
@@ -501,21 +664,48 @@ const ChatView = (() => {
       if (label) label.textContent = v === "up" ? "感谢反馈！" : v === "down" ? "已记录，我们会改进" : "这条回答有帮助吗？";
     };
     if (feedback) setActive(feedback);
+    const submit = async (value, reason) => {
+      // 新契约：{value:"up"|"down", reason?}；取消评价时 value 为 null
+      const payload = { value: value || null };
+      if (value === "down" && reason) payload.reason = reason;
+      try {
+        await API.request("POST", `/api/chat/messages/${id}/feedback`, payload);
+        setActive(value);
+        if (!value) bar.querySelector(".mf-label").textContent = "这条回答有帮助吗？";
+      } catch (err) {
+        Common.toast("评价失败：" + err.message, "error");
+      }
+    };
     bar.querySelectorAll(".mf-btn").forEach((btn) => {
-      btn.addEventListener("click", async () => {
+      btn.addEventListener("click", () => {
         const v = btn.dataset.v;
         // 再点同一档 = 取消评价，退回未评状态
-        const next = (btn.classList.contains("active")) ? "" : v;
-        try {
-          await API.request("POST", `/api/chat/messages/${id}/feedback`, { feedback: next });
-          setActive(next ? v : "");
-          if (!next) bar.querySelector(".mf-label").textContent = "这条回答有帮助吗？";
-        } catch (err) {
-          Common.toast("评价失败：" + err.message, "error");
+        const next = btn.classList.contains("active") ? "" : v;
+        if (next === "down") {
+          // 点踩先问原因（可跳过），带上 reason，管理员才能定位差答
+          askDownReason((reason) => submit("down", reason));
+          return;
         }
+        submit(next, "");
       });
     });
     bodyEl.appendChild(bar);
+  }
+
+  /* 回答生成完了但保存失败：不能当正常完成，标「未保存」并给重试入口 */
+  function showSaveFailed(assistantDiv, message, onRetry) {
+    const body = assistantDiv.querySelector(".msg-body");
+    if (!body || body.querySelector(".msg-save-failed")) return;
+    const note = document.createElement("div");
+    note.className = "msg-note msg-save-failed";
+    note.innerHTML = `
+      <div><b>这条回答未保存</b>：${Common.escapeHtml(message || "保存时出了点问题")}。刷新后这条回答会消失，建议重试。</div>
+      <div class="msg-unmatched-ops"><button type="button" class="btn btn-sm" data-retry-save>重新生成并保存</button></div>`;
+    body.appendChild(note);
+    note.querySelector("[data-retry-save]").addEventListener("click", () => {
+      note.remove();
+      if (!activeSeq) onRetry();
+    });
   }
 
   function showWelcome() {
@@ -564,10 +754,13 @@ const ChatView = (() => {
     activeSeq = seq;
     const silentUser = !!(opts && opts.silentUser);  // 补生成模式：不重复渲染提问
     const regenerate = !!(opts && opts.regenerate);  // 重新生成：后端不重复落提问、先删旧回答
-    const courses = opts && opts.courses ? opts.courses : [];  // 空数组 = 全部可见知识库
+    const courses = opts && opts.courses
+      ? opts.courses
+      : (selectedCourse ? [selectedCourse] : []);  // 空数组 = 全部可见知识库
     let bubble = null;
     let hadError = false;
     let errorMsg = "";
+    let saveError = "";  // 收到 save_failed：回答生成成功但没落库
 
     setSending(true);  // 立刻切成「停止生成」
 
@@ -640,6 +833,11 @@ const ChatView = (() => {
         }, 90);
       };
 
+      const announce = (msg) => {
+        const el = document.getElementById("chat-announcer");
+        if (el) el.textContent = msg;
+      };
+
       const req = API.streamAsk(convId, text, {
         onToken: (t) => {
           if (seq !== streamSeq) return;  // 已切换到其他会话，忽略旧生成
@@ -653,6 +851,7 @@ const ChatView = (() => {
           phaseEl.dataset.status = "error";
           phaseText.textContent = "回答失败";
           phaseTime.textContent = "";
+          announce("回答失败：" + msg);
           const errHtml = `<span style="color:var(--danger)">${Common.escapeHtml(msg)}</span>`;
           bubble.innerHTML = fullText
             ? `${Markdown.render(fullText)}<div style="margin-top:10px">${errHtml}</div>`
@@ -662,13 +861,27 @@ const ChatView = (() => {
         onUnmatched: (evt) => {
           if (seq !== streamSeq) return;
           const body = assistantDiv.querySelector(".msg-body");
-          if (!body || body.querySelector(".msg-note")) return;
+          if (!body || body.querySelector(".msg-unmatched")) return;
+          // related_points 是新字段；recommended 是旧字段，两个都兼容
+          const points = Array.isArray(evt.related_points) && evt.related_points.length
+            ? evt.related_points
+            : (Array.isArray(evt.recommended) ? evt.recommended : []);
           const tip = document.createElement("div");
-          tip.className = "msg-note";
-          tip.innerHTML = "该问题暂未在知识库中命中，已自动提交跟进；解决后可在侧边栏「答疑进度」中查看";
+          tip.className = "msg-note msg-unmatched";
+          tip.innerHTML = `
+            <div>${Common.escapeHtml(unmatchedReason(evt))}。已自动提交跟进，可在左侧「答疑进度」里查看。</div>
+            ${points.length
+              ? `<div class="msg-unmatched-points"><b>你可能想问：</b>${points.map((p) =>
+                  `<button type="button" class="link-like" data-point="${Common.escapeHtml(p)}">${Common.escapeHtml(p)}</button>`).join("")}</div>`
+              : ""}
+            <div class="msg-unmatched-ops"><button type="button" class="btn btn-sm" data-rephrase>换个问法</button></div>`;
           body.appendChild(tip);
+          tip.querySelectorAll("[data-point]").forEach((b) =>
+            b.addEventListener("click", () => fillChatInput(b.dataset.point)));
+          tip.querySelector("[data-rephrase]").addEventListener("click", () => fillChatInput(""));
           phaseEl.dataset.status = "unmatched";
           phaseText.textContent = "知识库未命中";
+          phaseTime.textContent = "";
           scrollBottom();
         },
         onPhase: (evt) => {
@@ -685,6 +898,10 @@ const ChatView = (() => {
           assistantDiv.dataset.msgId = msgId;
           renderFeedbackBar(assistantDiv.querySelector(".msg-body"), msgId, "");
         },
+        onSaveFailed: (evt) => {
+          if (seq !== streamSeq) return;
+          saveError = (evt && evt.message) || "保存时出了点问题";
+        },
         onDone: () => {
           if (seq !== streamSeq) return;
           if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
@@ -695,6 +912,13 @@ const ChatView = (() => {
               phaseEl.dataset.status = "done";
               phaseText.textContent = "回答完成";
             }
+            // 流式正文每 90ms 重绘一次，直接给正文加 aria-live 会让读屏反复打断，
+            // 所以在完成时用隐藏的播报区整句念一遍
+            announce("回答完成：" + fullText.replace(/\s+/g, " ").slice(0, 80));
+            // 生成成功但没落库：明确标「未保存」，不要显示成正常完成
+            if (saveError) showSaveFailed(assistantDiv, saveError, () => {
+              send(text, { silentUser: true, regenerate: true });
+            });
           } else if (!fullText) {
             bubble.innerHTML = `<span style="color:var(--danger)">${Common.escapeHtml(errorMsg)}</span>`;
           }

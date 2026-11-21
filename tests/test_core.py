@@ -42,12 +42,12 @@ def test_admin_create_blank_username_does_not_collide(db):
 
     admin = _user(db, "10000001", "admin")
     first = admin_create_user(
-        AdminUserCreate(account="20000001", password="secret1", username="", role="student"),
+        AdminUserCreate(account="20000001", password="secret1x", username="", role="student"),
         admin,
         db,
     )
     second = admin_create_user(
-        AdminUserCreate(account="20000002", password="secret2", username="", role="student"),
+        AdminUserCreate(account="20000002", password="secret2x", username="", role="student"),
         admin,
         db,
     )

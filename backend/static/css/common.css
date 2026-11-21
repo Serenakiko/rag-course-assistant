@@ -73,6 +73,19 @@
   --hero-border: #cfdbdd;       /* hero 边框 */
 }
 
+/* 只给读屏看的播报区（屏幕阅读器念，视觉上不占位） */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* ============ 暗色主题 ============
    在 <html> 上挂 data-theme="dark" 即生效，其余变量沿用上方浅色默认值。
    只覆盖「会翻白」的灰阶 / 文字 / 语义色浅底与阴影，主色、圆角、间距不动。 */
@@ -330,4 +343,27 @@ textarea.form-control { resize: vertical; min-height: 90px; }
     transition-duration: .01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ============ F8 移动端可用性补充：≤768px ============ */
+/* 只在小屏生效，桌面布局不受影响；断点与 app.css 的 768 保持一致。 */
+@media (max-width: 768px) {
+  /* iOS 横竖屏切换时不自动放大字号 */
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
+  body { font-size: 15px; line-height: 1.65; }
+
+  /* 输入类控件统一 16px：iOS Safari 对 <16px 的输入框聚焦时会强制放大页面 */
+  .form-control, select, textarea, input:not([type="checkbox"]):not([type="radio"]) {
+    font-size: 16px;
+  }
+  .form-control { min-height: 44px; }
+
+  /* 触控目标 ≥40px */
+  .btn, .btn-sm { min-height: 40px; }
+  .eye-toggle { min-width: 40px; min-height: 40px; }
+  .switch-link { display: inline-block; padding: 8px 2px; }
+
+  /* 表格：容器可横向滑动（640 以下由 app.css 改成卡片式，不需要滚） */
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 }

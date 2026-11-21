@@ -12,8 +12,25 @@ const HistoryView = (() => {
   let pageSize = 10;
   let query = "";      // 标题关键字（交给服务端过滤）
   let searchTimer = null;
+  let loadSeq = 0;     // 请求序号：连点翻页/连续搜索时，只认最后一次的结果
 
-  function render(container) {
+  /* 地址栏参数：q=关键字、page=页码。刷新/分享链接能回到同一屏。 */
+  function readParams(opts) {
+    const params = (opts && opts.query) || new URLSearchParams();
+    const q = (params.get("q") || "").trim();
+    const p = parseInt(params.get("page") || "1", 10);
+    return { q, page: Number.isFinite(p) && p > 0 ? p : 1 };
+  }
+
+  function writeParams() {
+    if (typeof App === "undefined" || !App.updateQuery) return;
+    App.updateQuery({ q: query, page: page > 1 ? page : "" });
+  }
+
+  function render(container, opts) {
+    const initial = readParams(opts);
+    query = initial.q;
+    page = initial.page;
     container.innerHTML = `
       <div class="page-toolbar">
         <div class="toolbar-left" style="gap:10px">
@@ -22,10 +39,6 @@ const HistoryView = (() => {
             <input class="form-control" id="history-search" placeholder="搜索会话标题">
             <button type="button" class="search-clear" id="history-search-clear" title="清空"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
           </div>
-        </div>
-        <div class="toolbar-right">
-          <button class="btn btn-sm" id="history-new"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>发起新问答</button>
-          <button class="btn btn-sm" id="history-refresh"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 6"/><path d="M20 4v7h-7"/></svg>刷新</button>
         </div>
       </div>
       <div class="card">
@@ -43,8 +56,15 @@ const HistoryView = (() => {
 
     const input = document.getElementById("history-search");
     const box = document.getElementById("history-search-box");
+    input.value = query;
     const syncClear = () => box.classList.toggle("has-value", input.value.length > 0);
-    const rerun = () => { query = input.value.trim(); page = 1; load(false); };
+    syncClear();
+    const rerun = () => {
+      query = input.value.trim();
+      page = 1;
+      writeParams();
+      load(false);
+    };
     input.addEventListener("input", syncClear);
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); rerun(); }
@@ -53,18 +73,14 @@ const HistoryView = (() => {
     document.getElementById("history-search-clear").addEventListener("click", () => {
       input.value = ""; syncClear(); rerun(); input.focus();
     });
-    document.getElementById("history-new").addEventListener("click", () => App.navigate("chat"));
-    document.getElementById("history-refresh").addEventListener("click", () => {
-      load(true).then((ok) =>
-        Common.toast(ok ? "已刷新" : "刷新失败，检查一下网络", ok ? "success" : "error"));
-    });
-    load(false);
+    load(true);
   }
 
   /* keepPage=true：刷新时保留当前页（页码超界会自动回退） */
   async function load(keepPage) {
     const tbody = document.getElementById("history-tbody");
     if (!tbody) return;
+    const seq = ++loadSeq;   // 旧请求回来时 loadSeq 已变，直接丢弃（否则慢响应会盖掉新结果）
     tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:36px"><span class="loading-spinner"></span></td></tr>`;
     if (!keepPage) page = 1;
     const params = new URLSearchParams({
@@ -75,11 +91,13 @@ const HistoryView = (() => {
     if (query) params.set("q", query);
     try {
       const data = await API.request("GET", `/api/chat/sessions?${params.toString()}`);
+      if (seq !== loadSeq) return false;   // 已被更新的请求取代（用户又翻页/改关键字）
       total = (data && data.total) || 0;
       rows = (data && data.items) || [];
       renderRows();
       return true;
     } catch (err) {
+      if (seq !== loadSeq) return false;   // 旧请求的失败不该覆盖新结果
       tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:36px;color:var(--danger)">${Common.escapeHtml(err.message)}</td></tr>`;
       Common.renderPagination("history-pagination", 0, 1, pageSize, () => {}, {});
       return false;
@@ -90,18 +108,21 @@ const HistoryView = (() => {
     const tbody = document.getElementById("history-tbody");
     if (!tbody) return;
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
-    if (page > totalPages) {   // 删掉最后一页的最后一条时往回退
+    if (page > totalPages) {   // 删掉最后一页的最后一条、或链接里的页码越界：退回最后一页再取一次
+      page = totalPages;
+      writeParams();           // 地址栏同步，否则刷新后又会回到越界页码
       load(true);
       return;
     }
     if (!rows.length) {
-      tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:36px;color:var(--text-3)">${query ? "没有匹配的会话" : "暂无会话，点击「发起新问答」开始第一次提问"}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:36px;color:var(--text-3)">${query ? "没有匹配的会话" : "暂无会话，去「智能问答」发起第一次提问"}</td></tr>`;
       Common.renderPagination("history-pagination", total, page, pageSize, (p) => {
         page = p;
+        writeParams();
         load(true);
       }, {
         sizeOptions: [10, 20],
-        onSizeChange: (s) => { pageSize = s; page = 1; load(true); },
+        onSizeChange: (s) => { pageSize = s; page = 1; writeParams(); load(true); },
       });
       return;
     }
@@ -135,10 +156,11 @@ const HistoryView = (() => {
 
     Common.renderPagination("history-pagination", total, page, pageSize, (p) => {
       page = p;
+      writeParams();
       load(true);
     }, {
       sizeOptions: [10, 20],
-      onSizeChange: (s) => { pageSize = s; page = 1; load(true); },
+      onSizeChange: (s) => { pageSize = s; page = 1; writeParams(); load(true); },
     });
   }
   // 兼容数组 / JSON 字符串两种来源格式
@@ -183,7 +205,7 @@ const HistoryView = (() => {
   async function removeSession(id, session) {
     const ok = await Common.confirmDialog({
       title: "删除会话",
-      message: `将删除会话「${Common.escapeHtml(session ? session.title : "#" + id)}」及其全部消息，不可恢复。确认？`,
+      message: `将删除会话「${session ? session.title : "#" + id}」及其全部消息，不可恢复。确认？`,
       okText: "删除",
     });
     if (!ok) return;

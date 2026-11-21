@@ -1,6 +1,7 @@
 """对话路由：会话管理 + SSE 流式问答。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
@@ -29,6 +30,7 @@ from ..schemas import (
 from ..services import rag_service
 from ..services.kb_scope import allowed_course_names
 from ..services.like import contains
+from ..services.notify import notify_admins
 from ..services.rag_service import is_unmatched_answer
 
 router = APIRouter()
@@ -100,7 +102,7 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def _save_answer(
+def _save_answer_ex(
     conversation_id: int,
     turn_user_id: int | None,
     content: str,
@@ -108,11 +110,11 @@ def _save_answer(
     interrupted: int,
     rejected: int = 0,
     outcome: str = "answered",
-) -> int | None:
-    """把一轮回答落库并返回 message.id。
+) -> tuple[int | None, bool]:
+    """把一轮回答落库，返回 (message.id, 是否落库失败)。
 
-    这一轮之后已有新消息就不再落库，避免出现两条答案；失败只记日志。
-    rejected：这一轮是否拒答（1=是），供统计拒答率直接读字段。
+    这一轮之后已有新消息就不再落库（返回 None, False），避免出现两条答案；
+    真正写库失败返回 (None, True)，调用方必须把失败告知前端（P0-4）。
     """
     session = SessionLocal()
     try:
@@ -121,7 +123,7 @@ def _save_answer(
         )
         if turn_user_id is not None and latest is not None and latest > turn_user_id:
             logger.info("会话 %s 已进入下一轮，丢弃上一轮回答", conversation_id)
-            return None
+            return None, False
         msg = Message(
             conversation_id=conversation_id,
             role="assistant",
@@ -133,13 +135,28 @@ def _save_answer(
         )
         session.add(msg)
         session.commit()
-        return msg.id
+        return msg.id, False
     except Exception:  # noqa: BLE001
         logger.exception("保存回答失败 conversation_id=%s", conversation_id)
         session.rollback()
-        return None
+        return None, True
     finally:
         session.close()
+
+
+def _save_answer(
+    conversation_id: int,
+    turn_user_id: int | None,
+    content: str,
+    sources: str,
+    interrupted: int,
+    rejected: int = 0,
+    outcome: str = "answered",
+) -> int | None:
+    """兼容旧调用方的薄封装：只要 message.id。落库失败返回 None。"""
+    return _save_answer_ex(
+        conversation_id, turn_user_id, content, sources, interrupted, rejected, outcome
+    )[0]
 
 
 def _load_history(db: Session, conversation_id: int, limit: int) -> list[tuple[str, str]]:
@@ -177,18 +194,24 @@ def _record_unmatched(
     question: str,
     user_id: int,
     unmatched: dict | None,
+    conversation_id: int | None = None,
+    message_id: int | None = None,
 ) -> None:
     """把未命中问题落库（同人同问题去重：已解决的保留，待处理的更新关联信息）。
 
     并发下同一学生几乎同时问同一个未命中问题，可能出现两条重复记录：
     这里在唯一索引（question + created_by）基础上用 on_conflict_do_nothing 兜底，
     落在后面的那条直接忽略，不再产生重复。
+
+    conversation_id / message_id 记下这一问来自哪个会话、哪条学生消息，
+    供管理员「重新生成」把答案写回原对话（P1-8 闭环）。
     """
+    # 先初始化，避免 try 内异常时 except 里的日志引用未绑定变量（P2-1）
+    question_text = (question or "").strip()
     course = (unmatched or {}).get("course", "") or ""
     related = json.dumps((unmatched or {}).get("recommended", []), ensure_ascii=False)
     session = SessionLocal()
     try:
-        question_text = question.strip()
         existing = session.scalar(
             select(UnansweredQuestion)
             .where(
@@ -202,6 +225,11 @@ def _record_unmatched(
             if existing.status == "pending":
                 existing.course = course
                 existing.related_points = related
+            # 历史数据或旧路径可能没带来源，补一次即可；不覆盖已有值
+            if existing.conversation_id is None:
+                existing.conversation_id = conversation_id
+            if existing.message_id is None:
+                existing.message_id = message_id
             session.commit()
             return
         # 不存在时用 upsert 语义插入，避免「先查后插」的竞态窗口产生重复。
@@ -215,6 +243,8 @@ def _record_unmatched(
                 related_points=related,
                 status="pending",
                 created_by=user_id,
+                conversation_id=conversation_id,
+                message_id=message_id,
             )
             .on_conflict_do_nothing(index_elements=["question", "created_by"])
         )
@@ -411,23 +441,48 @@ def delete_session(
     return {"ok": True}
 
 
-@router.get("/sessions/{conv_id}/messages", response_model=list[MessageOut], summary="会话消息")
+@router.get("/sessions/{conv_id}/messages", response_model=None, summary="会话消息（可选分页）")
 def list_messages(
     conv_id: int,
+    limit: int | None = None,
+    before_id: int | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> list[Message]:
+) -> list[MessageOut] | dict:
+    """会话消息。
+
+    兼容两种返回结构（P2-3）：
+    - 不传 limit / before_id：保持旧行为，返回按 id 升序的完整消息 list；
+    - 传了 limit 或 before_id：返回 {"items": [...], "has_more": bool}，items 仍按 id
+      升序（当页从旧到新），has_more=True 表示还有更早的消息，下一页把
+      items[0].id 作为 before_id 传入即可。
+    limit 默认 50，范围 1..200。
+    """
     conv = db.get(Conversation, conv_id)
     if conv is None or conv.user_id != user.id:
         raise HTTPException(status_code=404, detail="会话不存在")
-    return list(
-        db.scalars(
+
+    # 旧调用方（前端 chat.js 首屏）不传参数，必须继续拿到列表
+    if limit is None and before_id is None:
+        rows = db.scalars(
             select(Message).where(Message.conversation_id == conv_id).order_by(Message.id)
-        )
-    )
+        ).all()
+        return [MessageOut.model_validate(m) for m in rows]
+
+    page_size = min(max(limit if limit is not None else 50, 1), 200)
+    stmt = select(Message).where(Message.conversation_id == conv_id)
+    if before_id is not None:
+        stmt = stmt.where(Message.id < before_id)
+    rows = db.scalars(stmt.order_by(Message.id.desc()).limit(page_size + 1)).all()
+    has_more = len(rows) > page_size
+    page = list(reversed(rows[:page_size]))
+    return {
+        "items": [MessageOut.model_validate(m) for m in page],
+        "has_more": has_more,
+    }
 
 
-@router.post("/messages/{msg_id}/feedback", summary="评价回答（学生：有帮助 / 没帮助）")
+@router.post("/messages/{msg_id}/feedback", summary="评价回答（学生：有帮助 / 没帮助 + 可选原因）")
 def feedback_message(
     msg_id: int,
     payload: FeedbackRequest,
@@ -436,19 +491,42 @@ def feedback_message(
 ) -> dict:
     """学生对一条助手回答点赞/点踩，作为 RAG 回答质量的反馈信号。
 
+    入参兼容两种写法（P2-1/F4）：
+    - {"value": "up"|"down", "reason": "可选短文本"}：新契约；
+    - {"feedback": "up"|"down"|""}：旧前端仍在用，继续支持。
     只允许评价本人会话里的 assistant 消息；再次评价同一档直接幂等返回，
-    切换评价（up↔down）直接覆盖；传空串（feedback=""）取消评价。
-    评价数据供管理员数据概览的质量指标统计。
+    切换评价（up↔down）直接覆盖；传空串（value=""）取消评价并清空原因。
+    reason 截断到 200 字。
     """
+    # 取值合法性（up / down / 空串）由 FeedbackRequest 的 Literal 校验
+    value = payload.value
+    reason = payload.reason.strip()[:200]
+
     msg = db.get(Message, msg_id)
     if msg is None or msg.role != "assistant":
         raise HTTPException(status_code=404, detail="回答不存在")
     conv = db.get(Conversation, msg.conversation_id)
     if conv is None or conv.user_id != user.id:
         raise HTTPException(status_code=404, detail="回答不存在")
-    msg.feedback = payload.feedback
+    msg.feedback = value
+    msg.feedback_reason = reason if value else ""
     db.commit()
-    return {"ok": True, "feedback": payload.feedback}
+    if value == "down":
+        prev = db.scalars(
+            select(Message)
+            .where(Message.conversation_id == conv.id, Message.id < msg.id)
+            .order_by(Message.id.desc())
+            .limit(1)
+        ).first()
+        question = (prev.content if prev is not None else "").strip().replace("\n", " ")[:80]
+        notify_admins(
+            db,
+            "feedback_alert",
+            "学生给了一条回答差评",
+            f"提问：{question or '（无记录）'}；原因：{reason or '未填写'}",
+            "#/history",
+        )
+    return {"ok": True, "feedback": value, "reason": msg.feedback_reason}
 
 
 
@@ -550,14 +628,10 @@ def admin_delete_conversation(
     return {"ok": True}
 
 
-async def _prepare_ask(
+def _prepare_ask_body(
     payload: AskRequest, user: User, db: Session
 ) -> tuple[int, int, int | None, list[tuple[str, str]], list[str] | None]:
-    """ask 的同步准备阶段：定位/创建会话、记录提问、确定课程检索范围。
-
-    返回 (conversation_id, gen_token, turn_user_id, history, courses)。
-    任何一步抛异常（会话 404、非本人 403、DB 失败）都会向上传播，由调用方负责释放限流计数。
-    """
+    """ask 的同步准备阶段：定位/创建会话、记录提问、确定课程检索范围。"""
     # 1. 定位或创建会话
     conversation_id = payload.conversation_id
     if payload.regenerate and conversation_id is None:
@@ -634,46 +708,108 @@ async def _prepare_ask(
             visible_set = set(visible_courses)
             courses = [c for c in requested if c in visible_set]
             if not courses:
-                # 前端传的课程一个都不可见，退回可见范围兜底（None 表示全部可见）
-                courses = visible_courses or []
+                # 以前这里静默退回可见范围：学生以为在问 A 库，实际从 B 库作答，
+                # 越权尝试也被掩盖。检索范围空就明确拒绝，让前端刷新课程列表。
+                logger.warning(
+                    "用户 %s 指定的课程均不可见：%s", user.id, requested
+                )
+                raise HTTPException(
+                    status_code=403,
+                    detail="所选课程不在你的可见范围内，请刷新页面后重新选择",
+                )
     else:
         courses = visible_courses
 
     return conversation_id, gen_token, turn_user_id, history, courses
 
 
+def _prepare_ask_sync(
+    payload: AskRequest, user_id: int
+) -> tuple[int, int, int | None, list[tuple[str, str]], list[str] | None]:
+    """在独立线程里执行准备阶段：线程内新建 Session，避免跨线程共享 ORM Session（P0-3）。"""
+    with SessionLocal() as db:
+        user = db.get(User, user_id)
+        if user is None:
+            raise HTTPException(status_code=401, detail="登录状态无效，请重新登录")
+        return _prepare_ask_body(payload, user, db)
+
+
+async def _prepare_ask(
+    payload: AskRequest, user: User, db: Session | None = None
+) -> tuple[int, int, int | None, list[tuple[str, str]], list[str] | None]:
+    """异步入口：把同步 DB 准备阶段整体挪到工作线程，事件循环不再被 SQLite 卡住。
+
+    db 参数只为兼容既有单元测试的旧签名：显式传进来的 Session 绑定在原线程/原连接上，
+    换线程用会读到另一个空库，所以这条老路径就地执行；生产代码（/ask）不再传 db，
+    走 to_thread + 线程内新建 Session 的路径。
+    """
+    if db is not None:
+        return _prepare_ask_body(payload, user, db)
+    return await asyncio.to_thread(_prepare_ask_sync, payload, user.id)
+
+
 @router.post("/ask", summary="智能问答（SSE 流式）")
 async def ask(
     payload: AskRequest,
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
 ) -> StreamingResponse:
     # 0. 每用户限流：并发 + 频率，防单点连点打满闸门与排队
     allowed, reason = _ask_allow(user.id)
     if not allowed:
         raise HTTPException(status_code=429, detail=reason)
 
-    # 限流计数一旦自增，就必须在**所有**退出路径释放：事件流结束时释放，以及
-    # 下面 return StreamingResponse 之前抛异常（会话 404 / 403 / DB 提交失败）也要释放，
-    # 否则累计 2 次失败请求就把该用户永久锁死。用一个幂等标志，事件流 finally 与
-    # 异常处理共用，保证只减一次。
+    # 先把 id 缓存成普通 int：后面 release() 可能在请求 DB 会话 rollback 之后执行，
+    # 再访问 user.id 会触发 PendingRollbackError 并掩盖原始异常（P2-17）。
+    user_id = user.id
     released = [False]
 
     def release() -> None:
         if not released[0]:
             released[0] = True
-            _ask_release(user.id)
+            _ask_release(user_id)
 
     try:
         conversation_id, gen_token, turn_user_id, history, courses = await _prepare_ask(
-            payload, user, db
+            payload, user
         )
     except Exception:
         release()
         raise
 
+    def _persist_interrupted(
+        partial: str,
+        sources_json: str,
+        completed: bool,
+        outcome: str,
+    ) -> None:
+        """收尾落库（同步，放线程里跑）：被新请求顶掉就丢弃，否则存半截/占位提示。"""
+        if _current_gen_seq(conversation_id) != gen_token:
+            logger.info("会话 %s 的生成已被新请求取代，丢弃旧的部分回答", conversation_id)
+            return
+        if partial:
+            final_outcome = "failed" if outcome == "failed" else "interrupted"
+            _save_answer(
+                conversation_id,
+                turn_user_id,
+                partial,
+                sources_json,
+                0 if completed else 1,
+                outcome=final_outcome,
+            )
+        else:
+            # 一个字都没生成就结束：落一句提示，避免留下没回答的提问
+            _save_answer(
+                conversation_id,
+                turn_user_id,
+                _NO_ANSWER_HINT,
+                "[]",
+                0,
+                outcome="failed",
+            )
+
     # 3. SSE 流式生成（结束时把助手回答落库）
     async def event_gen() -> AsyncGenerator[str, None]:
+        started = time.monotonic()
         # 先发一个心跳，前端靠「收到数据」重置空闲计时，否则排队长时会被误杀
         yield _sse({"type": "ping"})
         answer_parts: list[str] = []
@@ -682,15 +818,18 @@ async def ask(
         failed = False
         completed = False
         saved = False   # 正常路径已经落过库，finally 里不再重复保存
+        save_failed = False  # 已把落库失败事件发给前端，finally 不再重复尝试
         outcome = "answered"
+        # 显式持有内层生成器：break 时也能 aclose，及时释放 rag_service 的模型槽位（P2-2）
+        agen = rag_service.stream_answer(
+            payload.message,
+            history,
+            courses=courses,
+            # 同一会话又发了一问：这一轮已被顶掉，别再占着一路模型跑完再丢
+            still_wanted=lambda: _current_gen_seq(conversation_id) == gen_token,
+        )
         try:
-            async for event in rag_service.stream_answer(
-                payload.message,
-                history,
-                courses=courses,
-                # 同一会话又发了一问：这一轮已被顶掉，别再占着一路模型跑完再丢
-                still_wanted=lambda: _current_gen_seq(conversation_id) == gen_token,
-            ):
+            async for event in agen:
                 if event["type"] == "token":
                     answer_parts.append(event["content"])
                 elif event["type"] == "sources":
@@ -710,57 +849,77 @@ async def ask(
             completed = not failed
             if failed:
                 return
-            # 记录未命中：距离门控（unmatched 事件）或模型判定未收录
+            # 记录未命中：距离门控（unmatched 事件）、模型判定未收录，或检索完全零命中（out_of_scope）。
+            # out_of_scope 没有 unmatched 事件，但同样是「知识库答不上来」，必须进管理端待办。
             full_answer = "".join(answer_parts) or ""
             is_rejected = bool(unmatched) or is_unmatched_answer(full_answer)
             if is_rejected:
                 outcome = "rejected"
-                _record_unmatched(payload.message, user.id, unmatched)
+            if is_rejected or outcome == "out_of_scope":
+                # conversation_id / message_id 供管理员重新生成后写回原会话（P1-8）
+                await asyncio.to_thread(
+                    _record_unmatched,
+                    payload.message,
+                    user_id,
+                    unmatched or ({"course": courses[0]} if courses else None),
+                    conversation_id,
+                    turn_user_id,
+                )
 
-            # 正常结束：先落库拿 id，再告诉前端（评价按钮要用）
+            # 正常结束：先落库拿 id，再告诉前端（评价按钮要用）。
+            # 落库失败必须发 save_failed，不能让「学生看到答案、刷新即消失」（P0-4）。
             partial = "".join(answer_parts).strip()
             if partial:
-                saved_id = _save_answer(
-                    conversation_id, turn_user_id, partial, sources_json, 0,
-                    rejected=1 if is_rejected else 0,
-                    outcome=outcome,
+                saved_id, db_failed = await asyncio.to_thread(
+                    _save_answer_ex,
+                    conversation_id,
+                    turn_user_id,
+                    partial,
+                    sources_json,
+                    0,
+                    1 if is_rejected else 0,
+                    outcome,
                 )
                 if saved_id:
                     saved = True
                     yield _sse({"type": "saved", "message_id": saved_id})
-        except Exception as exc:  # noqa: BLE001
+                elif db_failed:
+                    save_failed = True
+                    yield _sse(
+                        {
+                            "type": "save_failed",
+                            "message": "回答已生成，但保存失败，请重试",
+                        }
+                    )
+        except Exception:  # noqa: BLE001
             outcome = "failed"
-            yield _sse({"type": "error", "message": f"服务异常：{exc}"})
+            # 异常原文只写服务端日志，不回显给浏览器（P1-1）
+            logger.exception("SSE 问答处理失败 conversation_id=%s", conversation_id)
+            yield _sse({"type": "error", "message": "服务暂时不可用，请稍后重试"})
         finally:
+            # 先关内层生成器释放模型槽位，再释放限流计数
+            try:
+                await agen.aclose()
+            except Exception:  # noqa: BLE001
+                logger.exception("关闭回答生成器失败 conversation_id=%s", conversation_id)
             release()
-            if _current_gen_seq(conversation_id) != gen_token:
-                # 已被新请求取代，丢弃旧流的部分回答
-                logger.info("会话 %s 的生成已被新请求取代，丢弃旧的部分回答", conversation_id)
-            else:
-                # 超时/异常/客户端断开：把半截回答存下来并标记是否中断
-                if not saved:
-                    partial = "".join(answer_parts).strip()
-                    if partial:
-                        final_outcome = (
-                            "failed" if outcome == "failed" else "interrupted"
-                        )
-                        _save_answer(
-                            conversation_id,
-                            turn_user_id,
-                            partial,
-                            sources_json,
-                            0 if completed else 1,
-                            outcome=final_outcome,
-                        )
-                    else:
-                        # 一个字都没生成就结束：落一句提示，避免留下没回答的提问
-                        _save_answer(
-                            conversation_id,
-                            turn_user_id,
-                            _NO_ANSWER_HINT,
-                            "[]",
-                            0,
-                            outcome="failed",
-                        )
+            if not saved and not save_failed:
+                try:
+                    await asyncio.to_thread(
+                        _persist_interrupted,
+                        "".join(answer_parts).strip(),
+                        sources_json,
+                        completed,
+                        outcome,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("兜底保存回答失败 conversation_id=%s", conversation_id)
+            logger.info(
+                "问答流结束 conversation_id=%s outcome=%s elapsed=%.2fs saved=%s",
+                conversation_id,
+                outcome,
+                time.monotonic() - started,
+                saved,
+            )
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")

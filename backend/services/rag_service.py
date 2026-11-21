@@ -102,26 +102,34 @@ async def _astream_with_deadline(chain, inputs: dict, timeout: float) -> AsyncGe
         await agen.aclose()
 
 
+def _doc_block(doc: Document, index: int) -> str:
+    """把单条资料格式化为提示词里的一段；index 从 1 开始，与答案里的 [n] 角标对应。"""
+    src = doc.metadata
+    title = src.get("title") or src.get("filename") or "未知来源"
+    course = src.get("course") or "未分类"
+    section = src.get("section") or src.get("chapter") or ""
+    page = src.get("page") or src.get("page_number") or ""
+    locator = "，".join(
+        part for part in (
+            f"章节：{section}" if section else "",
+            f"页码：{page}" if page != "" else "",
+        ) if part
+    )
+    return (
+        f"[{index}] 来源《{title}》（课程：{course}"
+        f"{'，' + locator if locator else ''}）\n{doc.page_content}"
+    )
+
+
 def _format_context(docs: list[tuple[Document, float]]) -> str:
-    """把检索结果格式化为提示词中的参考文本。"""
-    lines: list[str] = []
-    for i, (doc, _score) in enumerate(docs, start=1):
-        src = doc.metadata
-        title = src.get("title") or src.get("filename") or "未知来源"
-        course = src.get("course") or "未分类"
-        section = src.get("section") or src.get("chapter") or ""
-        page = src.get("page") or src.get("page_number") or ""
-        locator = "，".join(
-            part for part in (
-                f"章节：{section}" if section else "",
-                f"页码：{page}" if page != "" else "",
-            ) if part
-        )
-        lines.append(
-            f"[{i}] 来源《{title}》（课程：{course}"
-            f"{'，' + locator if locator else ''}）\n{doc.page_content}"
-        )
-    return "\n\n".join(lines)
+    """把检索结果格式化为提示词中的参考文本。
+
+    编号必须与「真正送进提示词的资料顺序」一致：调用方要用同一份列表生成
+    sources 与引用校验，否则会出现模型没看过 [3]、前端却仍列出来源的问题。
+    """
+    return "\n\n".join(
+        _doc_block(doc, i) for i, (doc, _score) in enumerate(docs, start=1)
+    )
 
 
 def _format_sources(docs: list[tuple[Document, float]]) -> list[dict]:
@@ -172,16 +180,66 @@ def _citation_audit(answer: str, source_count: int) -> tuple[list[int], list[int
     return valid, invalid
 
 
-def _citation_stats(answer: str, source_count: int) -> dict:
-    """记录引用越界（答案编造了不存在的来源编号），并随 sources 事件返回。"""
+def _cjk_bigrams(text: str) -> set[str]:
+    """把文本切成二元组，用作便宜的字面重合度（不引 tokenizer / jieba）。"""
+    clean = "".join(ch for ch in (text or "") if not ch.isspace())
+    if len(clean) < 2:
+        return set()
+    return {clean[i : i + 2] for i in range(len(clean) - 1)}
+
+
+_SENTENCE_RE = re.compile(r"[^。！？!?；;\n]+[。！？!?；;]?")
+
+
+def _citation_grounding(
+    answer: str, sources: list[dict], min_overlap: float = 0.15
+) -> dict:
+    """粗查「角标挂的内容和来源有没有字面关系」。
+
+    编号范围合法不代表引用成立：模型完全可以给真实存在的 [2] 编造一段来源里没有的话。
+    这里按句检查含角标的句子与对应来源的字面二元组重合率，低于阈值记为 weak ——
+    只作提示与日志信号，不拦截回答（字面重合低不等于一定错，改写表述也会掉重合）。
+    """
+    weak: list[int] = []
+    checked = 0
+    for sentence in _SENTENCE_RE.findall(answer or ""):
+        nums = [int(n) for n in _CITATION_RE.findall(sentence)]
+        if not nums:
+            continue
+        sent_grams = _cjk_bigrams(_CITATION_RE.sub("", sentence))
+        if not sent_grams:
+            continue
+        for n in nums:
+            if not 1 <= n <= len(sources):
+                continue
+            checked += 1
+            src_grams = _cjk_bigrams(sources[n - 1].get("content") or "")
+            if not src_grams:
+                continue
+            if len(sent_grams & src_grams) / len(sent_grams) < min_overlap:
+                weak.append(n)
+    return {"checked": checked, "weak": sorted(set(weak))}
+
+
+def _citation_stats(
+    answer: str, source_count: int, sources: list[dict] | None = None
+) -> dict:
+    """记录引用越界与弱引用，并随 sources 事件返回。"""
     valid, invalid = _citation_audit(answer, source_count)
+    grounding = _citation_grounding(answer, sources) if sources else {"checked": 0, "weak": []}
     if invalid:
         logger.warning(
             "回答引用了不存在的来源编号 %s（本次来源 %d 条）", invalid, source_count
         )
     elif valid:
         logger.info("回答引用编号 %s（来源 %d 条）", valid, source_count)
-    return {"valid": valid, "invalid": invalid}
+    if grounding["weak"]:
+        logger.warning(
+            "回答的部分角标与来源文字重合度过低，疑似空挂引用：%s（共检查 %d 处）",
+            grounding["weak"],
+            grounding["checked"],
+        )
+    return {"valid": valid, "invalid": invalid, **grounding}
 
 
 async def _rewrite_query(question: str, history: list[tuple[str, str]]) -> str:
@@ -230,10 +288,16 @@ def _context_budget() -> int:
     return int(usable * 0.8)
 
 
-def _trim_history_to_budget(history: list[tuple[str, str]], budget: int) -> list[tuple[str, str]]:
-    """按 token 预算从旧到新裁剪历史（保留最近轮次）。"""
+def _trim_history_to_budget(
+    history: list[tuple[str, str]], budget: int
+) -> tuple[list[tuple[str, str]], int]:
+    """按 token 预算从旧到新裁剪历史，返回 (保留的历史, 实际占用 token)。
+
+    返回实际占用，是为了把没用掉的额度回流给检索资料：首轮没有历史时，
+    资料应当拿到全部剩余额度，而不是被固定切走 40%。
+    """
     if not history:
-        return []
+        return [], 0
     kept: list[tuple[str, str]] = []
     used = 0
     for role, content in reversed(history):  # 从新到旧挑
@@ -242,45 +306,63 @@ def _trim_history_to_budget(history: list[tuple[str, str]], budget: int) -> list
             break
         kept.append((role, content))
         used += size
-    return list(reversed(kept))
+    return list(reversed(kept)), used
 
 
-def _trim_context_to_budget(context: str, budget: int) -> str:
-    """按 token 预算裁剪检索资料正文（保留开头，截断尾部）。"""
-    if not context:
-        return context
-    if _est_tokens(context) <= budget:
-        return context
-    # 粗裁：按比例截字符
-    ratio = budget / _est_tokens(context)
-    limit = max(1, int(len(context) * ratio))
-    return context[:limit] + "\n…（因超出上下文预算，部分资料已截断）"
+def _select_docs_within_budget(
+    docs: list[tuple[Document, float]], budget: int
+) -> list[tuple[Document, float]]:
+    """按相关性顺序挑出能放进预算的资料，至少保留首条。
+
+    返回的列表就是真正进入提示词的资料，调用方必须用它生成 sources 与引用校验，
+    否则角标 [n] 会和来源列表错位（模型没看过第 3 条，前端却列出第 3 条）。
+    """
+    if not docs or budget <= 0:
+        return []
+    chosen: list[tuple[Document, float]] = []
+    used = 0
+    for doc, score in docs:
+        block = _doc_block(doc, len(chosen) + 1)
+        cost = _est_tokens(block)
+        if not chosen and cost > budget:
+            # 单条就超预算：截断正文而不是整条丢掉，保证至少有一条依据
+            header = _doc_block(Document(page_content="", metadata=doc.metadata), 1)
+            room = max(budget - _est_tokens(header), budget // 2)
+            body_tokens = max(_est_tokens(doc.page_content), 1)
+            limit = max(120, int(len(doc.page_content) * room / body_tokens))
+            truncated = Document(
+                page_content=doc.page_content[:limit] + "\n…（单条资料过长，已截断）",
+                metadata=doc.metadata,
+            )
+            chosen.append((truncated, score))
+            break
+        if chosen and used + cost > budget:
+            break
+        chosen.append((doc, score))
+        used += cost
+    return chosen
 
 
 def _build_messages(
     system_prompt: str,
-    context: str,
+    docs: list[tuple[Document, float]],
     question: str,
     history: list[tuple[str, str]],
-) -> tuple[str, list[tuple[str, str]]]:
-    """按 token 预算一次性分配 system + history + context，返回 (裁剪后的 context, 裁剪后的 history)。
+) -> tuple[str, list[tuple[str, str]], list[tuple[Document, float]]]:
+    """按 token 预算一次性分配 system + history + 资料，返回 (context, history, 实际资料)。
 
-    之前三块预算各自取百分比再相加，单看每行都合理，加一起却超窗 40%（sys≈1900 +
-    0.5B + 0.4B > B）。这里改成**一次分配**：先扣 system 提示与输出预留，剩余额度
-    按比例分给 history 与 context，两者之和 + system 不再超过可用窗口。
-
-    返回的 context 已经截到预算内，history 也按预算裁剪；调用方直接用返回值装配消息。
+    顺序是「先扣 system，再给历史最多 40% 额度，剩下的全部给资料」。
+    历史没用满时，未用额度回流给资料 —— 首轮问答因此能拿到接近完整的检索结果
+    （旧实现固定切走 40%，默认配置下 5 条资料只有约 2 条进得去）。
+    第三项是真正进入提示词的资料，sources 与引用编号必须基于它生成。
     """
-    budget = _context_budget()  # 可用总预算（已扣输出预留 + 20% 安全边际）
+    budget = _context_budget()
     sys_tokens = _est_tokens(system_prompt)
-    # 剩余额度 = 总预算 - system 提示；至少留一点给正文，避免 system 本身就把窗口吃光
     remaining = max(budget - sys_tokens, int(budget * 0.3))
-    # history 与 context 按 4:6 分剩余额度（资料是回答依据，优先保证；历史只辅助追问）
-    hist_budget = int(remaining * 0.4)
-    ctx_budget = remaining - hist_budget
-    history = _trim_history_to_budget(history, hist_budget)
-    context = _trim_context_to_budget(context, ctx_budget)
-    return context, history
+    history, hist_used = _trim_history_to_budget(history, int(remaining * 0.4))
+    ctx_budget = max(remaining - hist_used, 1)
+    kept = _select_docs_within_budget(docs, ctx_budget)
+    return _format_context(kept), history, kept
 
 
 def recommend_titles(docs: list[tuple[Document, float]], limit: int = 3, spread: float = 0.15) -> list[str]:
@@ -365,7 +447,9 @@ async def can_answer(
     timeout = settings.ANSWERABILITY_TIMEOUT if timeout is None else timeout
     try:
         llm = get_llm(num_predict=8, streaming=False)
-        context = _format_context(docs[:3])
+        # 判定器看的证据必须覆盖真正可能进 prompt 的资料：只喂前 3 条、
+        # 再截到 1000 字符（约 1 条 chunk）会把「答案在第 2/3 条」误判成未收录。
+        context = _format_context(_trim_docs(docs))
         max_chars = settings.ANSWERABILITY_MAX_CONTEXT_CHARS
         if len(context) > max_chars:
             context = context[:max_chars] + "\n…（判定上下文已截断）"
@@ -468,6 +552,19 @@ def build_prompt_messages(
     messages.append(HumanMessage(content=question))
     return messages
 
+_STREAM_ATTEMPTS = 2
+
+
+def _is_connection_error(exc: BaseException) -> bool:
+    """是否为连接层错误（可安全重试）。超时算在内，但调用方已用 deadline 包住。"""
+    import httpx
+
+    return isinstance(
+        exc,
+        (ConnectionError, httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError),
+    )
+
+
 async def _generate_stream(
     system_prompt: str,
     context: str,
@@ -484,17 +581,33 @@ async def _generate_stream(
         build_prompt_messages(system_prompt, history, question)
     ) | get_llm()
     last_meta: dict = {}
-    async for chunk in _astream_with_deadline(
-        chain,
-        {"context": context, "question": question},
-        settings.LLM_TIMEOUT,
-    ):
-        text = getattr(chunk, "content", "")
-        meta = getattr(chunk, "response_metadata", None) or {}
-        if meta:
-            last_meta = meta
-        if isinstance(text, str) and text:
-            yield text
+    # 连接层抖动（Ollama 正在换模型、端口刚起、连接被重置）不该变成「回答失败」：
+    # 只要还没吐出第一个字，就重建一次链再试。一旦开始输出就不重试，否则会重复生成。
+    for attempt in range(1, _STREAM_ATTEMPTS + 1):
+        emitted = False
+        try:
+            async for chunk in _astream_with_deadline(
+                chain,
+                {"context": context, "question": question},
+                settings.LLM_TIMEOUT,
+            ):
+                text = getattr(chunk, "content", "")
+                meta = getattr(chunk, "response_metadata", None) or {}
+                if meta:
+                    last_meta = meta
+                if isinstance(text, str) and text:
+                    emitted = True
+                    yield text
+        except Exception as exc:  # noqa: BLE001 - 只在连接层错误时重试
+            if emitted or attempt >= _STREAM_ATTEMPTS or not _is_connection_error(exc):
+                raise
+            logger.warning("连接模型失败，重建后重试（第 %s 次）：%s", attempt, exc)
+            await asyncio.sleep(0.5)
+            chain = ChatPromptTemplate.from_messages(
+                build_prompt_messages(system_prompt, history, question)
+            ) | get_llm()
+            continue
+        break
     if finish_info is not None:
         # langchain_ollama 的 response_metadata 里完成原因是 done_reason（取值 stop/length/load），
         # 不是 finish_reason。之前拼错字段名，truncated 恒为 False，「回答可能不完整」永远不提示。
@@ -548,19 +661,15 @@ async def _generate_answer_locked(
                 "error": "resource",
             }
         if answerability is Answerability.ERROR:
-            return {
-                "answer": "",
-                "recommended": [],
-                "matched": False,
-                "error": "answerability",
-            }
-        if answerability is Answerability.UNANSWERABLE:
+            # 与流式路径保持一致：判定器不可用只降级，不当成「资料不可答」
+            logger.warning("资料可答性判定不可用（ERROR），降级为直接生成（非流式）")
+        elif answerability is Answerability.UNANSWERABLE:
             return _unmatched_result(question, docs)
 
     kept = _trim_docs(docs)
-    context = _format_context(kept)
-    # token 预算：一次性分配 system + history + context（history 此路径为空，但统一走 _build_messages）
-    context, history = _build_messages(SYSTEM_PROMPT, context, question, [])
+    # token 预算：一次性分配 system + history + 资料；
+    # 返回的 kept 才是真正进入提示词的资料，角标与来源列表都以它为准
+    context, history, kept = _build_messages(SYSTEM_PROMPT, kept, question, [])
     answer_parts: list[str] = []
     try:
         async for chunk in _generate_stream(SYSTEM_PROMPT, context, question, history):
@@ -637,11 +746,14 @@ async def stream_answer(
     still_wanted：可选回调，返回 False 表示这一轮已经被同会话的新提问顶掉了。
     排队期间和拿到槽位后各查一次——否则同一会话的两个请求里，旧的那个还要占着
     一路模型把答案生成完，最后才发现序号不符、整个丢掉。
+
+    回调内部要查 SQLite（生成序号），必须丢到线程里执行：在事件循环线程里直接调
+    会在数据库被锁时把整个进程的 async 端点一起冻住（P0-3）。
     """
     sem = _llm_slots()
     deadline = time.monotonic() + _QUEUE_MAX_WAIT
     while True:
-        if still_wanted is not None and not still_wanted():
+        if still_wanted is not None and not await asyncio.to_thread(still_wanted):
             return
         try:
             await asyncio.wait_for(sem.acquire(), timeout=_QUEUE_PING_SECONDS)
@@ -657,7 +769,7 @@ async def stream_answer(
                 }
                 return
             yield {"type": "ping"}
-    if still_wanted is not None and not still_wanted():
+    if still_wanted is not None and not await asyncio.to_thread(still_wanted):
         # 排队期间被顶掉了：把刚拿到的槽位还回去，不生成
         sem.release()
         return
@@ -675,10 +787,6 @@ async def stream_answer(
 
 def _timeout_message() -> str:
     return f"回答生成超时（超过 {settings.LLM_TIMEOUT:.0f} 秒），稍后再试或者换个问法。"
-
-
-def _answerability_error_message() -> str:
-    return "资料可答性判定超时或模型暂时不可用，这不表示知识库未收录。请稍后重试。"
 
 
 def model_resource_error_message() -> str:
@@ -768,9 +876,11 @@ async def _handle_generate(
     phase_started: float | None = None,
 ) -> AsyncGenerator[dict, None]:
     """基于检索资料流式生成回答，并在模型判「未收录」时追加推荐与反馈。"""
-    context = _format_context(kept)
-    # token 预算：一次性分配 system + history + context，三者之和不再超窗。
-    context, history = _build_messages(SYSTEM_PROMPT, context, question, history)
+    gen_started = time.monotonic()
+    # token 预算：一次性分配 system + history + 资料，三者之和不再超窗。
+    # 返回的 kept 是实际进入提示词的资料，后面的 sources / 引用校验必须用它，
+    # 否则会出现「模型没读过 [4][5]，前端却把它们列为来源」。
+    context, history, kept = _build_messages(SYSTEM_PROMPT, kept, question, history)
     answer_parts: list[str] = []
     finish_info: dict = {}
     try:
@@ -796,12 +906,19 @@ async def _handle_generate(
         yield {"type": "token", "content": suffix}
         yield _unmatched_event(question, kept[0][0].metadata.get("course") or "", recommended)
 
+    logger.info(
+        "阶段耗时 generation=%.2fs chars=%d truncated=%s",
+        time.monotonic() - gen_started,
+        len(answer),
+        truncated,
+    )
+    _sources_payload = _format_sources(kept)
     yield {
         "type": "sources",
-        "sources": _format_sources(kept),
+        "sources": _sources_payload,
         "answer": answer,
         "truncated": truncated,
-        "citation_stats": _citation_stats(answer, len(kept)),
+        "citation_stats": _citation_stats(answer, len(kept), _sources_payload),
     }
     if phase_started is not None:
         yield _phase_event("generation", "done", phase_started)
@@ -823,6 +940,7 @@ async def _stream_answer_locked(
 
     courses 非空时，只基于这些知识库（课程）检索回答。
     """
+    turn_started = time.monotonic()
     history = history or []
     try:
         # -1. 寒暄 / 概览：不走向量检索
@@ -844,6 +962,12 @@ async def _stream_answer_locked(
         await asyncio.to_thread(unload_ollama_llm)
         docs = await asyncio.to_thread(vector_search, search_query, settings.TOP_K, courses)
         yield _phase_event("retrieval", "done", retrieval_started)
+        logger.info(
+            "阶段耗时 retrieval=%.2fs docs=%d courses=%s",
+            time.monotonic() - retrieval_started,
+            len(docs),
+            courses,
+        )
         # 知识库没有任何内容时直接拒绝，不调模型
         if not docs:
             yield {"type": "outcome", "outcome": "empty_kb"}
@@ -872,21 +996,30 @@ async def _stream_answer_locked(
             answerability_started = time.monotonic()
             yield _phase_event("answerability", "running", answerability_started)
             answerability = await can_answer(question, docs)
-            if answerability in (Answerability.ERROR, Answerability.RESOURCE_ERROR):
+            # 资源不足是系统错误，仍须明确报错；但「判定器超时/返回不可解析」只是
+            # 增强判定不可用，不等于资料不可答。以前这里一律拒绝生成，一次分类器
+            # 抖动就把可答问题变成失败页，与 .env.example 里承诺的降级行为相反。
+            if answerability is Answerability.RESOURCE_ERROR:
                 logger.warning(
                     "资料可答性判定不可用（%s），拒绝生成：%s",
                     answerability.value,
                     question[:30],
                 )
                 yield _phase_event("answerability", "error", answerability_started)
-                message = (
-                    model_resource_error_message()
-                    if answerability is Answerability.RESOURCE_ERROR
-                    else _answerability_error_message()
-                )
-                yield {"type": "error", "message": message}
+                yield {"type": "error", "message": model_resource_error_message()}
                 return
-            yield _phase_event("answerability", "done", answerability_started)
+            if answerability is Answerability.ERROR:
+                logger.warning(
+                    "资料可答性判定不可用（ERROR），降级为直接生成：%s", question[:30]
+                )
+                yield _phase_event("answerability", "degraded", answerability_started)
+            else:
+                yield _phase_event("answerability", "done", answerability_started)
+                logger.info(
+                    "阶段耗时 answerability=%.2fs result=%s",
+                    time.monotonic() - answerability_started,
+                    answerability.value,
+                )
             if answerability is Answerability.UNANSWERABLE:
                 async for event in _handle_answerability_gate(question, docs):
                     yield event
@@ -918,3 +1051,10 @@ async def _stream_answer_locked(
             "type": "error",
             "message": "回答生成失败，请稍后重试；如果一直失败，请联系老师查看服务日志。",
         }
+    finally:
+        # 单轮总耗时只做观测，用来定位「慢在检索 / 可答性判定 / 生成」哪一段（P1-9）
+        logger.info(
+            "阶段耗时 total=%.2fs question=%s",
+            time.monotonic() - turn_started,
+            question[:30],
+        )

@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Annotated
+from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
@@ -16,20 +19,22 @@ from fastapi import (
     Query,
     UploadFile,
 )
+from fastapi.responses import FileResponse
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import SessionLocal, get_db
-from ..deps import get_current_user
-from ..models import Document, KnowledgePoint, UnansweredQuestion, User, VectorCleanupTask
+from ..deps import get_current_user, require_role
+from ..models import Document, KnowledgePoint, User
 from ..schemas import DocumentDetailOut, DocumentOut
 from ..services.chunker import split_text
 from ..services.document_dedup import find_duplicate, fingerprint_text
 from ..services.document_parser import is_supported, parse_file
 from ..services.kb_scope import assert_writable_course
-from ..services.like import LIKE_ESCAPE, contains, escape_like
-from ..services.vector_reconcile import run_vector_cleanup_task
+from ..services.like import contains
+from ..services.notify import notify_admins
 from ..services.vector_store import add_document_chunks, delete_document, get_collection
 
 logger = logging.getLogger(__name__)
@@ -43,7 +48,7 @@ async def upload_document(
     background: BackgroundTasks,
     file: UploadFile = File(...),
     course: str = Form(default=""),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
 ) -> Document:
     filename = Path(file.filename or "unnamed").name
@@ -92,8 +97,12 @@ async def upload_document(
         stored_path.unlink(missing_ok=True)
         raise
     except Exception as exc:  # noqa: BLE001
+        # 原始异常里有服务器路径与底层库信息，只进日志，不回给前端
+        logger.exception("保存上传文件失败：%s", stored_path.name)
         stored_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail=f"文件保存失败：{exc}") from exc
+        raise HTTPException(
+            status_code=500, detail="文件保存失败，请稍后重试或联系管理员"
+        ) from exc
 
     doc = Document(
         filename=filename,
@@ -105,37 +114,122 @@ async def upload_document(
         uploaded_by=user.id,
     )
     db.add(doc)
-    db.commit()
-    db.refresh(doc)
+    # DB 写入失败时把刚落盘的文件删掉，避免留下没人引用的孤儿文件。
+    # 并发同名上传在这里兜底：模型没有唯一约束时主要靠上面的预检查，
+    # 有唯一约束时则由此返回 409 而不是 500。
+    try:
+        db.commit()
+        db.refresh(doc)
+    except IntegrityError as exc:
+        db.rollback()
+        stored_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=409,
+            detail="这个知识库里已经上传过同名文档，请先删除旧文档或改用其他文件名",
+        ) from exc
+    except Exception:
+        db.rollback()
+        stored_path.unlink(missing_ok=True)
+        raise
 
     background.add_task(process_document, doc.id, course_name)
     return doc
 
 
-def process_document(doc_id: int, course: str) -> None:
-    """后台任务：解析 → 分块 → 向量入库。"""
-    session = SessionLocal()
-    try:
+_FINGERPRINT_BATCH = 20
+
+
+def _update_document(doc_id: int, *, expected_status: str | None = None, **values) -> bool:
+    """用独立短事务更新文档字段；行不存在或状态已变时返回 False。
+
+    每次只持锁到本条 commit，绝不把 parse_file 等慢操作包进写事务。
+    """
+    with SessionLocal() as session:
         doc = session.get(Document, doc_id)
         if doc is None:
-            return
-        text = parse_file(Path(doc.stored_path))
-        fingerprint = fingerprint_text(text)
-        doc.content_hash = fingerprint.content_hash
-        doc.content_simhash = str(fingerprint.simhash)
-        doc.content_length = fingerprint.length
+            return False
+        if expected_status is not None and doc.status != expected_status:
+            return False
+        for key, value in values.items():
+            setattr(doc, key, value)
+        session.commit()
+        return True
 
-        # 老数据没有指纹时按需补算一次；否则新上传只能和升级后的文档比较，
-        # 历史资料仍会漏过去重。
-        candidates = list(
-            session.scalars(
-                select(Document).where(
-                    Document.course == course,
-                    Document.id != doc.id,
-                    Document.status.in_(("ready", "processing")),
-                )
-            ).all()
+
+def _mark_failed(doc_id: int, error: str) -> None:
+    try:
+        _update_document(doc_id, status="failed", error=error[:500])
+    except Exception:  # noqa: BLE001
+        logger.exception("写入文档失败状态失败 doc_id=%s", doc_id)
+
+
+def _update_fingerprints(rows: list[tuple[int, object]]) -> None:
+    """按批用独立短事务回填历史文档指纹，每批结束立即释放写锁。"""
+    for start in range(0, len(rows), _FINGERPRINT_BATCH):
+        with SessionLocal() as session:
+            for candidate_id, fingerprint in rows[start : start + _FINGERPRINT_BATCH]:
+                candidate = session.get(Document, candidate_id)
+                if candidate is None:
+                    continue
+                candidate.content_hash = fingerprint.content_hash
+                candidate.content_simhash = str(fingerprint.simhash)
+                candidate.content_length = fingerprint.length
+            session.commit()
+
+
+def _candidate_snapshot(course: str, doc_id: int) -> list[SimpleNamespace]:
+    """只读地取出同课程候选文档，供补算 / 去重使用（不持有 ORM 会话）。"""
+    with SessionLocal() as session:
+        rows = session.execute(
+            select(
+                Document.id,
+                Document.filename,
+                Document.status,
+                Document.content_hash,
+                Document.content_simhash,
+                Document.content_length,
+                Document.stored_path,
+            ).where(
+                Document.course == course,
+                Document.id != doc_id,
+                Document.status.in_(("ready", "processing")),
+            )
+        ).all()
+    return [
+        SimpleNamespace(
+            id=row.id,
+            filename=row.filename,
+            status=row.status,
+            content_hash=row.content_hash,
+            content_simhash=row.content_simhash,
+            content_length=row.content_length or 0,
+            stored_path=row.stored_path,
         )
+        for row in rows
+    ]
+
+
+def process_document(doc_id: int, course: str) -> None:
+    """后台任务：解析 → 分块 → 向量入库。
+
+    慢操作（parse_file / 指纹计算 / embedding）全部放在写事务之外；
+    DB 只通过若干独立短事务读快照、写结果，避免后台任务长时间占住写锁。
+    """
+    try:
+        # 1) 只读取本次处理需要的字段，立即关闭会话
+        with SessionLocal() as session:
+            doc = session.get(Document, doc_id)
+            if doc is None:
+                return
+            stored_path = doc.stored_path
+            filename = doc.filename
+            uploaded_by = doc.uploaded_by
+
+        # 2) 解析、指纹、历史文档补算都在会话外完成
+        text = parse_file(Path(stored_path))
+        fingerprint = fingerprint_text(text)
+        candidates = _candidate_snapshot(course, doc_id)
+        pending: list[tuple[int, object]] = []
         for candidate in candidates:
             if (
                 candidate.content_hash
@@ -146,77 +240,99 @@ def process_document(doc_id: int, course: str) -> None:
             if not candidate.stored_path or not Path(candidate.stored_path).exists():
                 continue
             try:
-                candidate_text = parse_file(Path(candidate.stored_path))
-                candidate_fingerprint = fingerprint_text(candidate_text)
-                candidate.content_hash = candidate_fingerprint.content_hash
-                candidate.content_simhash = str(candidate_fingerprint.simhash)
-                candidate.content_length = candidate_fingerprint.length
+                candidate_fingerprint = fingerprint_text(
+                    parse_file(Path(candidate.stored_path))
+                )
             except Exception:  # noqa: BLE001
                 logger.warning(
                     "补算历史文档内容指纹失败 doc_id=%s",
                     candidate.id,
                     exc_info=True,
                 )
+                continue
+            pending.append((candidate.id, candidate_fingerprint))
+            candidate.content_hash = candidate_fingerprint.content_hash
+            candidate.content_simhash = str(candidate_fingerprint.simhash)
+            candidate.content_length = candidate_fingerprint.length
 
-        duplicate = find_duplicate(doc.id, fingerprint, candidates)
+        # 3) 补算结果按小批独立事务回填，解析阶段不持有任何写锁
+        try:
+            _update_fingerprints(pending)
+        except Exception:  # noqa: BLE001
+            logger.warning("回写历史文档内容指纹失败，本次跳过", exc_info=True)
+
+        # 指纹写回用短事务；状态不是 processing（已删 / 已被并发处理）就退出
+        if not _update_document(
+            doc_id,
+            expected_status="processing",
+            content_hash=fingerprint.content_hash,
+            content_simhash=str(fingerprint.simhash),
+            content_length=fingerprint.length,
+        ):
+            return
+
+        duplicate = find_duplicate(doc_id, fingerprint, candidates)
         if duplicate is not None:
-            doc.status = "failed"
-            doc.chunk_count = 0
-            doc.error = (
-                f"检测到与「{duplicate.filename}」内容相同或高度相似，已跳过入库。"
-                "如需更新，请先删除旧文档后重新上传。"
+            _update_document(
+                doc_id,
+                expected_status="processing",
+                status="failed",
+                chunk_count=0,
+                error=(
+                    f"检测到与「{duplicate.filename}」内容相同或高度相似，已跳过入库。"
+                    "如需更新，请先删除旧文档后重新上传。"
+                ),
             )
-            session.commit()
             return
 
         chunks = split_text(text)
         if not chunks:
-            doc.status = "failed"
-            doc.error = "文档未提取到有效文本"
-            session.commit()
+            _update_document(
+                doc_id,
+                expected_status="processing",
+                status="failed",
+                error="文档未提取到有效文本",
+            )
             return
-        count = add_document_chunks(doc.id, doc.filename, course, chunks)
+
+        # 4) 慢操作：embedding + 向量写入，不持有 DB 事务
+        count = add_document_chunks(doc_id, filename, course, chunks)
+
         # 写向量期间文档可能被删除：DB 行没了但向量已入库，留下检索得到、点开 404 的
         # 无主分块。落库前先确认行还在，没了就把刚写入的向量清掉再退出。
-        # 必须用新 session 查：当前 session 的 identity map 会返回缓存对象，SQLite
-        # 的读事务也可能停在旧快照上，两种都会让删除检测失效。
-        with SessionLocal() as check:
-            still_exists = check.scalar(select(Document.id).where(Document.id == doc_id))
-        if still_exists is None:
+        if not _update_document(
+            doc_id, expected_status="processing", status="ready", chunk_count=count, error=""
+        ):
             delete_document(doc_id, strict=False)
             return
-        doc.status = "ready"
-        doc.chunk_count = count
-        doc.error = ""
-        # 自动生成知识点：文档名即标题、正文前 2000 字，只作展示，不入向量
+
+        # 5) 自动知识点单独短事务；失败只记日志，不回滚「文档已 ready」的结果
         try:
-            title = Path(doc.filename).stem or doc.filename
-            session.add(
-                KnowledgePoint(
-                    title=title[:255],
-                    content=text[:2000],
-                    course=course,
-                    tags="",
-                    created_by=doc.uploaded_by,
-                    is_auto=1,
+            with SessionLocal() as kp_session:
+                kp_session.add(
+                    KnowledgePoint(
+                        title=(Path(filename).stem or filename)[:255],
+                        content=text[:2000],
+                        course=course,
+                        tags="",
+                        created_by=uploaded_by,
+                        is_auto=1,
+                    )
                 )
-            )
-            session.commit()
+                kp_session.commit()
         except Exception:  # noqa: BLE001
             logger.exception("文档自动生成知识点失败 doc_id=%s", doc_id)
-        session.commit()
     except Exception as exc:  # noqa: BLE001
         logger.exception("文档处理失败 doc_id=%s", doc_id)
-        try:
-            doc = session.get(Document, doc_id)
-            if doc is not None:
-                doc.status = "failed"
-                doc.error = str(exc)[:500]
-                session.commit()
-        except Exception:  # noqa: BLE001
-            session.rollback()
-    finally:
-        session.close()
+        _mark_failed(doc_id, str(exc))
+        with SessionLocal() as notify_db:
+            notify_admins(
+                notify_db,
+                "doc_failed",
+                f"文档解析失败：{filename}",
+                f"课程：{course or '未指定'}；原因：{str(exc)[:120]}",
+                "#/documents",
+            )
 
 
 @router.get("", summary="文档列表（分页 + 搜索）")
@@ -272,20 +388,17 @@ def list_documents(
     }
 
 
-@router.post("/{doc_id}/reparse", summary="重新解析失败的文档（管理员 / 上传者本人）")
+@router.post("/{doc_id}/reparse", summary="重新解析失败的文档（管理员）")
 def reparse_document(
     doc_id: int,
     background: BackgroundTasks,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
 ) -> dict:
     """把解析失败的文档重跑一遍：源文件还在就不必重传。只允许 failed。"""
     doc = db.get(Document, doc_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="文档不存在")
-    # 学生端的「我的文档」也复用这张表格：自己的文档自己可以重试
-    if user.role != "admin" and doc.uploaded_by != user.id:
-        raise HTTPException(status_code=403, detail="只能重新解析自己上传的文档")
     if doc.status == "ready":
         raise HTTPException(status_code=400, detail="文档已经解析完成，不需要重新解析")
     if doc.status == "processing":
@@ -297,6 +410,12 @@ def reparse_document(
     db.commit()
     background.add_task(process_document, doc.id, doc.course or "")
     return {"ok": True}
+
+
+def _vector_version(item_id: str) -> int | None:
+    """从向量 id 的 `-vN` 后缀取出写入版本；无版本后缀时返回 None。"""
+    _head, sep, raw = str(item_id).rpartition("-v")
+    return int(raw) if sep and raw.isdigit() else None
 
 
 @router.get("/{doc_id}", response_model=DocumentDetailOut, summary="文档详情（含分块预览）")
@@ -319,8 +438,23 @@ def document_detail(
                 where={"$and": [{"source_type": "document"}, {"doc_id": str(doc.id)}]},
                 include=["metadatas"],
             )
+            entries = list(zip(metadata["ids"], metadata["metadatas"], strict=False))
+            # 「先写新版本、再删旧版本」失败时旧版本可能残留；详情只展示当前版本，
+            # 否则同一分块会重复出现，也与检索命中的内容不一致。
+            versions = {
+                version
+                for item_id, _meta in entries
+                if (version := _vector_version(item_id)) is not None
+            }
+            if versions:
+                latest = max(versions)
+                entries = [
+                    (item_id, meta)
+                    for item_id, meta in entries
+                    if _vector_version(item_id) == latest
+                ]
             ordered = sorted(
-                zip(metadata["ids"], metadata["metadatas"]),
+                entries,
                 key=lambda x: int(x[1].get("chunk_index", 0)),
             )
             chunks_total = len(ordered)
@@ -346,13 +480,11 @@ def document_detail(
         except Exception:  # noqa: BLE001
             logger.warning("读取文档分块失败 doc_id=%s", doc.id, exc_info=True)
             chunks = []
-    # 无向量分块的文档（如种子文档）直接读原文件，别让详情页空着
+    # 不在请求线程里解析原文件（20MB PDF 会把 worker 卡住）；
+    # 预览只从已入库的分块拼装，取不到就留空，由前端提示「暂无预览」。
     preview = ""
-    if not chunks and doc.status == "ready" and doc.stored_path and Path(doc.stored_path).exists():
-        try:
-            preview = parse_file(Path(doc.stored_path))[:20000]
-        except Exception:  # noqa: BLE001
-            logger.warning("文档详情读取原文失败 doc_id=%s", doc.id, exc_info=True)
+    if chunks:
+        preview = "\n\n".join(str(chunk.get("text") or "") for chunk in chunks)[:20000]
     return DocumentDetailOut(
         **{
             "id": doc.id,
@@ -373,78 +505,49 @@ def document_detail(
     )
 
 
-@router.delete("/{doc_id}", summary="删除文档（连同向量）")
+@router.get("/{doc_id}/file", summary="预览 / 下载文档原文件")
+def document_file(
+    doc_id: int,
+    download: Annotated[int, Query(ge=0, le=1)] = 0,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """给前端来源卡点击用：默认 inline 预览，`?download=1` 时以附件下载。"""
+    doc = db.get(Document, doc_id)
+    # 可见范围与文档列表一致：管理员全部，学生只看自己上传的文档
+    if doc is None or (user.role != "admin" and doc.uploaded_by != user.id):
+        raise HTTPException(status_code=404, detail="文档不存在")
+    path = Path(doc.stored_path) if doc.stored_path else None
+    if path is None or not path.is_file():
+        raise HTTPException(status_code=404, detail="原始文件不存在")
+    headers = None
+    if download:
+        headers = {
+            "Content-Disposition": (
+                f"attachment; filename*=UTF-8''{quote(doc.filename or path.name)}"
+            )
+        }
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(path, media_type=media_type, headers=headers)
+
+
+@router.delete("/{doc_id}", summary="删除文档（进回收站）")
 def remove_document(
     doc_id: int,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
 ) -> dict:
     doc = db.get(Document, doc_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="文档不存在")
-    if user.role != "admin" and doc.uploaded_by != user.id:
-        raise HTTPException(status_code=403, detail="只能删除自己上传的文档")
-
-    # 联动 1：先收集要删除的自动知识点（在删 DB 前确定，避免顺序影响匹配）
-    stem = Path(doc.filename).stem
-    auto_kps = list(
-        db.scalars(
-            select(KnowledgePoint).where(
-                KnowledgePoint.title == stem,
-                KnowledgePoint.course == (doc.course or ""),
-                KnowledgePoint.created_by == doc.uploaded_by,
-                KnowledgePoint.is_auto == 1,
-            )
-        )
-    )
-    # 联动：被删文档曾是某条反馈的推荐来源时，打回待处理。
-    if doc.course:
-        resolved_rows = db.scalars(
-            select(UnansweredQuestion).where(
-                UnansweredQuestion.course == doc.course,
-                UnansweredQuestion.status == "resolved",
-                UnansweredQuestion.related_points.like(
-                    f"%{escape_like(doc.filename)}%", escape=LIKE_ESCAPE
-                ),
-            )
-        ).all()
-        for q in resolved_rows:
-            q.status = "pending"
-            q.answer = ""
-            q.answered_at = None
-            q.read_at = None
-
-    # 先删 DB 记录（事务），成功后再异步清理向量与文件。
-    # 反过来的话：文件/向量删了、DB 删除失败，就出现「文件没了引用还在」或「向量没了记录还在」。
-    stored_path = doc.stored_path
-    for kp in auto_kps:
-        db.delete(kp)
-    cleanup_tasks = [
-        VectorCleanupTask(kind="document", object_id=str(doc.id)),
-        *(
-            VectorCleanupTask(kind="knowledge_point", object_id=str(kp.id))
-            for kp in auto_kps
-        ),
-    ]
-    db.add_all(cleanup_tasks)
-    db.delete(doc)
-    db.commit()
-
-    # 记录与清理任务同一事务提交，向量服务异常时任务仍可在启动后重试。
-    for task in cleanup_tasks:
-        try:
-            run_vector_cleanup_task(task)
-        except Exception as exc:  # noqa: BLE001
-            task.last_error = str(exc)[:1000]
-            logger.error(
-                "文档记录已删除，但向量清理失败，已保留重试任务 kind=%s object_id=%s",
-                task.kind,
-                task.object_id,
-            )
-        else:
-            task.status = "done"
-            task.last_error = ""
-    db.commit()
-    if stored_path:
-        Path(stored_path).unlink(missing_ok=True)
-    return {"ok": True}
+    # 回收站删除由 recycle 服务统一实现；这里只做鉴权与响应协议，
+    # 快照、移文件、删除向量 cleanup 任务都交给它，避免两套删除逻辑。
+    try:
+        from ..services.recycle import recycle_document
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="回收站文档删除能力尚未就绪，暂时无法删除文档",
+        ) from exc
+    item = recycle_document(db, doc, user.id)
+    return {"recycled": True, "item_id": item.id}

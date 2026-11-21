@@ -96,17 +96,22 @@ python -m evaluation.evaluate --scope full --json evaluation/results/full_corpus
 
 - 知识点库在 20 条标准问法和 10 条改写问法上均为 top1 命中；该作用域 MRR 为 `1.0000`。
 - 完整混合语料中仍会有正确资料排到第 2/3 位，因此 MRR 为 `0.8778`；加入 `0.95/0.05` 混合重排前为 `0.8500`，知识点库则从 `0.9833` 恢复到 `1.0000`，没有牺牲主表质量。
-- 0.56 阈值下拒答 8/10，误拒 2/30。`near_miss` 仍有 2 条未被距离门控拦截，应由 `ANSWERABILITY_CHECK` 兜底。
-- 完整语料有 1 条 top1 跨课程误召回，论文中应单列，不能隐藏在总体 recall 内。
+- 0.55（`UNMATCHED_SIMILARITY` 默认值）阈值下拒答 8/10，误拒 2/30。`near_miss` 仍有 2 条未被距离门控拦截，应由 `ANSWERABILITY_CHECK` 兜底。
+- 完整语料有 1 条跨课程误召回（按本次修改后的口径：结果里出现任一非本题课程资料即计一次）。
+- 知识点库 `recall@5 = MRR = 1.0000` 是**标注方式的必然结果**，不是检索能力的证据：标准问法直接由知识点标题改写而来，`golden.json` 又只标了 `relevant_titles`，命中判定允许标题回退。论文里必须这么写，或者改用 typed ID 标注后重跑。
 
-可复现结果 JSON：
+## 结果文件
 
-- `evaluation/results/knowledge_points.json`
-- `evaluation/results/full_corpus.json`
-- `evaluation/results/student_questions_knowledge_points.json`
-- `evaluation/results/student_questions_full.json`
-- `evaluation/results/pdf_extraction.json`
-- `evaluation/results/default.json` 及 `top*_*.json` 中的参数对比结果
+上表的数字需要在本地重跑才能复现，仓库**没有附带** `evaluation/results/*.json`（该目录为空）。复现步骤：
+
+```bash
+python -m evaluation.evaluate --scope knowledge_points --json evaluation/results/knowledge_points.json
+python -m evaluation.evaluate --scope full --json evaluation/results/full_corpus.json
+python -m evaluation.evaluate --golden evaluation/student_questions.json --json evaluation/results/student_questions_knowledge_points.json
+python -m evaluation.evaluate --golden evaluation/student_questions.json --scope full --json evaluation/results/student_questions_full.json
+```
+
+跑完应得到 `knowledge_points.json`、`full_corpus.json`、`student_questions_knowledge_points.json`、`student_questions_full.json`、`pdf_extraction.json`、`default.json` 及 `top*_*.json`。论文引用时必须写明生成日期、commit 与 embedding 模型。
 
 ## PDF 页码抽取质量
 

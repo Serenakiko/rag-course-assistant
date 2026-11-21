@@ -16,329 +16,194 @@ const AdminView = (() => {
   /* ==================== 数据概览 ==================== */
   function renderOverview(container) {
     container.innerHTML = `
-      <div class="stat-grid" id="stat-grid">
-        <div style="grid-column:1/-1;text-align:center;padding:40px"><span class="loading-spinner"></span></div>
-      </div>
-      <div class="quality-grid" id="quality-grid"></div>
-      <div class="chart-row">
-        <div class="chart-card">
-          <h3>近7天提问趋势</h3>
-          <div id="chart-trend"></div>
-        </div>
-        <div class="chart-card">
-          <h3>知识库文档占比</h3>
-          <div id="chart-donut"></div>
-        </div>
-      </div>
-      <div class="overview-bottom">
-        <div class="card" id="usage-card">
-          <div class="row-between mb-16">
-            <b>文档引用排行</b>
-          </div>
-          <div id="usage-list"><div class="fb-loading"><span class="loading-spinner"></span></div></div>
-        </div>
-        <div class="card" id="hot-card">
-          <div class="row-between mb-16">
-            <b>热门问题</b>
-          </div>
-          <div id="hot-list"><div class="fb-loading"><span class="loading-spinner"></span></div></div>
-        </div>
-        <div class="card" id="fb-card" style="display:none">
-          <div class="row-between mb-16">
-            <b>未命中问题</b>
-            <button class="btn btn-sm" id="fb-all">查看全部</button>
-          </div>
-          <div id="fb-list"></div>
+      <div class="ov-wrap">
+        <div class="ov-metrics" id="ov-metrics"><span class="ov-skeleton"></span></div>
+        <div class="ov-quality" id="ov-quality"></div>
+        <div class="ov-grid">
+          <section class="ov-panel ov-col-8">
+            <div class="ov-panel-head">
+              <span>近 7 天提问</span>
+              <span class="ov-note" id="ov-today">—</span>
+            </div>
+            <div class="ov-spark" id="ov-spark"></div>
+          </section>
+          <section class="ov-panel ov-col-4">
+            <div class="ov-panel-head"><span>待处理</span></div>
+            <div class="ov-list" id="ov-todo"></div>
+          </section>
+          <section class="ov-panel ov-col-4">
+            <div class="ov-panel-head"><span>热门问题</span></div>
+            <div class="ov-list" id="ov-hot"></div>
+          </section>
+          <section class="ov-panel ov-col-4">
+            <div class="ov-panel-head">
+              <span>最近答不上来</span>
+              <button class="btn btn-sm" id="ov-fb-all">全部</button>
+            </div>
+            <div class="ov-list" id="ov-fb"></div>
+          </section>
+          <section class="ov-panel ov-col-4">
+            <div class="ov-panel-head">
+              <span>知识库</span>
+              <button class="btn btn-sm" id="ov-kb-manage">管理</button>
+            </div>
+            <div class="ov-list" id="ov-kb"></div>
+          </section>
         </div>
       </div>`;
     loadStats();
-    loadDocUsage();
   }
 
   async function loadStats() {
-    const grid = document.getElementById("stat-grid");
+    const box = document.getElementById("ov-metrics");
     try {
-      const s = await API.request("GET", "/api/stats/admin/stats");
-      const cards = [
-        { key: "users",     icon: ICON.user,   cls: "blue",   num: s.users ?? 0,          label: "用户总数", hint: "点击查看用户管理" },
-        { key: "users",     icon: ICON.shield, cls: "green",  num: s.admins ?? 0,         label: "管理员数", hint: "点击查看用户管理" },
-        { key: "users",     icon: ICON.users,  cls: "orange", num: s.students ?? 0,       label: "学生数",   hint: "点击查看用户管理" },
-        { key: "kb",        icon: ICON.folder, cls: "red",    num: s.knowledge_bases ?? 0, label: "知识库数量", hint: "点击查看知识库管理" },
-        { key: "documents", icon: ICON.doc,    cls: "teal",   num: s.documents ?? 0,      label: "文档总数", hint: "点击查看全部文档" },
-      ];
-      grid.innerHTML = cards.map((c) => `
-        <div class="stat-card clickable" data-key="${c.key}" title="${c.hint}">
-          <div class="stat-info">
-            <div class="stat-num">${c.num}</div>
-            <div class="stat-label">${c.label}</div>
-          </div>
-          <div class="stat-icon ${c.cls}">${c.icon}</div>
-        </div>`).join("");
-      grid.querySelectorAll(".stat-card[data-key]").forEach((card) =>
-        card.addEventListener("click", () => App.navigate(card.dataset.key)));
-
-      renderTrend(s.daily_questions || []);
-      renderDonut(s.kb_doc_distribution || []);
-      renderFeedback(s);
+      const [s, kbPage] = await Promise.all([
+        API.request("GET", "/api/stats/admin/stats"),
+        API.request("GET", "/api/knowledge/bases/page?field=name&sort=id&limit=5&offset=0").catch(() => ({ items: [] })),
+      ]);
+      renderMetrics(s);
       renderQuality(s);
-      renderHotQuestions(s);
+      renderSpark(s);
+      renderHot(s);
+      renderOverviewKb((kbPage && kbPage.items) || []);
+      renderTodo(s);
+      renderRecent(s);
     } catch (err) {
-      grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1"><p>${Common.escapeHtml(err.message)}</p></div>`;
+      box.innerHTML = `<div class="ov-empty">${Common.escapeHtml(err.message)}</div>`;
     }
   }
 
-  /* 概览：反馈区块（最近反馈列表） */
-  function renderFeedback(s) {
-    const box = document.getElementById("fb-card");
-    const listEl = document.getElementById("fb-list");
-    if (!box || !listEl) return;
-    box.style.display = "";
-    const recent = (s.recent_unanswered || []).slice(0, 5);
-
-    const rows = recent.length
-      ? recent.map((r) => `
-          <div class="fb-row" data-fb="${r.id}">
-            <span class="fb-status">${r.status === "pending" ? "待处理" : "已解答"}</span>
-            <span class="fb-q" style="flex:1;min-width:0">${Common.escapeHtml(r.question)}</span>
-            <span class="muted">${r.status === "resolved" && r.answered_at ? Common.fmtTime(r.answered_at) : Common.fmtTime(r.created_at)}</span>
-          </div>`).join("")
-      : `<div class="empty-state"><p>暂无反馈，答不上来的问题会自动收在这里</p></div>`;
-
-    listEl.innerHTML = rows;
-    listEl.querySelectorAll("[data-fb]").forEach((row) =>
-      row.addEventListener("click", () => App.navigate("unanswered")));
-    document.getElementById("fb-all").addEventListener("click", () => App.navigate("unanswered"));
-  }
-
-  /* 质量指标卡：命中率 / 拒答率 / 平均解决时长 / 评价分布 */
-  function renderQuality(s) {
-    const el = document.getElementById("quality-grid");
-    if (!el) return;
-    const hit = s.hit_rate != null ? (s.hit_rate * 100).toFixed(1) + "%" : "—";
-    const reject = s.reject_rate != null ? (s.reject_rate * 100).toFixed(1) + "%" : "—";
-    const resolve = s.avg_resolve_hours != null
-      ? (s.avg_resolve_hours >= 24 ? (s.avg_resolve_hours / 24).toFixed(1) + " 天" : s.avg_resolve_hours + " 小时")
-      : "—";
-    const totalFb = (s.feedback_up || 0) + (s.feedback_down || 0);
-    const upRate = totalFb > 0 ? Math.round((s.feedback_up / totalFb) * 100) : null;
-    const totalQuestions = s.total_questions || 0;
-    const rejectedAnswers = s.rejected_answers || 0;
-
+  function renderMetrics(s) {
     const items = [
-      { label: "回答命中率", value: hit, hint: `${s.answered_answers || 0} / ${totalQuestions} 次提问`, cls: "green" },
-      { label: "拒答率", value: reject, hint: `${rejectedAnswers} / ${totalQuestions} 次提问`, cls: "red" },
-      { label: "平均解决时长", value: resolve, hint: "反馈从提交到解答", cls: "blue" },
-      { label: "回答好评率", value: upRate != null ? upRate + "%" : "—", hint: `${s.feedback_up || 0} 赞 / ${totalFb} 次已评价`, cls: "orange" },
+      { label: "用户", value: s.users || 0, go: "users" },
+      { label: "管理员", value: s.admins || 0, go: "users" },
+      { label: "学生", value: s.students || 0, go: "users" },
+      { label: "知识库", value: s.knowledge_bases || 0, go: "content" },
+      { label: "文档", value: s.documents || 0, go: "documents" },
+      { label: "知识点", value: s.knowledge_points || 0, go: "content" },
     ];
-    el.innerHTML = items.map((it) => `
-      <div class="quality-item">
-        <div class="quality-value ${it.cls}">${it.value}</div>
-        <div class="quality-meta">
-          <div class="quality-label">${it.label}</div>
-          <div class="quality-hint" title="${Common.escapeHtml(it.hint)}">${Common.escapeHtml(it.hint)}</div>
-        </div>
+    document.getElementById("ov-metrics").innerHTML = items.map((it, i) => `
+      <button class="ov-metric" data-go="${it.go}" ${i === 0 ? 'data-first="1"' : ""}>
+        <span class="ov-metric-label">${it.label}</span>
+        <span class="ov-metric-value">${it.value}</span>
+      </button>`).join("");
+    document.querySelectorAll(".ov-metric").forEach((el) =>
+      el.addEventListener("click", () => App.navigate(el.dataset.go)));
+  }
+
+  /* 质量指标：命中 / 拒答 / 好评 / 平均解决，颜色只做小圆点 */
+  function renderQuality(s) {
+    const total = s.total_questions || 0;
+    const pct = (v) => (total ? `${Math.round((v || 0) * 100)}%` : "—");
+    const hours = s.avg_resolve_hours;
+    const resolve = hours == null ? "—" : hours >= 24 ? `${(hours / 24).toFixed(1)} 天` : `${Number(hours).toFixed(1)} 小时`;
+    const rows = [
+      { label: "回答命中率", value: pct(s.hit_rate), tone: "ok" },
+      { label: "拒答率", value: pct(s.reject_rate), tone: "warn" },
+      (() => {
+        const rated = (s.feedback_up || 0) + (s.feedback_down || 0);
+        return { label: "回答好评率", value: rated ? pct(s.feedback_up / rated) : "—", tone: "ok" };
+      })(),
+      { label: "平均解决时长", value: resolve, tone: "muted" },
+    ];
+    document.getElementById("ov-quality").innerHTML = rows.map((r) => `
+      <div class="ov-quality-item">
+        <span class="ov-dot tone-${r.tone}"></span>
+        <span class="ov-quality-label">${r.label}</span>
+        <span class="ov-quality-value">${r.value}</span>
       </div>`).join("");
   }
 
-  /* 热门问题：学生被问得最多的问题（原问去重计数），反映高频困惑点 */
-  function renderHotQuestions(s) {
-    const list = document.getElementById("hot-list");
-    if (!list) return;
-    const hot = (s.hot_questions || []).slice(0, 5);
-    if (!hot.length) {
-      list.innerHTML = `<div class="empty-state"><p>暂无提问数据</p></div>`;
+  /* 近 7 天：细柱，今天实色，其余淡色，不画坐标轴 */
+  function renderSpark(s) {
+    const spark = document.getElementById("ov-spark");
+    const note = document.getElementById("ov-today");
+    const daily = s.daily_questions || [];
+    if (note) note.textContent = `今日 ${s.today_questions || 0}`;
+    if (!daily.some((d) => d.count > 0)) {
+      spark.innerHTML = `<div class="ov-empty">最近 7 天还没有提问</div>`;
       return;
     }
-    const maxCount = Math.max(1, ...hot.map((r) => r.count));
-    list.innerHTML = hot.map((r, i) => `
-      <div class="hot-row">
-        <span class="hot-rank ${i < 3 ? "top" : ""}">${i + 1}</span>
-        <span class="hot-q" title="${Common.escapeHtml(r.question)}">${Common.escapeHtml(r.question)}</span>
-        <span class="hot-count">${r.count} 次</span>
-      </div>`).join("");
-  }
-
-  /* 文档引用排行：按被回答引用的次数排序，附死资料列表 */
-  async function loadDocUsage() {
-    const list = document.getElementById("usage-list");
-    if (!list) return;
-    try {
-      const d = await API.request("GET", "/api/stats/admin/doc-usage");
-      const ranked = d.ranked || [];
-      if (!ranked.length) {
-        list.innerHTML = `<div class="empty-state"><p>暂无引用数据，回答产生后会统计到这里</p></div>`;
-        return;
-      }
-      const top = ranked.slice(0, 5);
-      const maxCount = Math.max(1, ...top.map((r) => r.count));
-      let html = "";
-      if (top.length) {
-        html += top.map((r, i) => `
-          <div class="usage-row">
-            <span class="usage-rank ${i < 3 ? "top" : ""}">${i + 1}</span>
-            <span class="usage-name" title="${Common.escapeHtml(r.title)}">${Common.escapeHtml(r.title)}</span>
-            <span class="usage-bar"><span class="usage-bar-fill" style="width:${Math.round((r.count / maxCount) * 100)}%"></span></span>
-            <span class="usage-count">${r.count}</span>
-          </div>`).join("");
-      } else {
-        html += `<div class="muted" style="padding:8px 0 10px;font-size:13px">暂无文档被引用</div>`;
-      }
-      list.innerHTML = html;
-    } catch (err) {
-      list.innerHTML = `<div class="empty-state"><p style="color:var(--danger)">${Common.escapeHtml(err.message)}</p></div>`;
-    }
-  }
-
-  /* 折线图（带面积填充） */
-  function renderTrend(daily) {
-    const el = document.getElementById("chart-trend");
-    if (!el) return;
-    // 没数据直接收工，避免空数组上取 x 抛异常导致整页白屏
-    if (!daily.length) {
-      el.innerHTML = `<div style="padding:40px 0;text-align:center;color:var(--text-3);font-size:13px">最近 7 天还没有提问数据</div>`;
-      return;
-    }
-    const w = 640, h = 240, padL = 40, padR = 20, padT = 20, padB = 34;
-    const max = Math.max(4, ...daily.map((d) => d.count));
-    const innerW = w - padL - padR;
-    const innerH = h - padT - padB;
-    const step = innerW / Math.max(1, daily.length - 1);
-
-    const points = daily.map((d, i) => {
-      const x = padL + i * step;
-      const y = padT + innerH - (d.count / max) * innerH;
-      return { x, y, ...d };
-    });
-
-    // 网格线
-    let grid = "";
-    for (let g = 0; g <= 4; g++) {
-      const gy = padT + (innerH / 4) * g;
-      const val = Math.round(max - (max / 4) * g);
-      grid += `<line x1="${padL}" y1="${gy}" x2="${w - padR}" y2="${gy}" stroke="var(--border)" stroke-width="1"/>`;
-      grid += `<text x="${padL - 8}" y="${gy + 4}" text-anchor="end" font-size="12" fill="var(--text-3)">${val}</text>`;
-    }
-
-    // 折线 path
-    const linePath = points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
-    // 面积 path
-    const areaPath = linePath + ` L${points[points.length - 1].x.toFixed(1)},${padT + innerH} L${points[0].x.toFixed(1)},${padT + innerH} Z`;
-
-    // 数据点 + x 轴标签
-    let dots = "";
-    let labels = "";
-    const mobile = window.matchMedia("(max-width: 640px)").matches;
-    points.forEach((p, i) => {
-      dots += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4" fill="var(--card)" stroke="var(--primary)" stroke-width="2"><title>${p.date}：${p.count} 次</title></circle>`;
-      if (!mobile || i % 2 === 0 || i === points.length - 1) {
-        labels += `<text x="${p.x.toFixed(1)}" y="${h - 10}" text-anchor="middle" font-size="12" fill="var(--text-3)">${p.date.slice(5)}</text>`;
-      }
-    });
-
-    el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto" role="img" aria-label="近7天提问趋势">
-      <defs>
-        <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="var(--primary)" stop-opacity="0.35"/>
-          <stop offset="100%" stop-color="var(--primary)" stop-opacity="0.02"/>
-        </linearGradient>
-      </defs>
-      ${grid}
-      <path d="${areaPath}" fill="url(#trendFill)"/>
-      <path d="${linePath}" fill="none" stroke="var(--primary)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-      ${dots}
-      ${labels}
-    </svg>`;
-  }
-
-  /* 环形图（带右侧图例） */
-  /* 环形图：只画文档数最多的前 3 个库，其余合并成「其他」，图例不会撑爆卡片 */
-  function renderDonut(dist) {
-    const el = document.getElementById("chart-donut");
-    if (!el) return;
-    dist = (dist || []).filter((d) => d.count > 0).sort((a, b) => b.count - a.count);
-    if (!dist.length) {
-      el.innerHTML = `<div class="empty-state"><p>暂无数据</p></div>`;
-      return;
-    }
-
-    const MAX_SLICES = 3;
-    let slices = dist;
-    if (dist.length > MAX_SLICES) {
-      const head = dist.slice(0, MAX_SLICES);
-      const rest = dist.slice(MAX_SLICES);
-      slices = head.concat([{
-        name: `其他 ${rest.length} 个库`,
-        count: rest.reduce((a, d) => a + d.count, 0),
-      }]);
-    }
-
-    const colors = ["#17505e", "#b0762c", "#5d7a52", "#8a5a4a", "#4a6b8a", "#7a6a8a", "#6b675f"];
-    // 除颜色外再叠一层纹理：色觉障碍用户靠纹理也能区分扇区
-    const patterns = ["", "p-hatch", "p-dots", "p-cross", "p-hline", "p-vline", "p-diag"];
-    const donutDefs = `<defs>
-      <pattern id="p-hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-        <line x1="0" y1="0" x2="0" y2="8" stroke="rgba(255,255,255,.6)" stroke-width="2.2"/>
-      </pattern>
-      <pattern id="p-dots" width="8" height="8" patternUnits="userSpaceOnUse">
-        <circle cx="4" cy="4" r="1.5" fill="rgba(255,255,255,.65)"/>
-      </pattern>
-      <pattern id="p-cross" width="8" height="8" patternUnits="userSpaceOnUse">
-        <path d="M0 0 L8 8 M8 0 L0 8" stroke="rgba(255,255,255,.5)" stroke-width="1.3"/>
-      </pattern>
-      <pattern id="p-hline" width="8" height="8" patternUnits="userSpaceOnUse">
-        <line x1="0" y1="4" x2="8" y2="4" stroke="rgba(255,255,255,.6)" stroke-width="2.2"/>
-      </pattern>
-      <pattern id="p-vline" width="8" height="8" patternUnits="userSpaceOnUse">
-        <line x1="4" y1="0" x2="4" y2="8" stroke="rgba(255,255,255,.6)" stroke-width="2.2"/>
-      </pattern>
-      <pattern id="p-diag" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
-        <line x1="0" y1="0" x2="0" y2="9" stroke="rgba(0,0,0,.22)" stroke-width="3.5"/>
-      </pattern>
-    </defs>`;
-    const total = Math.max(1, slices.reduce((a, d) => a + d.count, 0));
-    const cx = 90, cy = 90, r = 70, innerR = 44;
-
-    let startAngle = -Math.PI / 2;
-    let arcs = "";
-    slices.forEach((d, i) => {
-      const angle = (d.count / total) * Math.PI * 2;
-      const endAngle = startAngle + angle;
-      const largeArc = angle > Math.PI ? 1 : 0;
-      const x1 = cx + r * Math.cos(startAngle);
-      const y1 = cy + r * Math.sin(startAngle);
-      const x2 = cx + r * Math.cos(endAngle);
-      const y2 = cy + r * Math.sin(endAngle);
-      const x3 = cx + innerR * Math.cos(endAngle);
-      const y3 = cy + innerR * Math.sin(endAngle);
-      const x4 = cx + innerR * Math.cos(startAngle);
-      const y4 = cy + innerR * Math.sin(startAngle);
-      const color = colors[i % colors.length];
-      const arcPath = `M${x1.toFixed(1)},${y1.toFixed(1)} A${r},${r} 0 ${largeArc} 1 ${x2.toFixed(1)},${y2.toFixed(1)} L${x3.toFixed(1)},${y3.toFixed(1)} A${innerR},${innerR} 0 ${largeArc} 0 ${x4.toFixed(1)},${y4.toFixed(1)} Z`;
-      arcs += `<path d="${arcPath}" fill="${color}"><title>${Common.escapeHtml(d.name)}：${d.count}</title></path>`;
-      const pat = patterns[i % patterns.length];
-      if (pat) arcs += `<path d="${arcPath}" fill="url(#${pat})" pointer-events="none"/>`;
-      startAngle = endAngle;
-    });
-
-    const legend = slices.map((d, i) => {
-      const pat = patterns[i % patterns.length];
-      return `
-      <div class="donut-legend-item">
-        <svg class="donut-legend-dot" viewBox="0 0 10 10" aria-hidden="true">
-          <rect width="10" height="10" rx="3" fill="${colors[i % colors.length]}"/>
-          ${pat ? `<rect width="10" height="10" rx="3" fill="url(#${pat})"/>` : ""}
-        </svg>
-        <span style="flex:1">${Common.escapeHtml(d.name)}</span>
-        <span style="color:var(--text-3);font-variant-numeric:tabular-nums">${d.count} · ${Math.round((d.count / total) * 100)}%</span>
+    const max = Math.max(...daily.map((d) => d.count));
+    const last = daily[daily.length - 1].date;
+    spark.innerHTML = `
+      <div class="ov-spark-bars">
+        ${daily.map((d) => `
+          <div class="ov-spark-col${d.date === last ? " is-today" : ""}" title="${d.date} · ${d.count} 次">
+            <span class="ov-spark-num">${d.count || ""}</span>
+            <span class="ov-spark-bar" style="height:${Math.max(6, Math.round((d.count / max) * 76))}px"></span>
+            <span class="ov-spark-date">${d.date.slice(5)}</span>
+          </div>`).join("")}
       </div>`;
-    }).join("");
+  }
 
-    el.innerHTML = `<div class="donut-wrap">
-      <svg viewBox="0 0 180 180" style="width:160px;height:160px" role="img" aria-label="各知识库文档占比">
-        ${donutDefs}${arcs}
-      </svg>
-      <div class="donut-legend" style="flex:1">${legend}</div>
-    </div>`;
+  function renderHot(s) {
+    const box = document.getElementById("ov-hot");
+    const hot = (s.hot_questions || []).slice(0, 6);
+    if (!hot.length) {
+      box.innerHTML = `<div class="ov-empty">暂无提问</div>`;
+      return;
+    }
+    box.innerHTML = hot.map((h, i) => `
+      <div class="ov-row ov-row-hot">
+        <span class="ov-rank${i < 3 ? " is-top" : ""}">${i + 1}</span>
+        <span class="ov-row-title" title="${Common.escapeHtml(h.question)}">${Common.escapeHtml(h.question)}</span>
+        <span class="ov-row-meta">${h.count} 次</span>
+      </div>`).join("");
+  }
+
+  function renderOverviewKb(items) {
+    const box = document.getElementById("ov-kb");
+    if (!items.length) {
+      box.innerHTML = `<div class="ov-empty">还没有知识库</div>`;
+    } else {
+      const rows = items.map((b) => `
+        <div class="ov-row ov-row-kb" data-go="content">
+          <span class="ov-row-title">${Common.escapeHtml(b.name)}</span>
+          <span class="ov-row-meta">${b.document_count || 0} 篇</span>
+          <span class="ov-row-meta">${b.point_count || 0} 个知识点</span>
+        </div>`).join("");
+      box.innerHTML = `<div class="ov-row ov-row-head"><span>名称</span><span>文档</span><span>知识点</span></div>` + rows;
+      box.querySelectorAll(".ov-row-kb").forEach((r) =>
+        r.addEventListener("click", () => App.navigate("content")));
+    }
+    document.getElementById("ov-kb-manage")?.addEventListener("click", () => App.navigate("content"));
+  }
+
+  function renderTodo(s) {
+    const box = document.getElementById("ov-todo");
+    const pendingDocs = Math.max(0, (s.documents || 0) - (s.documents_ready || 0));
+    const rows = [
+      { label: "待解答问题", value: s.unanswered_pending || 0, go: "unanswered" },
+      { label: "文档未解析完成", value: pendingDocs, go: "documents" },
+      { label: "学生差评", value: s.feedback_down || 0, go: "history" },
+    ];
+    box.innerHTML = rows.map((r) => `
+      <div class="ov-row ov-row-todo${r.value ? "" : " is-zero"}" data-go="${r.value ? r.go : ""}">
+        <span class="ov-row-title">${r.label}</span>
+        <span class="ov-row-value">${r.value}</span>
+      </div>`).join("");
+    box.querySelectorAll(".ov-row-todo").forEach((r) => {
+      if (r.dataset.go) r.addEventListener("click", () => App.navigate(r.dataset.go));
+    });
+  }
+
+  function renderRecent(s) {
+    const box = document.getElementById("ov-fb");
+    const recent = (s.recent_unanswered || []).slice(0, 6);
+    if (!recent.length) {
+      box.innerHTML = `<div class="ov-empty">暂无</div>`;
+    } else {
+      box.innerHTML = recent.map((r) => `
+        <div class="ov-row ov-row-fb" data-go="unanswered">
+          <span class="ov-dot${r.status === "pending" ? " is-pending" : ""}"></span>
+          <span class="ov-row-title" title="${Common.escapeHtml(r.question)}">${Common.escapeHtml(r.question)}</span>
+          <span class="ov-row-meta">${Common.fmtTime(r.created_at)}</span>
+        </div>`).join("");
+      box.querySelectorAll(".ov-row-fb").forEach((r) =>
+        r.addEventListener("click", () => App.navigate("unanswered")));
+    }
+    document.getElementById("ov-fb-all")?.addEventListener("click", () => App.navigate("unanswered"));
   }
 
   /* ==================== 用户管理 ==================== */
@@ -563,7 +428,7 @@ const AdminView = (() => {
     }
     const ok = await Common.confirmDialog({
       title: "删除用户",
-      message: `将删除用户「${Common.escapeHtml(user.username || user.account)}」及其全部会话记录，不可恢复。确认？`,
+      message: `将删除用户「${user.username || user.account}」及其全部会话记录，不可恢复。确认？`,
       okText: "删除",
     });
     if (!ok) return;
@@ -896,7 +761,7 @@ const AdminView = (() => {
     if (!base) return;
     const ok = await Common.confirmDialog({
       title: "删除知识库",
-      message: `将删除知识库「${Common.escapeHtml(base.name)}」及其下 ${base.document_count || 0} 个文档、${base.point_count || 0} 个知识点与向量索引，删除后进入回收站，30 天内可恢复。确认？`,
+      message: `将删除知识库「${base.name}」及其下 ${base.document_count || 0} 个文档、${base.point_count || 0} 个知识点与向量索引，删除后进入回收站，30 天内可恢复。确认？`,
       okText: "删除",
     });
     if (!ok) return;
@@ -931,7 +796,6 @@ const AdminView = (() => {
       <div class="card">
         <div class="row-between mb-16">
           <b>问答会话</b>
-          <button class="btn btn-sm" id="conv-refresh"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 6"/><path d="M20 4v7h-7"/></svg>刷新</button>
         </div>
         <div class="table-wrap">
           <table class="table">
@@ -958,10 +822,6 @@ const AdminView = (() => {
     document.getElementById("conv-field").addEventListener("change", (e) => {
       input.placeholder = placeholders[e.target.value] || "搜索…";
       rerun();
-    });
-    document.getElementById("conv-refresh").addEventListener("click", () => {
-      loadConversations(true).then((ok) =>
-        Common.toast(ok ? "已刷新" : "刷新失败，检查一下网络", ok ? "success" : "error"));
     });
 
     // 从「用户管理」点“看提问”跳过来时，带上搜索条件
@@ -1058,12 +918,29 @@ const AdminView = (() => {
           <button class="modal-close" data-close>×</button>
         </div>
         <div style="max-height:56vh;overflow-y:auto;display:flex;flex-direction:column;gap:10px">
-          ${msgs.length ? msgs.map((m) => `
+          ${msgs.length ? msgs.map((m) => {
+            // U7：管理员要能追溯「答案引用哪份资料」「学生对这条什么评价」
+            const srcs = Array.isArray(m.sources) ? m.sources : [];
+            const fbLabel = m.feedback === "up" ? "👍 有帮助" : m.feedback === "down" ? "👎 没帮助" : "";
+            const reason = m.feedback === "down" && m.feedback_reason
+              ? ` · 原因：${Common.escapeHtml(m.feedback_reason)}`
+              : "";
+            const srcHtml = srcs.length ? `
+              <div class="admin-msg-sources">${srcs.map((s) => {
+                const name = s.filename || s.title || s.course || "来源";
+                const docId = s.doc_id ?? s.document_id;
+                return docId !== undefined && docId !== null && docId !== ""
+                  ? `<a class="src-chip" href="/api/documents/${encodeURIComponent(docId)}/file" target="_blank" rel="noopener" title="打开原文">${Common.escapeHtml(name)}</a>`
+                  : `<span class="src-chip">${Common.escapeHtml(name)}</span>`;
+              }).join("")}</div>` : "";
+            return `
             <div class="msg-row ${m.role === "user" ? "" : "msg-assistant"}">
               <div class="msg-role">${m.role === "user" ? "提问" : "助教"}</div>
               <div class="${m.role === "assistant" ? "msg-content md-body" : "msg-content"}">${m.role === "assistant" ? Markdown.render(m.content) : Common.escapeHtml(m.content)}</div>
-              <div class="muted" style="font-size:12px;margin-top:6px">${Common.fmtTime(m.created_at)}${m.interrupted ? " · 生成被中断" : ""}</div>
-            </div>`).join("") : `<div class="empty-state"><p>该会话暂无消息</p></div>`}
+              ${srcHtml}
+              <div class="muted" style="font-size:12px;margin-top:6px">${Common.fmtTime(m.created_at)}${m.interrupted ? " · 生成被中断" : ""}${fbLabel ? ` · ${fbLabel}${reason}` : ""}${m.rejected ? " · 判定为拒答" : ""}</div>
+            </div>`;
+          }).join("") : `<div class="empty-state"><p>该会话暂无消息</p></div>`}
         </div>
         <div class="modal-footer"><button class="btn" data-close>关闭</button></div>
       `, { size: "modal-lg", onOpen: (box) => {
@@ -1075,7 +952,7 @@ const AdminView = (() => {
   async function removeConversation(id, title) {
     const ok = await Common.confirmDialog({
       title: "删除会话",
-      message: `将删除会话「${Common.escapeHtml(title || "#" + id)}」及其全部消息，不可恢复。确认？`,
+      message: `将删除会话「${title || "#" + id}」及其全部消息，不可恢复。确认？`,
       okText: "删除",
     });
     if (!ok) return;

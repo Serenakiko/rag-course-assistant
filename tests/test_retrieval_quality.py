@@ -7,6 +7,7 @@ from pathlib import Path
 
 os.environ.setdefault("JWT_SECRET", "x" * 64)
 
+import pytest
 from langchain_core.documents import Document
 
 
@@ -149,6 +150,82 @@ def test_vector_add_accepts_explicit_knowledge_base_identity(monkeypatch):
     assert captured[0][1].metadata["knowledge_base_id"] == "kb-restored"
 
 
+def test_long_knowledge_point_is_split_into_chunked_vectors(monkeypatch):
+    """两万字的知识点不能压成一个向量：超过模型输入上限的部分会被静默截断。"""
+    from backend.services import vector_store
+
+    captured = []
+
+    class FakeStore:
+        def add_documents(self, docs, ids):
+            captured.extend(zip(ids, docs, strict=False))
+
+    monkeypatch.setattr(vector_store, "get_vector_store", lambda: FakeStore())
+    monkeypatch.setattr(vector_store, "_next_version", lambda *_args: 3)
+    monkeypatch.setattr(vector_store, "_delete_point_versions", lambda *_args, **_kwargs: True)
+
+    long_content = "进程是资源分配的基本单位，线程是 CPU 调度的基本单位。" * 200
+    vector_store.add_knowledge_point(7, "进程与线程", long_content, "操作系统", "")
+
+    assert len(captured) > 1, "长知识点应切成多个分块向量"
+    ids = [vector_id for vector_id, _doc in captured]
+    assert ids[0] == "point-7-v3-c0"
+    assert all(vector_store._vector_id_version(i) == "3" for i in ids)
+    assert [doc.metadata["chunk_index"] for _i, doc in captured] == list(range(len(captured)))
+    # 每块都要带标题作上下文，否则单独一块看不出讲的是哪个知识点
+    assert all("进程与线程" in doc.page_content for _i, doc in captured)
+
+
+def test_vector_id_version_parses_chunked_ids():
+    from backend.services.vector_store import _vector_id_version
+
+    assert _vector_id_version("point-7-v3-c0") == "3"
+    assert _vector_id_version("point-7-v12") == "12"
+    assert _vector_id_version("doc-1-4-v2") == "2"
+    assert _vector_id_version("no-version-here") is None
+
+
+def test_vector_search_caps_chunks_per_source(monkeypatch):
+    """同一份资料的多块不能把 top_k 全占满，其它资料至少留出位置。"""
+    from backend.services import vector_store
+
+    def point_doc(pid, idx, text):
+        return Document(
+            page_content=text,
+            metadata={
+                "source_type": "knowledge_point",
+                "course": "操作系统",
+                "knowledge_base_id": "kb-os",
+                "title": f"知识点 {pid}",
+                "point_id": str(pid),
+                "chunk_index": idx,
+            },
+        )
+
+    rows = [
+        (point_doc(1, 0, "进程 进程 进程 甲"), 0.30),
+        (point_doc(1, 1, "进程 进程 进程 乙"), 0.32),
+        (point_doc(1, 2, "进程 进程 进程 丙"), 0.34),
+        (point_doc(2, 0, "线程 线程 线程 丁"), 0.40),
+    ]
+
+    class FakeStore:
+        def similarity_search_with_score(self, *_args, **_kwargs):
+            return rows
+
+    monkeypatch.setattr(vector_store, "get_vector_store", lambda: FakeStore())
+    monkeypatch.setattr(
+        vector_store, "_active_vector_scope", lambda _courses: ({"kb-os"}, set())
+    )
+    monkeypatch.setattr(vector_store.settings, "RERANK_ENABLED", False)
+
+    result = vector_store.search("进程", top_k=4)
+    point_ids = [doc.metadata["point_id"] for doc, _score in result]
+
+    assert point_ids.count("1") == vector_store.MAX_CHUNKS_PER_SOURCE
+    assert "2" in point_ids
+
+
 def test_format_sources_backfills_legacy_page_and_section():
     from backend.services.rag_service import _format_sources
 
@@ -212,6 +289,8 @@ def test_pdf_extraction_summary_reports_page_quality():
 
 def test_student_question_dataset_has_unique_typed_labels():
     path = Path(__file__).resolve().parent.parent / "evaluation" / "student_questions.json"
+    if not path.is_file():
+        pytest.skip("缺少 evaluation/student_questions.json（只做部分拷贝时不会带上评测集）")
     items = json.loads(path.read_text(encoding="utf-8"))
 
     assert len(items) >= 15

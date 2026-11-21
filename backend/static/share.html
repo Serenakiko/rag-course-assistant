@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <title>分享内容 · 智答系统</title>
+  <script src="/static/js/theme-boot.js?v=1"></script>
+  <link rel="stylesheet" href="/static/css/common.css?v=30">
+  <style>
+    /* 独立只读页：不引入 app.css 的侧栏/工作台布局，只复用设计变量 */
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text-1);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      line-height: 1.65;
+    }
+    .share-shell { max-width: 880px; margin: 0 auto; padding: 20px 16px 56px; }
+    .share-header {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; padding: 6px 2px 16px;
+    }
+    .share-brand { display: flex; align-items: center; gap: 9px; font-weight: 700; font-size: 15px; }
+    .share-brand img { width: 24px; height: 24px; border-radius: var(--radius-sm); }
+    .share-header-actions { display: flex; align-items: center; gap: 8px; }
+    .share-theme-btn, .share-home-btn {
+      border: 1px solid var(--border); background: var(--card); color: var(--text-2);
+      border-radius: var(--radius); height: 32px; padding: 0 10px; font-size: 13px;
+      cursor: pointer; text-decoration: none; display: inline-flex; align-items: center;
+    }
+    .share-theme-btn:hover, .share-home-btn:hover { background: var(--surface-2); color: var(--text-1); }
+    .share-card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); box-shadow: var(--shadow);
+      padding: 22px 24px;
+    }
+    .share-notice {
+      margin-bottom: 14px; padding: 9px 13px; border-radius: var(--radius);
+      background: var(--notice-bg); border: 1px solid var(--notice-border);
+      color: var(--notice-text); font-size: 13px;
+    }
+    .share-title { margin: 0 0 6px; font-size: 21px; line-height: 1.35; word-break: break-word; }
+    .share-sub { color: var(--text-3); font-size: 13px; }
+    .share-divider { height: 1px; background: var(--border); margin: 18px 0; border: 0; }
+    .share-msg { padding: 14px 0; }
+    .share-msg + .share-msg { border-top: 1px dashed var(--border); }
+    .share-msg-role {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12.5px; font-weight: 700; color: var(--text-2); margin-bottom: 7px;
+    }
+    .share-msg-role .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--primary); }
+    .share-msg-role.assistant .dot { background: var(--accent); }
+    .share-msg-time { font-size: 12px; color: var(--text-3); font-weight: 400; margin-left: 4px; }
+    .share-msg-body { font-size: 15px; word-break: break-word; }
+    .share-msg-body p { margin: 0 0 10px; }
+    .share-msg-body p:last-child { margin-bottom: 0; }
+    .share-msg-body pre {
+      background: #1d1b18; color: #e6e3dc; padding: 12px 14px; border-radius: var(--radius);
+      overflow-x: auto; font-size: 13px;
+    }
+    .share-msg-body code {
+      background: var(--surface-3); padding: 1px 5px; border-radius: var(--radius-sm);
+      font-family: Consolas, "Courier New", monospace; font-size: .92em;
+    }
+    .share-msg-body pre code { background: none; padding: 0; }
+    .share-sources { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+    .share-sources summary {
+      cursor: pointer; font-size: 13px; font-weight: 600; color: var(--text-2);
+      list-style: none; user-select: none;
+    }
+    .share-sources summary::-webkit-details-marker { display: none; }
+    .share-sources summary::before { content: "▸ "; color: var(--text-3); }
+    .share-sources[open] summary::before { content: "▾ "; }
+    .share-source { margin: 9px 0 0; font-size: 13px; color: var(--text-2); }
+    .share-source b { color: var(--text-1); }
+    .share-source .quote {
+      margin: 5px 0 0; padding-left: 10px; border-left: 2px solid var(--border);
+      color: var(--text-3);
+    }
+    .share-point { padding: 4px 0 18px; }
+    .share-point + .share-point { border-top: 1px dashed var(--border); padding-top: 18px; }
+    .share-point h2 { margin: 0 0 6px; font-size: 17px; }
+    .share-point-meta { font-size: 12.5px; color: var(--text-3); margin-bottom: 10px; }
+    .share-loading { text-align: center; color: var(--text-3); padding: 48px 0; }
+    .share-error { text-align: center; padding: 42px 16px; }
+    .share-error h2 { margin: 0 0 8px; font-size: 18px; }
+    .share-error p { color: var(--text-3); margin: 0 0 18px; }
+    .share-empty { color: var(--text-3); text-align: center; padding: 32px 0; }
+    .share-tag {
+      display: inline-block; padding: 1px 8px; margin: 0 5px 4px 0;
+      border-radius: var(--radius-pill); background: var(--surface-2);
+      color: var(--text-2); font-size: 12px;
+    }
+    @media (max-width: 640px) {
+      .share-shell { padding: 12px 10px 40px; }
+      .share-card { padding: 16px 14px; border-radius: var(--radius); }
+      .share-title { font-size: 18px; }
+      .share-msg-body { font-size: 14.5px; }
+      .share-home-btn .home-text { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="share-shell">
+    <header class="share-header">
+      <div class="share-brand">
+        <img src="/static/img/logo.svg" alt="" width="24" height="24">
+        <span>智答系统</span>
+      </div>
+      <div class="share-header-actions">
+        <button type="button" class="share-theme-btn" id="share-theme" aria-label="切换主题" title="切换主题">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="M4.93 4.93l1.41 1.41"/><path d="M17.66 17.66l1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="M6.34 17.66l-1.41 1.41"/><path d="M19.07 4.93l-1.41 1.41"/></svg>
+        </button>
+        <a class="share-home-btn" href="/"><span class="home-text">进入系统&nbsp;</span>→</a>
+      </div>
+    </header>
+
+    <main id="share-root" aria-live="polite">
+      <div class="share-card"><div class="share-loading">正在加载分享内容…</div></div>
+    </main>
+
+    <noscript>
+      <div class="share-card" style="margin-top:12px">需要启用 JavaScript 才能查看分享内容。</div>
+    </noscript>
+  </div>
+
+  <script src="/static/js/markdown.js?v=1"></script>
+  <script src="/static/js/share.js?v=1"></script>
+</body>
+</html>

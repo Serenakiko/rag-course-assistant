@@ -2,20 +2,24 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+import jwt
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..constants import SYSTEM_ADMIN_ACCOUNT
 from ..database import get_db
-from ..deps import get_current_user
-from ..models import User
+from ..deps import ACCESS_TOKEN_COOKIE, get_current_user
+from ..models import RevokedToken, User, utcnow
 from ..schemas import (
     ChangePasswordRequest,
     LoginRequest,
@@ -27,12 +31,55 @@ from ..schemas import (
 from ..security import (
     _needs_upgrade,
     create_access_token,
+    decode_token,
     hash_password,
     verify_password,
 )
 from ..services.admin_security import remove_initial_password
 
 router = APIRouter()
+
+
+def _request_is_https(request: Request) -> bool:
+    """判断本次请求是否来自 https，决定 Cookie 要不要带 Secure。
+
+    反代（Nginx/Caddy）终止 TLS 后，后端看到的是 http，request.url.scheme
+    永远是 http —— 直接用它判断会让线上 Cookie 丢掉 Secure。所以优先信任
+    反代写入的 X-Forwarded-Proto，其次才是原始 scheme。
+    COOKIE_SECURE 显式配置（"true"/"false"）优先于自动判断，方便自建反代
+    没传这个头时手动兜底。
+    """
+    override = (settings.COOKIE_SECURE or "").strip().lower()
+    if override in ("1", "true", "yes"):
+        return True
+    if override in ("0", "false", "no"):
+        return False
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    if proto:
+        return proto == "https"
+    return request.url.scheme == "https"
+
+
+def _set_auth_cookie(response: Response, token: str, request: Request) -> None:
+    """把 JWT 写入 HttpOnly 会话 Cookie。
+
+    CSRF 防护说明：这里不额外引入 CSRF token，而是依赖
+    1) SameSite=Lax（跨站 POST 不会带上 Cookie）；
+    2) 所有写接口都要求 Content-Type: application/json（简单表单跨站提交无法伪造）；
+    3) 前后端同源部署，静态页面与 API 使用同一站点。
+    本地 http 部署不设置 Secure；https 部署按 X-Forwarded-Proto / scheme 自动加上，
+    也可以用 COOKIE_SECURE 显式覆盖（反代没传头的情况）。
+    """
+    response.set_cookie(
+        key=ACCESS_TOKEN_COOKIE,
+        value=token,
+        max_age=settings.JWT_EXPIRE_HOURS * 3600,
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=_request_is_https(request),
+    )
+
 
 AVATAR_DIR = Path(__file__).resolve().parent.parent / "static" / "avatars"
 AVATAR_EXTS = {"png", "jpg", "jpeg", "gif", "webp"}
@@ -56,6 +103,54 @@ def _avatar_file(avatar: str, user_id: int) -> Path | None:
     return AVATAR_DIR / name
 
 
+_AVATAR_PATH_PREFIX = "/static/avatars/"
+# 只放行单个 emoji（含 ZWJ 组合、肤色、键帽、旗帜），不放行任意文本/HTML
+_EMOJI_RE = re.compile(
+    "^(?:"
+    "[0-9#*]\ufe0f?\u20e3"
+    "|[\U0001F1E6-\U0001F1FF]{2}"
+    "|[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\u2190-\u21FF"
+    "\u2300-\u23FF\u00A9\u00AE\u2122\u203C\u2049\u2139\u3030\u303D\u3297\u3299]"
+    "(?:\ufe0f|[\U0001F3FB-\U0001F3FF])*"
+    ")(?:\u200d"
+    "[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\u2190-\u21FF"
+    "\u2300-\u23FF\u00A9\u00AE\u2122\u203C\u2049\u2139\u3030\u303D\u3297\u3299]"
+    "(?:\ufe0f|[\U0001F3FB-\U0001F3FF])*)*$"
+)
+
+
+def _validate_avatar(avatar: str, user_id: int) -> str:
+    """头像白名单：空 / 单个 emoji / 本站上传目录下**自己的**头像文件名。
+
+    以前可直接写入任意文本（最多 255 字符），前端若漏转义就是一个存储型
+    XSS 入口；顺手挡住 `../` 之类跑出头像目录的路径。
+    上传文件名带 `u{id}_` 前缀，这里必须对得上当前用户，否则填别人的头像
+    路径就能把别人的图挂到自己资料上（读取他人上传内容）。
+    """
+    value = (avatar or "").strip()
+    if not value:
+        return ""
+    if len(value) > 255:
+        raise HTTPException(status_code=400, detail="头像最多 255 个字符")
+    if value.startswith(_AVATAR_PATH_PREFIX):
+        name = value[len(_AVATAR_PATH_PREFIX):]
+        if (
+            not name
+            or len(name) > 200
+            or "/" in name
+            or "\\" in name
+            or name.startswith(".")
+            or "\x00" in name
+        ):
+            raise HTTPException(status_code=400, detail="头像路径不合法")
+        if not name.startswith(f"u{user_id}_"):
+            raise HTTPException(status_code=400, detail="不能使用其他用户的头像")
+        return value
+    if len(value) <= 32 and _EMOJI_RE.fullmatch(value):
+        return value
+    raise HTTPException(status_code=400, detail="头像只支持单个 emoji 或站内上传的头像")
+
+
 def _delete_avatar_file(avatar: str, user_id: int) -> None:
     """删除被替换下来的头像文件；失败不影响主流程。"""
     path = _avatar_file(avatar, user_id)
@@ -75,7 +170,7 @@ def _looks_like_image(data: bytes, ext: str) -> bool:
 
 
 # ---------- 登录失败限流 ----------
-# 账号是 8 位数字、密码下限 6 位，不设限的话可以慢慢试出来。
+# 账号是 8 位数字、密码下限 8 位，不设限的话可以慢慢试出来。
 # 按「IP + 账号」记失败时间戳，窗口内失败 10 次就锁到窗口结束；成功登录即清零。
 _LOGIN_WINDOW = 600.0
 _LOGIN_MAX_FAILS = 10
@@ -250,6 +345,7 @@ def login(
     payload: LoginRequest,
     request: Request,
     db: Session = Depends(get_db),
+    response: Response = None,
 ) -> LoginResponse:
     client = _client_ip(request)
     key = _login_key(request, payload.account)
@@ -267,8 +363,10 @@ def login(
         _note_fail(key)
         _note_ip_fail(client)
         raise HTTPException(status_code=401, detail="账号或密码错误")
+    # 只清「IP + 账号」这一格：成功登一个自己的号就把 IP 计数清掉，
+    # 等于给了攻击者「试 10 次 → 登自己的合法号重置 → 再试 10 次」的绕道。
+    # IP 维度只在窗口过期时自然衰减。
     _clear_fails(key)
-    _clear_ip_fails(client)
     # 旧哈希（低迭代次数）登录成功后自动升级到当前强度，静默重哈希
     if _needs_upgrade(user.password_hash):
         user.password_hash = hash_password(payload.password)
@@ -276,7 +374,15 @@ def login(
     token = create_access_token(
         user.id, user.account, user.role, user.token_version or 0
     )
-    return LoginResponse(token=token, user=UserOut.model_validate(user))
+    # 浏览器会话走 HttpOnly Cookie；响应体同时保留 token/access_token，
+    # 兼容尚未升级、仍从响应里取 token 的旧客户端。
+    if response is not None:
+        _set_auth_cookie(response, token, request)
+    return LoginResponse(
+        token=token,
+        access_token=token,
+        user=UserOut.model_validate(user),
+    )
 
 
 @router.get("/me", response_model=UserOut, summary="当前用户信息")
@@ -284,11 +390,48 @@ def me(user: User = Depends(get_current_user)) -> User:
     return user
 
 
+@router.post("/logout", summary="退出登录")
+def logout(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+) -> dict:
+    """删除会话 Cookie，并把当前令牌的 jti 记入吊销黑名单。
+
+    幂等：未登录、Cookie 已过期、令牌损坏时调用同样返回 200，前端可以无脑调用。
+    只吊销这一枚令牌（jti），同一用户的其它设备不会被动下线；改密仍走 token_version。
+    """
+    token = request.cookies.get(ACCESS_TOKEN_COOKIE)
+    if not token:
+        header = request.headers.get("Authorization", "")
+        if header.lower().startswith("bearer "):
+            token = header[7:].strip()
+    if token:
+        try:
+            payload = decode_token(token)
+        except jwt.PyJWTError:
+            payload = {}
+        jti = payload.get("jti")
+        exp = payload.get("exp")
+        if jti and exp:
+            try:
+                expires_at = datetime.fromtimestamp(int(exp), timezone.utc)
+                db.merge(RevokedToken(jti=str(jti), expires_at=expires_at))
+                db.query(RevokedToken).filter(RevokedToken.expires_at < utcnow()).delete()
+                db.commit()
+            except Exception:  # noqa: BLE001
+                db.rollback()
+    response.delete_cookie(ACCESS_TOKEN_COOKIE, path="/")
+    return {"ok": True}
+
+
 @router.post("/change-password", summary="修改密码")
 def change_password(
     payload: ChangePasswordRequest,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    request: Request = None,
+    response: Response = None,
 ) -> dict:
     if not verify_password(payload.old_password, user.password_hash):
         raise HTTPException(status_code=400, detail="原密码错误")
@@ -300,6 +443,13 @@ def change_password(
     user.token_version = int(user.token_version or 0) + 1
     db.commit()
     remove_initial_password(user.account)
+    # 旧 Cookie 里的 token 已因 token_version 变化失效；签发新 token 写回 Cookie，
+    # 让改密后的当前会话保持可用（前端仍可选择跳转登录页重新登录）。
+    new_token = create_access_token(
+        user.id, user.account, user.role, user.token_version or 0
+    )
+    if response is not None and request is not None:
+        _set_auth_cookie(response, new_token, request)
     return {"ok": True}
 
 
@@ -333,7 +483,7 @@ def update_profile(
         user.username = new_username
     old_avatar = user.avatar
     if payload.avatar is not None:
-        user.avatar = payload.avatar.strip()
+        user.avatar = _validate_avatar(payload.avatar, user.id)
     try:
         db.commit()
     except IntegrityError:

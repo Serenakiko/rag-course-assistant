@@ -3,15 +3,25 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    field_validator,
+)
 
 
 # ---------- 认证 ----------
 class RegisterRequest(BaseModel):
     # 账号固定 8 位数字（前端同规则）
     account: str = Field(min_length=8, max_length=8, pattern=r"^\d{8}$")
-    password: str = Field(min_length=6, max_length=64)
+    # 与改密、管理员重置保持同一条下限（旧版这里是 6，导致注册能用的密码
+    # 改密时反而被拒）
+    password: str = Field(min_length=8, max_length=64)
     username: str = Field(default="", max_length=32)
     role: str = Field(default="student", pattern=r"^student$")
 
@@ -35,6 +45,9 @@ class UserOut(BaseModel):
 
 class LoginResponse(BaseModel):
     token: str
+    # HttpOnly Cookie 之外的兼容字段：旧客户端仍从响应体取 token。
+    access_token: str = ""
+    token_type: str = "bearer"
     user: UserOut
 
 
@@ -74,6 +87,7 @@ class MessageOut(BaseModel):
     sources: list = Field(default_factory=list)
     interrupted: bool = False
     feedback: str = ""
+    feedback_reason: str = ""
     created_at: datetime
 
     @field_validator("sources", mode="before")
@@ -113,9 +127,16 @@ class RenameConversationRequest(BaseModel):
 
 
 class FeedbackRequest(BaseModel):
-    """学生对回答的评价：up=有帮助 / down=没帮助 / 空串=取消评价。"""
+    """学生对回答的评价：up=有帮助 / down=没帮助 / 空串=取消评价。
 
-    feedback: str = Field(pattern=r"^(up|down|)$")
+    新契约字段是 value，旧前端仍在发 feedback，两种写法都接受。
+    reason 由接口截断到 200 字。
+    """
+
+    value: Literal["up", "down", ""] = Field(
+        default="", validation_alias=AliasChoices("value", "feedback")
+    )
+    reason: str = Field(default="", max_length=2000)
 
 
 # ---------- 知识点 ----------
@@ -198,7 +219,7 @@ class DocumentDetailOut(DocumentOut):
 class AdminUserUpdate(BaseModel):
     role: str | None = Field(default=None, pattern=r"^(student|admin)$")
     username: str | None = Field(default=None, max_length=32)
-    new_password: str | None = Field(default=None, min_length=6, max_length=64)
+    new_password: str | None = Field(default=None, min_length=8, max_length=64)
 
 
 # ---------- 统计 ----------
@@ -228,3 +249,71 @@ class StatsOut(BaseModel):
     feedback_up: int = 0               # 学生点「有帮助」次数
     feedback_down: int = 0             # 学生点「没帮助」次数
     hot_questions: list[dict] = []     # [{question, count}] 高频提问 Top N（学生原问去重计数）
+
+
+# ---------- 站内通知 ----------
+class NotificationCreateRequest(BaseModel):
+    """管理员手动发一条 system 通知。"""
+
+    user_id: int
+    title: str = Field(min_length=1, max_length=200)
+    body: str = Field(default="", max_length=2000)
+    link: str = Field(default="", max_length=300)
+
+
+# ---------- 课程 / 班级 / 成员 ----------
+# 这些接口原本直接收裸 dict（P1-20）：类型错误要到 int() 转换才炸成 500，
+# 超长字段会一路写进数据库。改成模型后由 FastAPI 在入口统一校验。
+class SemesterCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    start_date: str = Field(default="", max_length=32)
+    end_date: str = Field(default="", max_length=32)
+    is_active: bool = False
+
+
+class SemesterUpdateRequest(BaseModel):
+    """部分更新：只有请求里出现过的字段才会被写入（见 model_fields_set）。"""
+
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    start_date: str | None = Field(default=None, max_length=32)
+    end_date: str | None = Field(default=None, max_length=32)
+    is_active: bool | None = None
+
+
+class CourseCreateRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=32)
+    name: str = Field(min_length=1, max_length=128)
+    semester_id: int | None = None
+    knowledge_base_id: int | None = None
+    description: str = Field(default="", max_length=2000)
+
+
+class CourseUpdateRequest(BaseModel):
+    code: str | None = Field(default=None, min_length=1, max_length=32)
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    semester_id: int | None = None
+    knowledge_base_id: int | None = None
+    description: str | None = Field(default=None, max_length=2000)
+
+
+class ClassCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    teacher_id: int | None = None
+
+
+class ClassUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    teacher_id: int | None = None
+
+
+class ClassMemberAddRequest(BaseModel):
+    account: str | None = Field(default=None, pattern=r"^\d{8}$")
+    user_id: int | None = None
+
+
+# ---------- 分享 ----------
+class ShareCreateRequest(BaseModel):
+    kind: Literal["conversation", "knowledge_base"]
+    # StrictInt：布尔值不再被当作 0/1 放行
+    id: StrictInt
+    expires_hours: StrictInt = 72

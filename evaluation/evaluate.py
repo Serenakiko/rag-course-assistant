@@ -114,6 +114,8 @@ def evaluate(
     by_category: dict[str, dict[str, float]] = defaultdict(
         lambda: {
             "total": 0,
+            "answerable": 0,
+            "unmatched": 0,
             "recall_hits": 0,
             "mrr_sum": 0.0,
             "false_reject": 0,
@@ -127,7 +129,12 @@ def evaluate(
         expect_unmatched = bool(item.get("expect_unmatched"))
         category = item.get("category") or ("unanswerable" if expect_unmatched else "answerable")
         docs = search(
-            question, top_k=top_k, source_types=source_types
+            question,
+            top_k=top_k,
+            source_types=source_types,
+            # 与生产口径一致：线上检索按学生所选课程过滤，评测也必须按题目标注的
+            # 课程过滤，否则全库检索会把「本课没讲、别的课讲了」记成命中。
+            courses=[item["course"]] if item.get("course") else None,
         )
         top_sim = _top_similarity(docs)
         stats = by_category[category]
@@ -135,6 +142,7 @@ def evaluate(
 
         if expect_unmatched:
             unmatched_total += 1
+            stats["unmatched"] += 1
             refused = top_sim < threshold
             if refused:
                 refusal_correct += 1
@@ -152,6 +160,7 @@ def evaluate(
             continue
 
         answerable_total += 1
+        stats["answerable"] += 1
         hit_rank = None
         for rank, (doc, _score) in enumerate(docs, start=1):
             if matches_relevant(doc, item):
@@ -170,8 +179,14 @@ def evaluate(
 
         top_course = docs[0][0].metadata.get("course", "") if docs else ""
         expected_course = item.get("course") or ""
-        if expected_course and top_course and top_course != expected_course:
-            cross_course += 1
+        # 跨课程误召：返回结果里出现任何非本题课程的资料都算（旧实现只看 top1，
+        # 漏掉 top2~top5 混进来的别的课程资料）。
+        if expected_course:
+            returned_courses = {
+                doc.metadata.get("course", "") for doc, _score in docs
+            } - {""}
+            if any(course != expected_course for course in returned_courses):
+                cross_course += 1
 
         details.append(
             {
@@ -194,12 +209,22 @@ def evaluate(
     category_summary: dict[str, dict[str, float]] = {}
     for name, s in by_category.items():
         total = int(s["total"])
+        answerable = int(s["answerable"])
+        unmatched = int(s["unmatched"])
+        # 分类指标必须按分类自己的分母算：旧实现用 total（含不可答题），
+        # 只要某类混了不可答题，recall / 误拒率就会被系统性压低。
         category_summary[name] = {
             "total": total,
-            "recall@k": round(s["recall_hits"] / total, 4) if total else 0.0,
-            "mrr": round(s["mrr_sum"] / total, 4) if total else 0.0,
-            "false_reject_rate": round(s["false_reject"] / total, 4) if total else 0.0,
-            "refusal_accuracy": round(s["refusal_correct"] / total, 4) if total else 0.0,
+            "answerable": answerable,
+            "unmatched": unmatched,
+            "recall@k": round(s["recall_hits"] / answerable, 4) if answerable else 0.0,
+            "mrr": round(s["mrr_sum"] / answerable, 4) if answerable else 0.0,
+            "false_reject_rate": (
+                round(s["false_reject"] / answerable, 4) if answerable else 0.0
+            ),
+            "refusal_accuracy": (
+                round(s["refusal_correct"] / unmatched, 4) if unmatched else 0.0
+            ),
         }
 
     return {
@@ -239,7 +264,10 @@ def threshold_scan(
     cached: list[tuple[float, bool]] = []
     for item in golden:
         docs = search(
-            item["question"], top_k=top_k, source_types=source_types
+            item["question"],
+            top_k=top_k,
+            source_types=source_types,
+            courses=[item["course"]] if item.get("course") else None,
         )
         cached.append((_top_similarity(docs), bool(item.get("expect_unmatched"))))
 

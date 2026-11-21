@@ -253,8 +253,12 @@ def test_can_answer_timeout_is_error_not_unanswerable(monkeypatch):
     assert result is rag_service.Answerability.ERROR
 
 
-def test_answerability_timeout_fails_closed(monkeypatch):
-    """可答性判定超时必须拒绝生成，避免 near-miss 问题被模型编造。"""
+def test_answerability_timeout_degrades_to_generation(monkeypatch):
+    """可答性判定超时只降级为直接生成，不能把可答问题变成失败页。
+
+    判定器是「增强」而不是「闸门」：ERROR 表示判定不可用，与 UNANSWERABLE
+    （资料确实没讲）是两件事，.env.example 也承诺超时会降级。
+    """
     from langchain_core.documents import Document
 
     from backend.services import rag_service
@@ -270,6 +274,12 @@ def test_answerability_timeout_fails_closed(monkeypatch):
         return rag_service.Answerability.ERROR
 
     monkeypatch.setattr(rag_service, "can_answer", _timeout)
+
+    async def _fake_stream(*_a, **_k):
+        yield "进程是资源分配单位。"
+
+    monkeypatch.setattr(rag_service, "_generate_stream", _fake_stream)
+
     async def run():
         events = []
         async for event in rag_service._stream_answer_locked(
@@ -279,11 +289,11 @@ def test_answerability_timeout_fails_closed(monkeypatch):
         return events
 
     events = asyncio.run(run())
-    errors = [event for event in events if event["type"] == "error"]
-    assert len(errors) == 1
-    assert "重试" in errors[0]["message"]
+    assert all(event["type"] != "error" for event in events)
     assert all(event["type"] != "unmatched" for event in events)
-    assert all(event["type"] != "sources" for event in events)
+    phases = [e for e in events if e["type"] == "phase" and e["phase"] == "answerability"]
+    assert any(p["status"] == "degraded" for p in phases)
+    assert any(event["type"] == "sources" for event in events)
 
 
 def test_answerability_oom_fails_with_resource_message(monkeypatch):
@@ -753,3 +763,157 @@ def test_snapshot_compensation_keeps_trash_when_any_restore_fails(
     assert original_a.read_bytes() == b"A"
     assert not original_b.exists()
     assert archived_b.exists()
+
+
+def test_build_messages_gives_spare_budget_to_docs():
+    """首轮没有历史时，资料应拿到全部剩余额度。
+
+    旧实现固定把 40% 分给 history，默认配置下 5 条 800 字资料只有约 2 条
+    进得去，而 sources 仍返回 5 条 —— 模型没读过的 [3][4][5] 也会被列为来源。
+    """
+    from langchain_core.documents import Document
+
+    from backend.services import rag_service
+
+    docs = [
+        (
+            Document(
+                page_content="进" * 800,
+                metadata={"course": "操作系统", "title": f"资料{i}"},
+            ),
+            0.9 - i * 0.01,
+        )
+        for i in range(5)
+    ]
+    context, history, kept = rag_service._build_messages(
+        rag_service.SYSTEM_PROMPT, docs, "进程和线程有什么区别？", []
+    )
+
+    assert history == []
+    assert len(kept) >= 3, "首轮应至少放下 3 条资料，而不是旧的约 2 条"
+    assert f"[{len(kept)}]" in context
+    # 角标编号必须连续到 kept 的最后一条，不能出现 context 里没有的来源
+    assert f"[{len(kept) + 1}]" not in context
+    total = rag_service._est_tokens(context) + rag_service._est_tokens(
+        rag_service.SYSTEM_PROMPT
+    )
+    assert total <= rag_service._context_budget()
+
+
+def test_chunker_keeps_sentence_end_punctuation():
+    """切分后的块要保留句末标点（keep_separator="end"），否则句子边界和语气都没了。"""
+    from backend.services.chunker import split_text
+
+    text = "课程助手要先把问题改写清楚。" + "这一句用于把文本撑到超过一块的长度。" * 200
+    chunks = split_text(text)
+    assert len(chunks) > 1
+    # 除最后一块外，每块都应以句子结束符收尾
+    for chunk in chunks[:-1]:
+        assert chunk.rstrip().endswith(("。", "！", "？", "；", "\n")), chunk[-20:]
+
+
+def test_csv_parse_repeats_header_in_every_block(tmp_path):
+    """CSV 每块都要带表头，否则切开后单独一块看不出列名。"""
+    from backend.services.document_parser import _parse_csv
+
+    rows = [f"{i},同学{i},{60 + i % 40}" for i in range(1, 46)]
+    path = tmp_path / "scores.csv"
+    path.write_text("学号,姓名,分数\n" + "\n".join(rows) + "\n", encoding="utf-8")
+
+    text = _parse_csv(path)
+    blocks = text.split("\n\n")
+    assert len(blocks) == 3, "45 行数据按每块 20 行应切成 3 块"
+    assert all(b.startswith("学号 | 姓名 | 分数") for b in blocks)
+
+
+def test_batched_embeddings_splits_batches_and_retries(monkeypatch):
+    """embedding 分批提交 + 单批失败重试，不能把整份文档一次塞给模型。"""
+    from langchain_core.embeddings import Embeddings
+
+    from backend.services.embedding_service import BatchedEmbeddings
+
+    class Flaky(Embeddings):
+        def __init__(self):
+            self.calls: list[int] = []
+            self.failed_once = False
+
+        def embed_documents(self, texts):
+            self.calls.append(len(texts))
+            if not self.failed_once:
+                self.failed_once = True
+                raise RuntimeError("连接被重置")
+            return [[float(len(t))] for t in texts]
+
+        def embed_query(self, text):
+            return [float(len(text))]
+
+    inner = Flaky()
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    emb = BatchedEmbeddings(inner, batch_size=2, max_retries=2, label="test")
+
+    vectors = emb.embed_documents(["aa", "bbb", "c", "dddd", "e"])
+    assert len(vectors) == 5
+    # 第一批失败一次后重试成功，后续批次正常：3 批 + 1 次失败重试 = 4 次调用
+    assert inner.calls == [2, 2, 2, 1]
+    assert emb.embed_query("abcd") == [4.0]
+
+
+def test_batched_embeddings_raises_after_retries(monkeypatch):
+    from langchain_core.embeddings import Embeddings
+
+    from backend.services.embedding_service import BatchedEmbeddings
+
+    class Broken(Embeddings):
+        def embed_documents(self, texts):
+            raise RuntimeError("一直失败")
+
+        def embed_query(self, text):
+            raise RuntimeError("一直失败")
+
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    emb = BatchedEmbeddings(Broken(), batch_size=8, max_retries=2, label="test")
+    with pytest.raises(RuntimeError, match="一直失败"):
+        emb.embed_documents(["x"])
+
+
+def test_citation_grounding_flags_sentence_unsupported_by_source():
+    from backend.services.rag_service import _citation_grounding
+
+    sources = [{"content": "梯度下降通过计算损失函数对参数的梯度来更新参数。"}]
+    # 句子和来源几乎无字面重合：编号合法但内容对不上
+    weak = _citation_grounding("学习率决定每一步走多远[1]。", sources)
+    assert weak["weak"] == [1]
+    # 真从来源里改写出来的句子不应被误判
+    ok = _citation_grounding("梯度下降用参数的梯度来更新参数[1]。", sources)
+    assert ok["weak"] == []
+    assert ok["checked"] == 1
+
+
+def test_citation_stats_keeps_range_check_and_adds_grounding():
+    from backend.services.rag_service import _citation_stats
+
+    sources = [{"content": "课程考核由平时作业与期末考试构成。"}]
+    stats = _citation_stats("考核包含期末[1]，另见[3]。", 1, sources)
+    assert stats["invalid"] == [3]
+    assert stats["valid"] == [1]
+    assert "weak" in stats
+
+
+def test_openai_provider_without_key_fails_fast(monkeypatch):
+    from backend.config import settings
+    from backend.services.llm_service import LLMConfigError, get_llm
+
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "openai", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "", raising=False)
+    with pytest.raises(LLMConfigError, match="OPENAI_API_KEY"):
+        get_llm()
+
+
+def test_connection_error_classification():
+    import httpx
+
+    from backend.services.rag_service import _is_connection_error
+
+    assert _is_connection_error(httpx.ConnectError("boom")) is True
+    assert _is_connection_error(ConnectionError("reset")) is True
+    assert _is_connection_error(ValueError("业务错误")) is False

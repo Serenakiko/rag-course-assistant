@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -700,14 +701,18 @@ def test_start_bat_falls_back_when_venv_python_is_broken(tmp_path):
     """venv 存在但解释器损坏时，start.bat 应退回 PATH 中的 Python。"""
     root = Path(__file__).resolve().parent.parent
     source_venv_python = root / "venv" / "Scripts" / "python.exe"
-    if not source_venv_python.exists():
-        pytest.skip("当前没有可复用的 venv 启动器样本")
+    # 没有项目 venv 时用当前解释器当样本：同属 Windows launcher，
+    # 配合下方指向不存在 home 的 pyvenv.cfg 一样会启动失败，
+    # 这样干净环境/CI 不会静默跳过这条回归。
+    source_launcher = source_venv_python if source_venv_python.exists() else Path(sys.executable)
+    if not source_launcher.exists():
+        pytest.skip("找不到可复用的 Python 启动器样本")
 
     shutil.copy2(root / "start.bat", tmp_path / "start.bat")
     (tmp_path / "run.py").write_text("print('fallback ok')\n", encoding="utf-8")
     broken_scripts = tmp_path / "venv" / "Scripts"
     broken_scripts.mkdir(parents=True)
-    shutil.copy2(source_venv_python, broken_scripts / "python.exe")
+    shutil.copy2(source_launcher, broken_scripts / "python.exe")
     (tmp_path / "venv" / "pyvenv.cfg").write_text(
         "home = Z:\\missing-python\nversion = 3.11.9\n",
         encoding="utf-8",

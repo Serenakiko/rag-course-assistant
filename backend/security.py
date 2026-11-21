@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -75,6 +76,8 @@ def create_access_token(
         "account": account,
         "role": role,
         "ver": token_version,
+        # jti 用于登出吊销：只作废这一枚令牌，不影响同用户其它设备
+        "jti": uuid.uuid4().hex,
         "iat": now,
         "exp": now + timedelta(hours=settings.JWT_EXPIRE_HOURS),
     }

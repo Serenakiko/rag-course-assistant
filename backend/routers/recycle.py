@@ -1,4 +1,4 @@
-"""回收站路由：知识库误删后 30 天内可恢复（只有管理员看得到）。"""
+"""回收站路由：知识库 / 文档误删后 30 天内可恢复（只有管理员看得到）。"""
 
 from __future__ import annotations
 
@@ -9,17 +9,31 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from ..config import settings
 from ..database import get_db
 from ..deps import require_role
-from ..models import Document, KnowledgeBase, KnowledgePoint, RecycleItem, User
+from ..models import (
+    Document,
+    KnowledgeBase,
+    KnowledgePoint,
+    RecycleItem,
+    User,
+    VectorCleanupTask,
+)
 from ..services.chunker import split_text
 from ..services.document_parser import parse_file
-from ..services.recycle import RETENTION_DAYS, drop_files, item_dir
+from ..services.recycle import (
+    RETENTION_DAYS,
+    drop_files,
+    item_dir,
+    rebuild_base_vectors,
+    rebuild_document_vectors,
+)
+from ..services.vector_reconcile import run_vector_cleanup_task_by_id
 from ..services.vector_store import (
     add_document_chunks,
     add_knowledge_point,
@@ -82,20 +96,76 @@ def list_recycle(
     return {"items": items, "retention_days": RETENTION_DAYS}
 
 
+def _failed(item: RecycleItem, name: str, failed: list[dict], message: str):
+    """恢复失败：抛 409，把逐条失败清单放在 detail 里。
+
+    以前失败也返回 200 + ok:false，脚本 / 第三方调用方看状态码会以为成功。
+    前端仍然按 detail 里的 failed 列表弹窗（见 recycle.js）。
+    """
+    raise HTTPException(status_code=409, detail=_failed_payload(item, name, failed, message))
+
+
+def _failed_payload(item: RecycleItem, name: str, failed: list[dict], message: str) -> dict:
+    """恢复失败时的响应体（作为 409 的 detail 返回）。"""
+    return {
+        "ok": False,
+        "restored": False,
+        "kind": item.kind,
+        "name": name,
+        "points": 0,
+        "failed_points": 0,
+        "documents": 0,
+        "failed_documents": len(failed),
+        "failed": failed,
+        "message": message,
+        "vectors_pending": False,
+    }
+
+
+def _success_payload(
+    kind: str,
+    name: str,
+    points: int,
+    documents: int,
+    failed: list[dict],
+    message: str,
+    vectors_pending: bool,
+) -> dict:
+    return {
+        "ok": True,
+        "restored": True,
+        "kind": kind,
+        "name": name,
+        "points": points,
+        "failed_points": 0,
+        "documents": documents,
+        "failed_documents": len(failed),
+        "failed": failed,
+        "message": message,
+        "vectors_pending": vectors_pending,
+    }
+
+
 @router.post("/{item_id}/restore", summary="恢复（管理员）")
 def restore_item(
     item_id: int,
     admin: User = Depends(require_role("admin")),
     db: Session = Depends(get_db),
+    background: BackgroundTasks = None,  # FastAPI 注入；直接调用时为 None
 ) -> dict:
-    """按快照重建知识库：重建知识点与文档分块并重新向量化。
+    """按快照重建知识库 / 文档。
 
-    重名时自动加「（恢复N）」后缀，不会覆盖同名库。
+    写库只做短事务（重建记录 + 搬文件），向量重建交给持久化的后台任务
+    （vector_cleanup_tasks，kind=restore / restore_document），进程重启后
+    由启动时的重试逻辑继续跑完。
+
+    ``background`` 由 FastAPI 注入；直接调用（脚本 / 旧测试）时为空，
+    此时走同步重建并在失败时回滚，保持原有的 500 语义。
     """
     item = db.get(RecycleItem, item_id)
     if item is None:
         raise HTTPException(status_code=404, detail="回收站里没有这条记录")
-    if item.kind != "base":
+    if item.kind not in ("base", "document"):
         raise HTTPException(status_code=400, detail="这种内容暂不支持恢复")
 
     try:
@@ -103,16 +173,9 @@ def restore_item(
     except ValueError:
         raise HTTPException(status_code=400, detail="快照已损坏，无法恢复") from None
 
-    base_info = data.get("base") or {}
-    origin = (base_info.get("name") or item.name or "已恢复的知识库").strip()
-    origin = origin or "已恢复的知识库"
-
     # 快照里 created_by / uploaded_by 指向的用户可能已删，恢复时直接传那个 id 会
-    # 因外键违约 500（且此时库已 commit，留下空壳）。这里先查出还存在的用户 id，
-    # 不存在的置 None（原用户已删），避免半套恢复。
-    creator_ids = {
-        int(x) for x in (item.deleted_by,) if x is not None
-    }
+    # 因外键违约 500。这里先查出还存在的用户 id，不存在的置 None。
+    creator_ids = {int(x) for x in (item.deleted_by,) if x is not None}
     for p in data.get("points") or []:
         if p.get("created_by") is not None:
             creator_ids.add(int(p["created_by"]))
@@ -130,73 +193,78 @@ def restore_item(
             return None
         return int(uid) if int(uid) in existing_ids else None
 
+    if item.kind == "document":
+        return _restore_document(item, data, admin, db, background, _safe_uid)
+    return _restore_base(item, data, admin, db, background, _safe_uid)
+
+
+def _restore_base(item, data, admin, db, background, _safe_uid) -> dict:
+    base_info = data.get("base") or {}
+    origin = (base_info.get("name") or item.name or "已恢复的知识库").strip()
+    origin = origin or "已恢复的知识库"
+
+    docs_data = list(data.get("docs") or [])
+    # 先确认所有源文件都在：缺文件时一条都不写库，直接把清单返回给前端。
+    missing = []
+    for d in docs_data:
+        trash_name = d.get("trash_name") or ""
+        src = item_dir(item.id) / trash_name if trash_name else None
+        if src is None or not src.exists():
+            missing.append(
+                {
+                    "name": d.get("filename") or trash_name or "文档",
+                    "reason": "回收站中缺少源文件",
+                }
+            )
+    if missing:
+        _failed(item, origin, missing, "恢复失败：部分文档源文件缺失，未做任何改动")
+
     name = origin
     suffix = 0
     while db.scalar(select(KnowledgeBase.id).where(KnowledgeBase.name == name)) is not None:
         suffix += 1
         name = f"{origin}（恢复{suffix}）"
 
-    base = KnowledgeBase(
-        name=name,
-        description=base_info.get("description") or "",
-        created_by=_safe_uid(item.deleted_by) or admin.id,
-    )
-    db.add(base)
-    db.flush()  # 拿到 base.id，暂不 commit——整个恢复尽量在一个事务里，中途失败不留半套
-    restored_vector_key = base.vector_key
-
-    # 知识点先全部 add、一次 flush 拿到 id，再统一写向量。
-    new_points: list[KnowledgePoint] = []
-    for p in data.get("points") or []:
-        kp = KnowledgePoint(
-            title=(p.get("title") or "未命名知识点")[:255],
-            content=p.get("content") or "",
-            course=name,
-            tags=p.get("tags") or "",
-            created_by=_safe_uid(p.get("created_by")),
-            is_auto=int(p.get("is_auto") or 0),
-        )
-        db.add(kp)
-        new_points.append(kp)
-    db.flush()
-
-    restored_points = failed_points = 0
-    for kp in new_points:
-        restored_points += 1
-        # 文档自动生成的知识点只作展示，不重复入向量（和重建脚本保持一致）
-        if kp.is_auto:
-            continue
-        try:
-            add_knowledge_point(
-                kp.id,
-                kp.title,
-                kp.content,
-                kp.course,
-                kp.tags,
-                knowledge_base_id=restored_vector_key,
-            )
-        except Exception:  # noqa: BLE001
-            failed_points += 1
-            logger.exception("恢复知识点向量失败 point_id=%s", kp.id)
-
-    restored_docs = failed_docs = 0
-    copied_paths: list[Path] = []
+    # 复制文件放在写事务之前：复制可能较慢，源件留在 trash 里，失败后仍可重试。
     settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    copies: list[tuple[dict, Path]] = []
     try:
-        for d in data.get("docs") or []:
-            trash_name = d.get("trash_name") or ""
-            src = item_dir(item_id) / trash_name if trash_name else None
-            if src is None or not src.exists():
-                logger.warning("回收站里找不到文档源文件，跳过：%s", d.get("filename"))
-                failed_docs += 1
-                continue
+        for d in docs_data:
+            src = item_dir(item.id) / d["trash_name"]
             dest = settings.UPLOAD_DIR / f"{uuid.uuid4().hex}{src.suffix}"
-            # 先复制、提交成功后再删 trash：提交失败时原件还在，重试仍能恢复。
-            # 用 move 的话，提交失败后文件已离开 trash，重试会找不到文档。
-            # 先登记再复制：复制中途失败可能留下半截文件，回滚时也要一并清掉。
-            copied_paths.append(dest)
+            copies.append((d, dest))
             shutil.copy2(src, dest)
+    except Exception:  # noqa: BLE001
+        for _, dest in copies:
+            dest.unlink(missing_ok=True)
+        logger.exception("恢复知识库复制文件失败 item_id=%s", item.id)
+        raise HTTPException(status_code=500, detail="恢复失败，已回滚，请重试") from None
 
+    try:
+        base = KnowledgeBase(
+            name=name,
+            description=base_info.get("description") or "",
+            created_by=_safe_uid(item.deleted_by) or admin.id,
+        )
+        db.add(base)
+        db.flush()
+
+        new_points: list[KnowledgePoint] = []
+        for p in data.get("points") or []:
+            kp = KnowledgePoint(
+                title=(p.get("title") or "未命名知识点")[:255],
+                content=p.get("content") or "",
+                course=name,
+                tags=p.get("tags") or "",
+                created_by=_safe_uid(p.get("created_by")),
+                is_auto=int(p.get("is_auto") or 0),
+            )
+            db.add(kp)
+            new_points.append(kp)
+        db.flush()
+
+        new_docs: list[Document] = []
+        for d, dest in copies:
             doc = Document(
                 filename=d.get("filename") or dest.name,
                 file_type=d.get("file_type") or dest.suffix.lstrip("."),
@@ -206,72 +274,216 @@ def restore_item(
                 course=name,
                 uploaded_by=_safe_uid(d.get("uploaded_by")),
                 is_seed=int(d.get("is_seed") or 0),
+                content_hash=d.get("content_hash") or "",
+                content_simhash=d.get("content_simhash") or "",
+                content_length=int(d.get("content_length") or 0),
+                chunk_count=0,
             )
             db.add(doc)
-            db.flush()
+            new_docs.append(doc)
+        db.flush()
 
-            if doc.is_seed:
-                # 种子展示文档的正文已经作为知识点入过库，不再重复切分入库
-                doc.status = "ready"
-                restored_docs += 1
-                continue
-            try:
-                text = parse_file(dest)
-                chunks = split_text(text)
-                if not chunks:
-                    raise ValueError("没有提取到有效文本")
-                count = add_document_chunks(
-                    doc.id,
-                    doc.filename,
-                    name,
-                    chunks,
-                    knowledge_base_id=restored_vector_key,
-                )
-                doc.status = "ready"
-                doc.chunk_count = count
-                doc.error = ""
-                restored_docs += 1
-            except Exception as exc:  # noqa: BLE001
-                doc.status = "failed"
-                doc.error = str(exc)[:500]
-                failed_docs += 1
-                logger.exception("恢复文档向量失败 doc_id=%s", doc.id)
-
-        if failed_points or failed_docs:
-            raise RuntimeError(
-                f"恢复未完成：知识点失败 {failed_points} 条，文档失败 {failed_docs} 条"
+        task: VectorCleanupTask | None = None
+        if new_docs or new_points:
+            task = VectorCleanupTask(
+                kind="restore",
+                knowledge_base_id=base.vector_key,
+                object_id=str(base.id),
+                course_name=name,
             )
+            db.add(task)
+            db.flush()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        for _, dest in copies:
+            dest.unlink(missing_ok=True)
+        logger.exception("恢复知识库写库失败，已回滚 item_id=%s", item.id)
+        raise HTTPException(status_code=500, detail="恢复失败，已回滚，请重试") from None
 
-        # 最后统一提交：库 + 知识点 + 文档一次落库，中间失败整体回滚不留半套。
-        # 注意 created_by 指向的用户若已被删，这里会因 FK 违约抛 500——所以先校验，
-        # 用户没了就落到当前管理员名下，避免空库已经 commit 进去。
+    restored_points = len(new_points)
+    restored_docs = len(new_docs)
+    trash_path = item_dir(item.id)
+
+    if background is None:
+        # 直接调用（脚本 / 旧测试）的同步回退：失败整体回滚并抛 500。
+        try:
+            failed_points, failed_docs = rebuild_base_vectors(
+                db,
+                base.id,
+                name,
+                base.vector_key,
+                add_point=add_knowledge_point,
+                add_chunks=add_document_chunks,
+                parse=parse_file,
+                split=split_text,
+                commit=False,
+            )
+            if failed_points or failed_docs:
+                raise RuntimeError(
+                    f"恢复未完成：知识点失败 {failed_points} 条，文档失败 {failed_docs} 条"
+                )
+        except Exception:  # noqa: BLE001
+            db.rollback()
+            try:
+                delete_knowledge_base_vectors(base.vector_key, name, strict=False)
+            except Exception:  # noqa: BLE001
+                logger.exception("恢复失败后清理孤儿向量失败：%s", base.vector_key)
+            for _, dest in copies:
+                dest.unlink(missing_ok=True)
+            logger.exception("恢复知识库失败，已回滚 item_id=%s", item.id)
+            raise HTTPException(status_code=500, detail="恢复失败，已回滚，请重试") from None
+
         db.delete(item)
+        db.commit()
+        shutil.rmtree(trash_path, ignore_errors=True)
+        return _success_payload(
+            "base",
+            name,
+            restored_points,
+            restored_docs,
+            [],
+            f"已恢复知识库「{name}」",
+            False,
+        )
+
+    task_id = task.id
+    db.delete(item)
+    try:
         db.commit()
     except Exception:  # noqa: BLE001
         db.rollback()
-        try:
-            delete_knowledge_base_vectors(
-                restored_vector_key, name, strict=False
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("恢复失败后清理孤儿向量失败：%s", restored_vector_key)
-        # 回滚后 DB 里没有这些文档，复制出来的文件也要一并删掉；
-        # trash 里的原件保持不动，用户可以直接重试恢复。
-        for path in copied_paths:
-            path.unlink(missing_ok=True)
-        logger.exception("恢复知识库失败，已回滚 item_id=%s", item_id)
+        for _, dest in copies:
+            dest.unlink(missing_ok=True)
+        logger.exception("恢复知识库提交失败，已回滚 item_id=%s", item.id)
         raise HTTPException(status_code=500, detail="恢复失败，已回滚，请重试") from None
 
-    shutil.rmtree(item_dir(item_id), ignore_errors=True)
+    shutil.rmtree(trash_path, ignore_errors=True)
+    background.add_task(run_vector_cleanup_task_by_id, task_id)
+    return _success_payload(
+        "base",
+        name,
+        restored_points,
+        restored_docs,
+        [],
+        f"已恢复知识库「{name}」，向量正在后台重建",
+        True,
+    )
 
-    return {
-        "ok": True,
-        "name": name,
-        "points": restored_points,
-        "failed_points": failed_points,
-        "documents": restored_docs,
-        "failed_documents": failed_docs,
-    }
+
+def _restore_document(item, data, admin, db, background, _safe_uid) -> dict:
+    docs_data = list(data.get("docs") or [])
+    if not docs_data:
+        _failed(item, item.name, [{"name": item.name, "reason": "快照中没有文档信息"}], "恢复失败")
+    entry = docs_data[0]
+    name = entry.get("filename") or item.name
+    course = entry.get("course") or ""
+
+    trash_name = entry.get("trash_name") or ""
+    src = item_dir(item.id) / trash_name if trash_name else None
+    if src is None or not src.exists():
+        _failed(
+            item,
+            name,
+            [{"name": name, "reason": "回收站中缺少源文件"}],
+            "恢复失败：文档源文件缺失，未做任何改动",
+        )
+
+    kb = None
+    if course:
+        kb = db.scalar(select(KnowledgeBase).where(KnowledgeBase.name == course))
+    vector_key = kb.vector_key if kb is not None else ""
+
+    settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    dest = settings.UPLOAD_DIR / f"{uuid.uuid4().hex}{src.suffix}"
+    try:
+        shutil.copy2(src, dest)
+    except Exception:  # noqa: BLE001
+        logger.exception("恢复文档复制文件失败 item_id=%s", item.id)
+        raise HTTPException(status_code=500, detail="恢复失败，已回滚，请重试") from None
+
+    try:
+        doc = Document(
+            filename=name,
+            file_type=entry.get("file_type") or dest.suffix.lstrip("."),
+            file_size=int(entry.get("file_size") or 0),
+            stored_path=str(dest),
+            status="ready" if int(entry.get("is_seed") or 0) else "processing",
+            course=course,
+            uploaded_by=_safe_uid(entry.get("uploaded_by")),
+            is_seed=int(entry.get("is_seed") or 0),
+            content_hash=entry.get("content_hash") or "",
+            content_simhash=entry.get("content_simhash") or "",
+            content_length=int(entry.get("content_length") or 0),
+            chunk_count=0,
+        )
+        db.add(doc)
+        db.flush()
+
+        task: VectorCleanupTask | None = None
+        if not doc.is_seed:
+            task = VectorCleanupTask(
+                kind="restore_document",
+                knowledge_base_id=vector_key,
+                object_id=str(doc.id),
+                course_name=course,
+            )
+            db.add(task)
+            db.flush()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        dest.unlink(missing_ok=True)
+        logger.exception("恢复文档写库失败，已回滚 item_id=%s", item.id)
+        raise HTTPException(status_code=500, detail="恢复失败，已回滚，请重试") from None
+
+    trash_path = item_dir(item.id)
+
+    if background is None:
+        try:
+            if task is not None:
+                ok = rebuild_document_vectors(
+                    db,
+                    doc.id,
+                    vector_key or None,
+                    add_chunks=add_document_chunks,
+                    parse=parse_file,
+                    split=split_text,
+                    commit=False,
+                )
+                if not ok:
+                    raise RuntimeError("文档向量重建失败")
+        except Exception:  # noqa: BLE001
+            db.rollback()
+            dest.unlink(missing_ok=True)
+            logger.exception("恢复文档失败，已回滚 item_id=%s", item.id)
+            raise HTTPException(status_code=500, detail="恢复失败，已回滚，请重试") from None
+
+        db.delete(item)
+        db.commit()
+        shutil.rmtree(trash_path, ignore_errors=True)
+        return _success_payload("document", name, 0, 1, [], f"已恢复文档「{name}」", False)
+
+    task_id = task.id if task is not None else None
+    db.delete(item)
+    try:
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        dest.unlink(missing_ok=True)
+        logger.exception("恢复文档提交失败，已回滚 item_id=%s", item.id)
+        raise HTTPException(status_code=500, detail="恢复失败，已回滚，请重试") from None
+
+    shutil.rmtree(trash_path, ignore_errors=True)
+    if task_id is not None:
+        background.add_task(run_vector_cleanup_task_by_id, task_id)
+    return _success_payload(
+        "document",
+        name,
+        0,
+        1,
+        [],
+        f"已恢复文档「{name}」，向量正在后台重建",
+        task_id is not None,
+    )
 
 
 @router.delete("/{item_id}", summary="彻底删除（管理员）")
@@ -283,7 +495,12 @@ def purge_item(
     item = db.get(RecycleItem, item_id)
     if item is None:
         raise HTTPException(status_code=404, detail="回收站里没有这条记录")
-    drop_files(item)
+    # 先提交删除、再清文件：删文件失败只留下孤儿文件，不会出现
+    # 「记录没了但文件还在 / 记录还在但文件没了」互相矛盾的中间态。
     db.delete(item)
     db.commit()
+    try:
+        drop_files(item)
+    except Exception:  # noqa: BLE001
+        logger.exception("彻底删除后清理归档文件失败 item_id=%s", item_id)
     return {"ok": True}

@@ -186,6 +186,19 @@ def init_db() -> None:
             conn.execute(
                 text("ALTER TABLE unanswered_questions ADD COLUMN display_no INTEGER DEFAULT 0")
             )
+        # 闭环回写：记录未命中问题对应的原会话与消息，重新生成后写回这条会话
+        if "conversation_id" not in uq_cols:
+            conn.execute(
+                text("ALTER TABLE unanswered_questions ADD COLUMN conversation_id INTEGER")
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_unanswered_conversation_id "
+                    "ON unanswered_questions (conversation_id)"
+                )
+            )
+        if "message_id" not in uq_cols:
+            conn.execute(text("ALTER TABLE unanswered_questions ADD COLUMN message_id INTEGER"))
         # 旧数据回填：先按主键排一遍，之后删除时只重排这一列
         conn.execute(
             text(
@@ -248,6 +261,10 @@ def init_db() -> None:
             conn.execute(text("ALTER TABLE messages ADD COLUMN interrupted INTEGER DEFAULT 0"))
         if "feedback" not in msg_cols:
             conn.execute(text("ALTER TABLE messages ADD COLUMN feedback VARCHAR(8) DEFAULT ''"))
+        if "feedback_reason" not in msg_cols:
+            conn.execute(
+                text("ALTER TABLE messages ADD COLUMN feedback_reason TEXT DEFAULT ''")
+            )
         # 这一轮是否拒答：1=拒答。统计拒答率直接读这个字段，不用中文文案 LIKE。
         if "rejected" not in msg_cols:
             conn.execute(text("ALTER TABLE messages ADD COLUMN rejected INTEGER DEFAULT 0"))

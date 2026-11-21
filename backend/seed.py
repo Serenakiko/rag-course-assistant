@@ -12,6 +12,7 @@ import logging
 
 from sqlalchemy import select
 
+from .config import settings
 from .database import SessionLocal
 from .models import KnowledgeBase, KnowledgePoint
 from .seed_data import SAMPLE_BASES, SAMPLE_POINTS
@@ -27,6 +28,11 @@ def init_seed() -> None:
     try:
         # 1. 默认管理员
         admin = create_default_admin(session)
+
+        # 示例课程与知识点可关闭（SEED_SAMPLE_DATA=false），此时只留一个空系统。
+        if not settings.SEED_SAMPLE_DATA:
+            logger.info("SEED_SAMPLE_DATA=false，跳过示例知识库与知识点初始化")
+            return
 
         # 2. 四门课程知识库（按名称幂等创建）
         for item in SAMPLE_BASES:

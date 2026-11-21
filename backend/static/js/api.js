@@ -1,31 +1,65 @@
 /* ============ API 封装：认证、请求、SSE 流式问答 ============ */
 const API = (() => {
-  const TOKEN_KEY = "rag_token";
-  const USER_KEY = "rag_user";
+  // 会话由后端 HttpOnly Cookie 维持，JS 读不到 token；这里只在内存里缓存
+  // user / token。页面刷新后内存清空，由 ensureSession() 调 /api/auth/me
+  // 让浏览器自动带上 Cookie 恢复登录态，不再读写 localStorage。
+  let memoryToken = "";
+  let currentUser = null;
+  let sessionPromise = null;
 
-  function getToken() { return localStorage.getItem(TOKEN_KEY) || ""; }
+  function getToken() { return memoryToken; }
 
-  function getUser() {
-    try { return JSON.parse(localStorage.getItem(USER_KEY) || "null"); }
-    catch { return null; }
-  }
+  function getUser() { return currentUser; }
 
   function saveSession(token, user) {
-    localStorage.setItem(TOKEN_KEY, token);
-    localStorage.setItem(USER_KEY, JSON.stringify(user));
+    if (token) memoryToken = token;
+    if (user) currentUser = user;
   }
 
   function clearSession() {
-    localStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem(USER_KEY);
+    memoryToken = "";
+    currentUser = null;
+    sessionPromise = null;
   }
 
   function goLogin() {
     clearSession();
-    window.location.href = "/static/index.html";
+    window.location.replace("/static/index.html");
   }
 
-  async function request(method, url, body, { form = false } = {}) {
+  /**
+   * 探测当前会话（Cookie 由浏览器自动携带）。
+   * 返回 user；未登录返回 null。并发调用共享同一个 Promise。
+   */
+  function ensureSession() {
+    if (currentUser) return Promise.resolve(currentUser);
+    if (!sessionPromise) {
+      sessionPromise = request("GET", "/api/auth/me", undefined, { skipAuthRedirect: true })
+        .then((user) => { currentUser = user; return user; })
+        .catch((err) => {
+          // 探测失败不缓存：否则后端重启/网络抖动一次，整个页面第二次探测直接拿旧结果
+          sessionPromise = null;
+          // 401 才是「真的没登录」；网络不通、5xx 不应该把人踢回登录页
+          if (err && err.status === 401) return null;
+          const e = new Error(err && err.message ? err.message : "无法确认登录状态");
+          e.sessionProbeFailed = true;
+          throw e;
+        });
+    }
+    return sessionPromise;
+  }
+
+  /* 退出登录：通知后端删 Cookie，再清本地内存；网络失败也照样退出。 */
+  async function logout() {
+    try {
+      await request("POST", "/api/auth/logout", undefined, { skipAuthRedirect: true });
+    } catch {
+      /* 忽略：本地会话仍然要清掉 */
+    }
+    clearSession();
+  }
+
+  async function request(method, url, body, { form = false, skipAuthRedirect = false } = {}) {
     const headers = {};
     const token = getToken();
     if (token) headers["Authorization"] = "Bearer " + token;
@@ -38,13 +72,21 @@ const API = (() => {
     }
     let resp;
     try {
-      resp = await fetch(url, { method, headers, body: payload });
-    } catch {
-      throw new Error("网络请求失败，请确认后端服务已启动");
+      // same-origin：同源请求带上 HttpOnly 会话 Cookie
+      resp = await fetch(url, { method, headers, body: payload, credentials: "same-origin" });
+    } catch (err) {
+      if (err && err.name === "AbortError") throw err;
+      const e = new Error("网络请求失败，请确认后端服务已启动");
+      e.status = 0;   // 0 = 连不上后端，供调用方区分「没登录」
+      throw e;
     }
-    // 登录/注册接口的 401 是「账号密码错误」，不跳转
-    const isAuthEntry = url.startsWith("/api/auth/login") || url.startsWith("/api/auth/register");
-    if (resp.status === 401 && !isAuthEntry) {
+    // 登录/注册接口的 401 是「账号密码错误」；探测会话/登出的 401 也不跳转
+    const isAuthEntry =
+      url.startsWith("/api/auth/login") ||
+      url.startsWith("/api/auth/register") ||
+      url.startsWith("/api/auth/me") ||
+      url.startsWith("/api/auth/logout");
+    if (resp.status === 401 && !isAuthEntry && !skipAuthRedirect) {
       goLogin();
       throw new Error("登录已过期，请重新登录");
     }
@@ -61,14 +103,19 @@ const API = (() => {
       } else {
         msg = `请求失败（${resp.status}）`;
       }
-      throw new Error(msg);
+      const e = new Error(msg);
+      e.status = resp.status;
+      // 保留完整响应体：个别接口的错误里带结构化信息（如回收站恢复的
+      // failed 清单放在 detail 里），调用方需要拿它渲染明细
+      e.body = data;
+      throw e;
     }
     return data;
   }
 
   /**
    * 流式问答：POST /api/chat/ask，按 SSE 事件回调。
-   * handlers: { onToken, onSources, onError, onUnmatched, onPhase, onDone }
+   * handlers: { onToken, onSources, onError, onUnmatched, onPhase, onDone, onSaved, onSaveFailed }
    * opts: { idleTimeout, totalTimeout }（毫秒）——长时间无内容 / 总时长超限时自动中止，
    *       避免网络或模型异常导致页面一直卡在“生成中”；
    *       regenerate——重新生成（后端不重复保存提问，先删掉旧回答）
@@ -125,12 +172,13 @@ const API = (() => {
 
     (async () => {
       try {
+        const streamHeaders = { "Content-Type": "application/json" };
+        // 内存里有 token 就照旧带上，兼容未升级的部署；Cookie 会由浏览器自动携带
+        if (getToken()) streamHeaders["Authorization"] = "Bearer " + getToken();
         const resp = await fetch("/api/chat/ask", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + getToken(),
-          },
+          headers: streamHeaders,
+          credentials: "same-origin",
           body: JSON.stringify({
             conversation_id: conversationId,
             message,
@@ -168,6 +216,8 @@ const API = (() => {
                 else if (evt.type === "sources" && handlers.onSources) handlers.onSources(evt.sources);
                 else if (evt.type === "unmatched" && handlers.onUnmatched) handlers.onUnmatched(evt);
                 else if (evt.type === "saved" && handlers.onSaved) handlers.onSaved(evt.message_id);
+                // 回答生成完了但没落库：不能当正常完成，交给页面标「未保存」并给重试入口
+                else if (evt.type === "save_failed" && handlers.onSaveFailed) handlers.onSaveFailed(evt);
                 else if (evt.type === "error") {
                   // 后端超时/失败：收到 error 后立即中止读取，避免「已超时」提示
                   // 与后续 token 同时出现、onError 被重复触发。
@@ -189,5 +239,8 @@ const API = (() => {
     return { controller, done };
   }
 
-  return { getToken, getUser, saveSession, clearSession, goLogin, request, streamAsk };
+  return {
+    getToken, getUser, saveSession, clearSession, goLogin,
+    ensureSession, logout, request, streamAsk,
+  };
 })();

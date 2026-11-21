@@ -14,7 +14,7 @@
 
 **代码**：`backend/services/rag_service.py`、`backend/services/rag_prompts.py`。
 
-**实验**：`evaluation/golden.json` 中的 `near_miss` 类别；对比开关可答性判定前后的拒答准确率与误拒率。
+**实验**：`evaluation/golden.json` 中的 `near_miss` 类别（4 条相近但未覆盖的问题）。**目前只有这 4 条样本的观察结果，尚未做「关掉可答性判定」的前后对比实验**——`evaluation/evaluate.py` 不调用 `ANSWERABILITY_CHECK`，`docs/evaluation.md` 的「局限」一节也说明了这一点。论文里不要写成已有消融数据。
 
 ## 贡献二：未命中问题驱动的资料补全闭环
 

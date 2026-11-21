@@ -172,7 +172,7 @@ const Common = (() => {
         <div class="alert-body">
           <div class="alert-text">
             <div class="alert-title">${escapeHtml(title)}</div>
-            <div class="alert-msg">${message}</div>
+            <div class="alert-msg">${escapeHtml(message)}</div>
           </div>
         </div>
         <div class="modal-footer">

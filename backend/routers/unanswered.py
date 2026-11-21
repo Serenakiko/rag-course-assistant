@@ -1,6 +1,7 @@
 """未命中问题路由：管理员查看 / 重新生成回答 / 统计 / 标记 / 删除知识库未覆盖的问题记录。"""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -16,8 +17,16 @@ from sqlalchemy.orm import Session, joinedload
 from ..config import settings
 from ..database import get_db
 from ..deps import require_role
-from ..models import QuestionVector, UnansweredQuestion, User, utcnow
+from ..models import (
+    Conversation,
+    Message,
+    QuestionVector,
+    UnansweredQuestion,
+    User,
+    utcnow,
+)
 from ..services.embedding_service import get_embeddings
+from ..services.notify import notify
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -42,6 +51,9 @@ def _to_dict(q: UnansweredQuestion) -> dict:
         "creator_name": q.creator_name,
         "created_at": q.created_at,
         "admin_read": q.admin_read_at is not None,
+        # 闭环用：原会话 / 消息定位，没有历史记录时为空
+        "conversation_id": q.conversation_id,
+        "message_id": q.message_id,
     }
 
 
@@ -108,32 +120,48 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
-def _question_vectors(db: Session, texts: list[str]) -> dict[str, list[float]]:
-    """问题向量：先查缓存，缺的现算并入库；模型不可用返回空，调用方退回字符相似。"""
+def _question_vectors(
+    db: Session, texts: list[str], *, embed_missing: bool
+) -> tuple[dict[str, list[float]], bool, datetime | None]:
+    """读问题向量缓存；embed_missing=True 时才补齐缺失项并写缓存。
+
+    返回 ``(vectors, degraded, cached_at)``。``degraded=True`` 表示需要现算时
+    嵌入模型失败；``cached_at`` 是本次命中缓存里最新的写入时间。
+    GET 聚类传 False，保证纯读、不 embed、不 commit。
+    """
     unique = list(dict.fromkeys(t.strip() for t in texts if t and t.strip()))
     if not unique:
-        return {}
+        return {}, False, None
     hashes = {t: hashlib.sha1(t.encode("utf-8")).hexdigest() for t in unique}
-    cached = {
-        row.text_hash: json.loads(row.vector)
-        for row in db.scalars(
-            select(QuestionVector).where(QuestionVector.text_hash.in_(list(hashes.values())))
-        )
-    }
+    cached: dict[str, list[float]] = {}
+    cached_at: datetime | None = None
+    for text_hash, raw, created_at in db.execute(
+        select(
+            QuestionVector.text_hash,
+            QuestionVector.vector,
+            QuestionVector.created_at,
+        ).where(QuestionVector.text_hash.in_(list(hashes.values())))
+    ).all():
+        try:
+            cached[text_hash] = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if created_at is not None and (cached_at is None or created_at > cached_at):
+            cached_at = created_at
     out = {t: cached[h] for t, h in hashes.items() if h in cached}
     missing = [t for t in unique if t not in out]
-    if not missing:
-        return out
+    if not missing or not embed_missing:
+        return out, False, cached_at
     try:
         vectors = get_embeddings().embed_documents(missing)
     except Exception:  # noqa: BLE001
-        logger.warning("聚类：问题向量化失败，退回字符相似度")
-        return {}
+        logger.warning("聚类：问题向量化失败，降级为空聚类")
+        return out, True, cached_at
     for text, vec in zip(missing, vectors):
         vector = [float(x) for x in vec]
         out[text] = vector
-        # upsert：聚类是个 GET，两个标签页同时打开时会同时算同一批问题，
-        # 直接 add 会撞 text_hash 唯一索引（有 except 兜着，但那次向量就白算了）
+        # upsert：两个管理员同时点「重新聚类」会同时算同一批问题，
+        # 直接 add 会撞 text_hash 唯一索引
         db.execute(
             sqlite_insert(QuestionVector)
             .values(text_hash=hashes[text], text=text, vector=json.dumps(vector))
@@ -144,7 +172,7 @@ def _question_vectors(db: Session, texts: list[str]) -> dict[str, list[float]]:
     except Exception:  # noqa: BLE001
         db.rollback()
         logger.warning("聚类：问题向量缓存写入失败（不影响本次结果）")
-    return out
+    return out, False, utcnow()
 
 
 def _group_rows(rows: list, same) -> list[dict]:
@@ -160,20 +188,15 @@ def _group_rows(rows: list, same) -> list[dict]:
     return groups
 
 
-@router.get("/clusters", summary="未命中问题聚类（管理员）")
-def cluster_unanswered(
-    status: str | None = "pending",
-    threshold: float | None = None,
-    limit: int = 200,
-    admin: User = Depends(require_role("admin")),
-    db: Session = Depends(get_db),
+def _clusters_payload(
+    db: Session,
+    status: str | None,
+    threshold: float | None,
+    limit: int,
+    *,
+    embed_missing: bool,
 ) -> dict:
-    """把问法不同、意思相近的问题并成一组，按组内人数从多到少排。
-
-    优先用向量相似度（bge-m3 余弦，默认 0.78），能合并「红黑树怎么插入」
-    和「红黑树的插入过程」这类换说法；向量模型不可用时退回字符二元组
-    Jaccard（默认 0.55）。问题向量带缓存表，同一句话只算一次。
-    """
+    """聚类主体：GET 只读、POST 补齐向量缓存，两者返回同一结构。"""
     limit = min(max(limit, 1), 500)
     stmt = select(UnansweredQuestion).options(joinedload(UnansweredQuestion.creator))
     if status in ("pending", "resolved"):
@@ -181,9 +204,31 @@ def cluster_unanswered(
     rows = list(db.scalars(stmt.order_by(UnansweredQuestion.id.desc()).limit(limit)))
 
     if not rows:
-        return {"total_questions": 0, "group_count": 0, "items": [], "method": "none"}
+        return {
+            "clusters": [],
+            "items": [],
+            "total_questions": 0,
+            "group_count": 0,
+            "method": "none",
+            "generated_at": utcnow() if embed_missing else None,
+        }
 
-    vectors = _question_vectors(db, [q.question or "" for q in rows])
+    vectors, degraded, cached_at = _question_vectors(
+        db, [q.question or "" for q in rows], embed_missing=embed_missing
+    )
+    if degraded:
+        # 嵌入模型不可用：按契约返回空聚类 + 提示，让前端明确知道「没算成」
+        return {
+            "clusters": [],
+            "items": [],
+            "total_questions": len(rows),
+            "group_count": 0,
+            "method": "none",
+            "generated_at": utcnow(),
+            "degraded": True,
+            "message": "向量模型暂时不可用，聚类已降级为空结果，请稍后重试或检查模型服务",
+        }
+
     if vectors:
         method = "vector"
         cut = 0.78 if threshold is None else min(max(threshold, 0.5), 0.98)
@@ -229,11 +274,46 @@ def cluster_unanswered(
         )
     )
     return {
+        # clusters 是契约字段；items 保留给现有管理端（admin-feedback.js）
+        "clusters": out,
+        "items": out,
         "total_questions": len(rows),
         "group_count": len(out),
-        "items": out,
         "method": method,
+        "generated_at": utcnow() if embed_missing else cached_at,
     }
+
+
+@router.get("/clusters", summary="未命中问题聚类（管理员，只读缓存）")
+def cluster_unanswered(
+    status: str | None = "pending",
+    threshold: float | None = None,
+    limit: int = 200,
+    admin: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+) -> dict:
+    """把问法不同、意思相近的问题并成一组，按组内人数从多到少排。
+
+    只读 question_vectors 缓存：不现场 embed、不写库、不 commit。
+    缓存缺失的问题各自成组；一条缓存都没有时退回字符二元组 Jaccard。
+    需要「把缺失向量补齐并写缓存」请调用 POST /api/admin/unanswered/clusters。
+    """
+    return _clusters_payload(db, status, threshold, limit, embed_missing=False)
+
+
+@router.post("/clusters", summary="未命中问题聚类（管理员，补齐向量缓存）")
+def compute_clusters(
+    status: str | None = "pending",
+    threshold: float | None = None,
+    limit: int = 200,
+    admin: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+) -> dict:
+    """计算聚类并写入缺失的问题向量缓存；请求体可为空。
+
+    返回结构与 GET 一致；嵌入模型失败时返回空聚类并带 ``degraded: true``。
+    """
+    return _clusters_payload(db, status, threshold, limit, embed_missing=True)
 
 
 @router.get("/stats", summary="未命中问题统计（管理员）")
@@ -287,6 +367,21 @@ def unanswered_stats(
     }
 
 
+def _collect_sources(question: str, courses) -> list[dict]:
+    """重新检索该问题的引用并转成前端 sources 结构；失败只记日志。
+
+    走 rag_service 的检索/格式化，保持和正常聊天回答的 sources 一致。
+    """
+    try:
+        from ..services import rag_service
+
+        docs = rag_service.vector_search(question, settings.TOP_K, courses)
+        return rag_service._format_sources(docs)
+    except Exception:  # noqa: BLE001
+        logger.warning("重新生成：收集引用失败，写回消息不带 sources", exc_info=True)
+        return []
+
+
 @router.post("/{qid}/regenerate", summary="补充资料后重新生成回答（管理员）")
 async def regenerate_answer(
     qid: int,
@@ -296,6 +391,8 @@ async def regenerate_answer(
     """管理员补充资料后，对未命中问题重新生成回答并通知学生（学生端可查看）。
 
     生成结果仍判定未收录时保持 pending，提示继续补充；否则置为 resolved。
+    命中时把新回答作为 assistant 消息写回原会话（有 conversation_id 时），
+    返回 message_id / written_back，闭环到学生端对话里。
     """
     q = db.get(UnansweredQuestion, qid)
     if q is None:
@@ -319,7 +416,16 @@ async def regenerate_answer(
             "resource": model_resource_error_message(),
             "generation": "回答生成失败，模型服务暂时不可用，请稍后重试",
         }.get(result["error"], "这次没生成出有效回答，检查模型服务后再试")
-        return {"ok": False, "answer": "", "resolved": False, "message": message}
+        return {
+            "ok": False,
+            "answer": "",
+            "resolved": False,
+            "message": message,
+            "message_id": None,
+            "written_back": False,
+        }
+    message_id: int | None = None
+    written_back = False
     if result["recommended"]:
         q.related_points = json.dumps(result["recommended"], ensure_ascii=False)
     if result["matched"]:
@@ -332,6 +438,25 @@ async def regenerate_answer(
         q.admin_read_at = q.admin_read_at or utcnow()
         message = "回答已生成，学生那边能看到了"
         answer = result["answer"]
+        # 闭环：把新回答写回学生原来的会话，学生端对话里直接能看到。
+        # 老记录可能没有 conversation_id（字段是后加的），此时跳过写回。
+        if (
+            q.conversation_id is not None
+            and db.get(Conversation, q.conversation_id) is not None
+        ):
+            sources = await asyncio.to_thread(_collect_sources, q.question, scope)
+            msg = Message(
+                conversation_id=q.conversation_id,
+                role="assistant",
+                content=result["answer"],
+                sources=json.dumps(sources, ensure_ascii=False),
+                outcome="answered",
+            )
+            db.add(msg)
+            db.flush()
+            q.message_id = msg.id
+            message_id = msg.id
+            written_back = True
     else:
         # 知识库仍未收录：清空旧回答并**退回待处理**。
         # 只清 answer 不重置状态的话，一条「已解决」的记录重新生成失败后会变成
@@ -343,13 +468,30 @@ async def regenerate_answer(
         answer = ""
     # 回答发生了变化：重新计为未读，等学生自己点开再清角标
     q.read_at = None
+    # commit 之后 ORM 对象会过期，先把发通知要用的字段取出来
+    student_id = q.created_by
+    question_text = q.question
     db.commit()
+
+    # 站内通知：补答成功才发，让学生不用自己反复刷「答疑进度」页。
+    # notify 内部独立事务 + 异常只记日志，通知写失败不影响本次补答结果。
+    if result["matched"]:
+        notify(
+            db,
+            student_id,
+            "answer_ready",
+            "你的提问已补答",
+            f"你之前没得到回答的问题「{question_text}」已由管理员补答，点击查看",
+            "#/feedback",
+        )
 
     return {
         "ok": True,
         "answer": answer,
         "resolved": result["matched"],
         "message": message,
+        "message_id": message_id,
+        "written_back": written_back,
     }
 
 
@@ -377,8 +519,21 @@ def update_unanswered(
     if q.status != status:
         # 状态变了旧答案就不再作数，重置已读让新结果重新提醒
         q.read_at = None
+    became_resolved = q.status != status and status == "resolved"
+    student_id = q.created_by
+    question_text = q.question
     q.status = status
     db.commit()
+    # 管理员把反馈置为已解决 = 给了学生一个结果，发一条站内通知提醒他回来看
+    if became_resolved:
+        notify(
+            db,
+            student_id,
+            "feedback_reply",
+            "你的反馈有新回复",
+            f"你提交的问题「{question_text}」已被管理员标记为已解决，点击查看",
+            "#/feedback",
+        )
     return {"ok": True}
 
 

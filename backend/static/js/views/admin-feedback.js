@@ -111,7 +111,7 @@ const AdminFeedbackView = (() => {
     const startIdx = (clusterPage - 1) * uqPageSize;
     const pageRows = clusterRows.slice(startIdx, startIdx + uqPageSize);
 
-    list.innerHTML = pageRows.map((g) => `
+    list.innerHTML = pageRows.map((g, i) => `
       <div class="fb-item">
         <div class="fb-head">
           <span class="fb-badge fb-badge-count">${g.count} 人问过</span>
@@ -125,7 +125,16 @@ const AdminFeedbackView = (() => {
         ${g.count > 1
           ? `<div class="fb-answer" style="line-height:1.9">${g.variants.map((v) => `<div style="font-size:13px">· ${Common.escapeHtml(v)}</div>`).join("")}</div>`
           : `<div class="fb-wait-tip"><span>只有一个人问过</span></div>`}
+        <div class="fb-ops">
+          <button class="btn btn-sm" data-merge="${startIdx + i}">合并为一问</button>
+          <button class="btn btn-sm" data-upload-for="${startIdx + i}">带着条目去上传</button>
+        </div>
       </div>`).join("");
+
+    list.querySelectorAll("[data-merge]").forEach((b) =>
+      b.addEventListener("click", () => openClusterMerge(clusterRows[Number(b.dataset.merge)])));
+    list.querySelectorAll("[data-upload-for]").forEach((b) =>
+      b.addEventListener("click", () => goUploadFor(clusterRows[Number(b.dataset.uploadFor)])));
 
     Common.renderPagination("uq-pagination", clusterRows.length, clusterPage, uqPageSize, (p) => {
       clusterPage = p;
@@ -134,6 +143,48 @@ const AdminFeedbackView = (() => {
       sizeOptions: [10, 20],
       onSizeChange: (s) => { uqPageSize = s; renderListByTab(); },
     });
+  }
+
+  /* 合并为一问：同一知识点的多种问法并成一条，补资料/人工答疑都照着这一条做 */
+  function openClusterMerge(g) {
+    if (!g) return;
+    const merged = (g.question || "").trim();
+    const variants = (g.variants || []).filter((v) => v && v !== merged);
+    const box = Common.openModal(`
+      <div class="modal-header">
+        <h3>合并为一问</h3>
+        <button class="modal-close" data-close>×</button>
+      </div>
+      <p class="modal-note">这 ${g.count} 个问法意思相近，下面这条是合并后的问题。补资料或人工答疑照着它做，就不会同一个知识点反复处理。</p>
+      <div class="cluster-merged">${Common.escapeHtml(merged)}</div>
+      ${variants.length ? `<div class="cluster-variants"><b>被合并的问法</b>${variants.map((v) => `<div class="cluster-variant">· ${Common.escapeHtml(v)}</div>`).join("")}</div>` : ""}
+      <div class="modal-footer">
+        <button class="btn" data-close>关闭</button>
+        <button class="btn" data-copy>复制问题</button>
+        <button class="btn btn-primary" data-upload>带着这条去上传</button>
+      </div>`, { size: "modal-lg" });
+    box.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", Common.closeModal));
+    box.querySelector("[data-copy]").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(merged);
+        Common.toast("已复制合并后的问题", "success");
+      } catch {
+        Common.toast("复制失败，请手动选中文本复制", "error");
+      }
+    });
+    box.querySelector("[data-upload]").addEventListener("click", () => {
+      Common.closeModal();
+      goUploadFor(g);
+    });
+  }
+
+  /* 带着条目去上传：跳到上传入口，并把问题记下来提示该补哪块资料 */
+  function goUploadFor(g) {
+    if (!g) return;
+    const q = (g.question || "").trim();
+    const brief = q.length > 32 ? q.slice(0, 32) + "…" : q;
+    Common.toast(`带着问题「${brief}」去上传资料${g.course ? `（建议补到《${g.course}》）` : ""}`, "info");
+    App.navigate("documents");
   }
 
   /* 与学生端「我的反馈」同款统计卡：白色卡片 + 浅色图标块 + 数字/标签 */
@@ -256,16 +307,24 @@ const AdminFeedbackView = (() => {
     try {
       const r = await API.request("POST", `/api/admin/unanswered/${qid}/regenerate`);
       if (r.resolved && r.answer) {
+        // 新契约：written_back=false 表示该问题没有原会话，回答只在管理台可见
+        const writtenBack = r.written_back !== false;
         // 生成成功：直接在弹窗内展示答案，用户立刻能看到
         if (result) {
           result.innerHTML = `
-            <div class="fb-answer md-body" style="margin-top:0;padding-top:0">${Markdown.render(r.answer)}</div>`;
+            <div class="fb-answer md-body" style="margin-top:0;padding-top:0">${Markdown.render(r.answer)}</div>
+            <div class="msg-note" style="margin-top:4px">${writtenBack
+              ? "已写回学生原会话，学生可在「答疑进度」里看到这条回答。"
+              : "该问题没有原会话（学生已删除会话），回答仅在本页可看。"}</div>`;
         }
         if (footer) {
           footer.innerHTML = `<button class="btn btn-primary" data-done>知道了</button>`;
           footer.querySelector("[data-done]").addEventListener("click", Common.closeModal);
         }
-        Common.toast("回答已生成，学生那边能看到了", "success");
+        Common.toast(
+          writtenBack ? "回答已生成，已写回学生原会话" : "回答已生成；该问题无原会话，仅在本页可看",
+          writtenBack ? "success" : "info"
+        );
       } else {
         // 未命中：说明知识库还没覆盖，明确引导补资料，别让用户以为「生成完了但没答案」
         const msg = r.message || "知识库还没有收录相关内容，先添加资料再生成";
@@ -298,7 +357,7 @@ const AdminFeedbackView = (() => {
     if (!q) return;
     const ok = await Common.confirmDialog({
       title: "删除记录",
-      message: `将删除问题「${Common.escapeHtml(q.question)}」的记录，不可恢复。确认？`,
+      message: `将删除问题「${q.question}」的记录，不可恢复。确认？`,
       okText: "删除",
     });
     if (!ok) return;

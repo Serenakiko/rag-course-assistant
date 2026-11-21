@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -202,6 +202,14 @@ class UnansweredQuestion(Base):
     related_points: Mapped[str] = mapped_column(Text, default="[]")
     # 管理员补充资料后重新生成的回答；非空即视为已解决
     answer: Mapped[str] = mapped_column(Text, default="")
+    # 该未命中问题来自哪次会话/哪条学生消息（NULL=历史数据或无法回溯）：
+    # 管理员重新生成后，答案要写回这条消息所在会话，学生才能在原对话里看到
+    conversation_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    message_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("messages.id", ondelete="SET NULL"), nullable=True
+    )
     answered_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -277,6 +285,8 @@ class Message(Base):
     rejected: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # 学生对这条回答的评价："" 未评 / "up" 有帮助 / "down" 没帮助（质量反馈信号）
     feedback: Mapped[str] = mapped_column(String(8), default="", server_default="")
+    # 点「没帮助」时可填的原因（短文本），用于管理员定位差答/进入未命中队列
+    feedback_reason: Mapped[str] = mapped_column(Text, default="", server_default="")
     # 本轮结果：answered / rejected / empty_kb / failed / interrupted
     outcome: Mapped[str] = mapped_column(String(16), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(
@@ -330,3 +340,151 @@ class QuestionVector(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
     )
+
+
+class RevokedToken(Base):
+    """已登出的 JWT 的 jti 黑名单。
+
+    JWT 无状态，登出只删 Cookie 并不能让已泄露的 token 失效；这里记下 jti 到
+    过期时间，鉴权时命中即拒绝。过期条目在登出/登录时顺手清理。
+    """
+
+    __tablename__ = "revoked_tokens"
+
+    jti: Mapped[str] = mapped_column(String(64), primary_key=True)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
+class Semester(Base):
+    """学期：课程的归档单位（如「2026 秋季学期」）。"""
+
+    __tablename__ = "semesters"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    start_date: Mapped[str] = mapped_column(String(10), default="")  # YYYY-MM-DD
+    end_date: Mapped[str] = mapped_column(String(10), default="")
+    is_active: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
+class Course(Base):
+    """课程：一个学期下的一门课，可绑定一个知识库。"""
+
+    __tablename__ = "courses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(128), index=True)
+    semester_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("semesters.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # 绑定的知识库（同名课程靠这个字段显式关联，不再依赖名称字符串匹配）
+    knowledge_base_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("knowledge_bases.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    description: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
+class ClassGroup(Base):
+    """教学班：课程下的一次开课，学生通过成员表加入。"""
+
+    __tablename__ = "class_groups"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(64), index=True)
+    course_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("courses.id", ondelete="CASCADE"), index=True
+    )
+    teacher_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
+class ClassMember(Base):
+    """班级成员：唯一约束保证同一人不会重复入班。"""
+
+    __tablename__ = "class_members"
+    __table_args__ = (
+        UniqueConstraint("class_id", "user_id", name="uq_class_member"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    class_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("class_groups.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
+class Notification(Base):
+    """站内通知：管理员补答 / 反馈处理结果 / 手动运营消息。
+
+    每个用户只看自己的通知；read_at 为 NULL 表示未读，驱动顶部铃铛角标。
+    link 存前端路由（如 ``#/feedback``），点击通知时前端据此跳转。
+    """
+
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    # system（手动运营）/ answer_ready（补答完成）/ feedback_reply（反馈有回复）
+    kind: Mapped[str] = mapped_column(String(32), default="system", index=True)
+    title: Mapped[str] = mapped_column(String(200), default="")
+    body: Mapped[str] = mapped_column(Text, default="")
+    link: Mapped[str] = mapped_column(String(300), default="")
+    read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
+class ShareLink(Base):
+    """匿名只读分享链接：会话或知识库，带有效期。
+
+    只存目标，不存内容快照：读取时按 kind/target_id 现查，便于随内容更新，过期即失效。
+    token 由 secrets.token_urlsafe(32) 生成（43 字符），unique index 防碰撞。
+    """
+
+    __tablename__ = "share_links"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    kind: Mapped[str] = mapped_column(String(24), index=True)  # conversation / knowledge_base
+    target_id: Mapped[int] = mapped_column(Integer, index=True)
+    created_by: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    revoked: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+    creator: Mapped["User | None"] = relationship()

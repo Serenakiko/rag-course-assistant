@@ -28,6 +28,9 @@ def split_text(text: str) -> list[str]:
             " ",
             "",
         ],
-        keep_separator=False,
+        # keep_separator="end"：分隔符（句号/问号/换行）留在上一块末尾。
+        # 旧值 False 会把标点丢掉，切出来的「……的配置方法」直接接下一块，
+        # 既丢了语气也丢了句子边界，检索时同一个问题的不同切法对不上。
+        keep_separator="end",
     )
     return splitter.split_text(text)

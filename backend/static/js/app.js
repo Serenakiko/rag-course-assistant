@@ -49,26 +49,44 @@ const NotifyCenter = (() => {
       <button type="button" class="notify-btn" id="notify-btn" aria-label="通知" title="查看通知">
         ${BELL}<span class="notify-dot" id="notify-dot" style="display:none"></span>
       </button>`;
-    // 点击铃铛直达对应页面：管理员→问题反馈，学生→我的反馈
+    // 点击铃铛直达通知页（通知列表里每条再按 link 跳到对应业务页）
     document.getElementById("notify-btn").addEventListener("click", () => {
-      App.navigate(API.getUser()?.role === "admin" ? "unanswered" : "feedback");
+      // NotifyCenter 在 App 外层，必须走 App.navigate 才能进路由
+      App.navigate("notifications");
     });
     refresh();
-    pollTimer = setInterval(refresh, 30000);  // 每 30s 拉一次角标
+    startPolling();
+    // 标签页切到后台就停掉轮询，回来时立刻补一次再继续：
+    // 没人看的时候每 30s 打一次接口纯属浪费（还会在休眠唤醒后堆积请求）
+    document.addEventListener("visibilitychange", onVisibility);
+  }
+
+  const POLL_INTERVAL = 30000;
+
+  function startPolling() {
+    if (pollTimer) return;
+    pollTimer = setInterval(refresh, POLL_INTERVAL);
+  }
+
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  function onVisibility() {
+    if (document.hidden) {
+      stopPolling();
+    } else {
+      refresh();
+      startPolling();
+    }
   }
 
   async function refresh() {
     try {
-      const role = API.getUser()?.role;
-      if (role === "admin") {
-        // 管理员：待处理且尚未查看的反馈数（后端 unread 字段，全量口径）
-        const data = await API.request("GET", "/api/admin/unanswered?status=pending&limit=1");
-        unread = data.unread || 0;
-      } else {
-        // 学生：已解决但尚未查看的回答数（后端新增 unread 字段，全量口径）
-        const data = await API.request("GET", "/api/chat/unanswered/mine?limit=1");
-        unread = data.unread || 0;
-      }
+      // 角标口径 = 我的未读通知数（与铃铛点击进的通知页一致）。
+      // 待解答问题/我的提问的进度另在各自页面里看，不再混进角标。
+      const data = await API.request("GET", "/api/notifications?limit=1");
+      unread = data.unread || 0;
       renderDot();
     } catch { /* 静默失败，不打断页面 */ }
   }
@@ -85,7 +103,8 @@ const NotifyCenter = (() => {
   }
 
   function destroy() {
-    if (pollTimer) clearInterval(pollTimer);
+    stopPolling();
+    document.removeEventListener("visibilitychange", onVisibility);
   }
 
   return { init, refresh, destroy };
@@ -107,37 +126,44 @@ const App = (() => {
     trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
     unanswered: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>',
     user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+    export: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>',
     bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>',
   };
 
-  // 侧边栏按角色任务组织：学生看学习闭环，管理员看问答运营闭环。
+  // 侧边栏按角色任务组织：学生看学习闭环，管理员看运营闭环。
   // 个人中心统一放进底部账号区，不再重复占用导航项。
   const NAV = [
     { group: "", roles: ["student"], items: [
-      { key: "workbench", icon: ICON.home, label: "学习首页" },
+      { key: "workbench", icon: ICON.home, label: "首页" },
       { key: "chat", icon: ICON.chat, label: "智能问答" },
     ]},
     { group: "学习记录", roles: ["student"], items: [
-      { key: "history", icon: ICON.history, label: "全部会话" },
-      { key: "feedback", icon: ICON.unanswered, label: "答疑进度" },
+      { key: "notifications", icon: ICON.bell, label: "通知" },
+      { key: "feedback", icon: ICON.unanswered, label: "我的提问" },
+      { key: "history", icon: ICON.history, label: "历史会话" },
+      { key: "shares", icon: ICON.export, label: "分享管理" },
     ]},
     { group: "课程资料", roles: ["student"], items: [
-      { key: "knowledge", icon: ICON.knowledge, label: "课程知识库" },
-      { key: "documents", icon: ICON.documents, label: "我的资料" },
+      { key: "courses", icon: ICON.users, label: "我的课程" },
+      { key: "knowledge", icon: ICON.knowledge, label: "课程资料" },
     ]},
     { group: "", roles: ["admin"], items: [
-      { key: "overview", icon: ICON.overview, label: "运营概览" },
+      { key: "overview", icon: ICON.overview, label: "数据概览" },
     ]},
-    { group: "问答运营", roles: ["admin"], items: [
-      { key: "unanswered", icon: ICON.unanswered, label: "未命中问题" },
-      { key: "history", icon: ICON.history, label: "会话审阅" },
-      { key: "chat", icon: ICON.chat, label: "问答自测" },
+    { group: "答疑运营", roles: ["admin"], items: [
+      { key: "notifications", icon: ICON.bell, label: "通知" },
+      { key: "unanswered", icon: ICON.unanswered, label: "待解答问题" },
+      { key: "history", icon: ICON.history, label: "会话记录" },
+      { key: "chat", icon: ICON.chat, label: "问答测试" },
     ]},
     { group: "内容管理", roles: ["admin"], items: [
-      { key: "content", icon: ICON.knowledge, label: "知识库与文档" },
+      { key: "content", icon: ICON.knowledge, label: "知识库管理" },
+      { key: "search-debug", icon: ICON.unanswered, label: "检索测试" },
+      { key: "shares", icon: ICON.export, label: "分享管理" },
       { key: "recycle", icon: ICON.trash, label: "回收站" },
     ]},
     { group: "系统管理", roles: ["admin"], items: [
+      { key: "courses", icon: ICON.users, label: "课程与班级" },
       { key: "users", icon: ICON.users, label: "用户管理" },
     ]},
   ];
@@ -149,21 +175,30 @@ const App = (() => {
 
   const TITLES = {
     student: {
-      workbench: "学习首页",
-      knowledge: "课程知识库",
+      workbench: "首页",
+      courses: "我的课程",
+      notifications: "通知",
+      export: "导出与分享",
+      shares: "分享管理",
+      knowledge: "课程资料",
       documents: "我的资料",
-      history: "全部会话",
-      feedback: "答疑进度",
+      history: "历史会话",
+      feedback: "我的提问",
       chat: "智能问答",
       settings: "个人中心",
     },
     admin: {
-      overview: "运营概览",
-      unanswered: "未命中问题",
-      feedback: "未命中问题",
-      history: "会话审阅",
-      chat: "问答自测",
-      content: "知识库与文档",
+      courses: "课程与班级",
+      notifications: "通知",
+      export: "导出与分享",
+      shares: "分享管理",
+      "search-debug": "检索测试",
+      overview: "数据概览",
+      unanswered: "待解答问题",
+      feedback: "待解答问题",
+      history: "会话记录",
+      chat: "问答测试",
+      content: "知识库管理",
       recycle: "回收站",
       users: "用户管理",
       settings: "个人中心",
@@ -173,9 +208,74 @@ const App = (() => {
   };
 
   let currentView = null;
+  let currentParams = new URLSearchParams();  // 当前视图的地址栏参数（筛选/分页）
+  let hashLock = false;   // 程序自己改 hash 时，忽略随之而来的 hashchange
 
-  function init() {
-    if (!API.getToken() || !API.getUser()) {
+  /* ---------- hash 路由：#/view?k=v ----------
+   * 视图内的筛选、分页要能进地址栏：刷新回到同一屏、复制链接给别人看到同一筛选项。
+   * 约定只放短参数（q / page / size / kb / course 之类），不放正文。 */
+  function parseHash(raw) {
+    const hash = raw || "";
+    const cut = hash.indexOf("?");
+    const path = cut >= 0 ? hash.slice(0, cut) : hash;
+    const m = /^#\/?([a-z][a-z-]*)/i.exec(path);
+    return {
+      key: m ? m[1].toLowerCase() : "",
+      params: new URLSearchParams(cut >= 0 ? hash.slice(cut + 1) : ""),
+    };
+  }
+
+  function viewFromHash() {
+    return parseHash(window.location.hash).key;
+  }
+
+  function syncHash(key, replace, params) {
+    if (params) currentParams = params;
+    const qs = currentParams ? currentParams.toString() : "";
+    const target = "#/" + key + (qs ? "?" + qs : "");
+    if (window.location.hash === target) return;
+    hashLock = true;
+    try {
+      if (replace) window.history.replaceState(null, "", target);
+      else window.location.hash = target;
+    } finally {
+      setTimeout(() => { hashLock = false; }, 0);
+    }
+  }
+
+  /* 视图内筛选/翻页变化时调用：只改地址栏，不重新渲染 */
+  function updateQuery(patch) {
+    const params = new URLSearchParams(currentParams ? currentParams.toString() : "");
+    Object.entries(patch || {}).forEach(([k, v]) => {
+      if (v === undefined || v === null || v === "") params.delete(k);
+      else params.set(k, String(v));
+    });
+    currentParams = params;
+    if (!currentView) return;
+    const qs = params.toString();
+    hashLock = true;
+    try {
+      window.history.replaceState(null, "", "#/" + currentView + (qs ? "?" + qs : ""));
+    } finally {
+      setTimeout(() => { hashLock = false; }, 0);
+    }
+  }
+
+  async function init() {
+    // 刷新后内存里的会话信息为空，用 HttpOnly Cookie 调 /api/auth/me 恢复
+    let me;
+    try {
+      me = await API.ensureSession();
+    } catch (err) {
+      // 后端连不上不等于没登录：留在应用页给一次重试，别把人踢回登录页反复输密码
+      Common.alertDialog({
+        title: "无法连接后端服务",
+        message: `${(err && err.message) || "请确认后端已启动"}。恢复后点「重试」重新加载。`,
+        okText: "重试",
+      }).then(() => window.location.reload());
+      return;
+    }
+    if (!me) {
       API.goLogin();
       return;
     }
@@ -187,55 +287,57 @@ const App = (() => {
     ThemeCenter.init();
     const mustChangePassword = !!API.getUser().must_change_password;
     if (!mustChangePassword) NotifyCenter.init();
-    // 退出登录：点一下弹确认框；长按 0.65 秒直接退出，不弹任何提示
+    // 退出登录：点一下弹确认框（没有长按直接退出这种无确认入口）
     const logoutBtn = document.getElementById("logout-btn");
-    function doLogout() {
-      API.clearSession();
+    async function doLogout() {
+      // 先让后端删 HttpOnly Cookie，再清内存并回登录页
+      await API.logout();
       window.location.replace("/static/index.html");
     }
-    let holdTimer = null;
-    let held = false;
-    const HOLD_MS = 650;
-
-    logoutBtn.addEventListener("pointerdown", () => {
-      held = false;
-      logoutBtn.classList.add("holding");
-      holdTimer = setTimeout(() => {
-        held = true;
-        logoutBtn.classList.remove("holding");
-        doLogout();
-      }, HOLD_MS);
-    });
-    const cancelHold = () => {
-      clearTimeout(holdTimer);
-      logoutBtn.classList.remove("holding");
-    };
-    logoutBtn.addEventListener("pointerup", cancelHold);
-    logoutBtn.addEventListener("pointerleave", cancelHold);
-    logoutBtn.addEventListener("pointercancel", cancelHold);
-    logoutBtn.addEventListener("blur", cancelHold);
 
     logoutBtn.addEventListener("click", async () => {
-      if (held) { held = false; return; }  // 长按已经退出了，忽略随后的 click
       const ok = await Common.confirmDialog({
         title: "退出登录",
         message: "退出后需重新登录才能继续使用，确定退出吗？",
         okText: "退出登录",
-        icon: "logout",
-        danger: false,  // 退出不是破坏性操作，按钮跟随图标用主色
+        danger: false,  // 退出不是破坏性操作，按钮不用红色
       });
       if (!ok) return;
-      doLogout();
+      await doLogout();
     });
     const profileBtn = document.getElementById("user-profile-btn");
     if (profileBtn) {
       profileBtn.addEventListener("click", () => navigate("settings"));
     }
-    navigate(
-      mustChangePassword
-        ? "settings"
-        : (API.getUser().role === "admin" ? "overview" : "workbench")
-    );
+
+    // 路由：地址栏 #/view 是唯一真相，刷新/分享都落在同一页
+    const role = API.getUser().role;
+    const allowed = TITLES[role] || {};
+    const fallback = role === "admin" ? "overview" : "workbench";
+    const parsed = parseHash(window.location.hash);
+    const fromHash = parsed.key;
+    const initialKey = mustChangePassword ? "settings" : (allowed[fromHash] ? fromHash : fallback);
+    currentParams = parsed.params;
+    navigate(initialKey, { fromHash: true, query: parsed.params });
+    syncHash(initialKey, true, currentParams);
+    window.addEventListener("hashchange", () => {
+      if (hashLock) return;
+      const parsed = parseHash(window.location.hash);
+      const key = parsed.key;
+      if (!key) return;
+      if (key === currentView) {
+        // 同一页内参数变了（浏览器前进/后退）：按新筛选条件重渲染
+        if (parsed.params.toString() !== (currentParams ? currentParams.toString() : "")) {
+          currentParams = parsed.params;
+          navigate(key, { fromHash: true, query: parsed.params });
+        }
+        return;
+      }
+      if (!(TITLES[API.getUser().role] || {})[key]) return;
+      if (key === "settings" && currentView === "settings") return;
+      currentParams = parsed.params;
+      navigate(key, { fromHash: true, query: parsed.params });
+    });
     if (mustChangePassword) {
       setTimeout(() => ProfileView.openRequiredPasswordChange(), 0);
     }
@@ -269,8 +371,9 @@ const App = (() => {
     nav.innerHTML = NAV.map((group) => {
       const items = group.items.filter((it) => !group.roles || group.roles.includes(role));
       if (!items.length) return "";
-      const head = group.group ? `<div class="nav-group-title">${group.group}</div>` : "";
-      return head + items.map(navItemHtml).join("");
+      if (!group.group) return items.map(navItemHtml).join("");
+      return `<div class="nav-group-title">${Common.escapeHtml(group.group)}</div>`
+        + items.map(navItemHtml).join("");
     }).join("");
 
     document.querySelectorAll(".nav-item").forEach((btn) => {
@@ -308,6 +411,11 @@ const App = (() => {
 
     switch (key) {
       case "workbench": WorkbenchView.render(container); break;
+      case "courses": CoursesView.render(container); break;
+      case "notifications": NotificationsView.render(container); break;
+      case "export": ExportShareView.render(container); break;
+      case "shares": SharesView.render(container); break;
+      case "search-debug": SearchDebugView.render(container); break;
       case "knowledge": KnowledgeView.render(container, opts); break;
       case "chat": ChatView.render(container, opts); break;
       case "settings": ProfileView.render(container); break;
@@ -332,11 +440,17 @@ const App = (() => {
         break;
       case "history":
         if (API.getUser().role === "admin") AdminView.render(container, "conversations", opts);
-        else HistoryView.render(container);
+        else HistoryView.render(container, opts);
         break;
       default: container.innerHTML = `<div class="empty-state"><p>页面不存在</p></div>`;
     }
     currentView = key;
+    // 记录到地址栏：刷新回到同一页，链接可直接分享
+    if (!opts || !opts.fromHash) {
+      // 点导航进新页面：清掉上一页的筛选参数
+      currentParams = new URLSearchParams();
+      syncHash(activeKey, false, currentParams);
+    }
     // 切页后刷新通知角标（读反馈/处理问题后未读数会变）
     NotifyCenter.refresh();
   }
@@ -392,7 +506,7 @@ const App = (() => {
     syncAccessibility();
   }
 
-  return { init, refreshUserInfo, renderNav, navigate };
+  return { init, refreshUserInfo, renderNav, navigate, updateQuery };
 })();
 
 document.addEventListener("DOMContentLoaded", () => App.init());
