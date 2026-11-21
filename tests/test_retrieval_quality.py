@@ -161,6 +161,8 @@ def test_long_knowledge_point_is_split_into_chunked_vectors(monkeypatch):
             captured.extend(zip(ids, docs, strict=False))
 
     monkeypatch.setattr(vector_store, "get_vector_store", lambda: FakeStore())
+    # 课程 → 向量库 key 的查表要连库，这里只验切块逻辑，直接给个固定 key
+    monkeypatch.setattr(vector_store, "_knowledge_base_vector_key", lambda _course: "kb-test")
     monkeypatch.setattr(vector_store, "_next_version", lambda *_args: 3)
     monkeypatch.setattr(vector_store, "_delete_point_versions", lambda *_args, **_kwargs: True)
 

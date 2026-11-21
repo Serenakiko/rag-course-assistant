@@ -373,10 +373,15 @@ def test_embedding_model_change_is_noop_when_model_unchanged(monkeypatch):
     assert resets == []
 
 
-def test_embedding_marker_recorded_on_first_run(monkeypatch):
-    """全新安装（没有模型标记）只记标记，不触发重建。"""
+def test_embedding_marker_recorded_on_first_run(env, monkeypatch):
+    """全新安装（没有模型标记）只记标记，不触发重建。
+
+    函数要查一遍 ready 文档数才能判断「是不是真全新」，
+    所以必须给它一张建好表的库，否则会连到 data/app.db 上。
+    """
     from backend.services import vector_reconcile, vector_store
 
+    monkeypatch.setattr(vector_reconcile, "SessionLocal", env.factory)
     recorded: list[str | None] = []
     monkeypatch.setattr(vector_store, "recorded_embedding_model", lambda: None)
     monkeypatch.setattr(
